@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="th" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antigravity — User Settings design preview</title>
+<style>
+  /* Same tokens as src/index.css, so this preview is the real palette. */
+  :root {
+    --base:#1e1f22; --sunken:#111214; --surface:#2b2d31; --canvas:#313338;
+    --active:#404249; --hover:#35373c; --divider:#3f4147; --control:#4e5058;
+    --text:#dbdee1; --text2:#b5bac1; --text3:#949ba4; --text4:#80848e;
+    --strong:#ffffff; --brand:#5865f2; --success:#23a55a; --danger:#f23f43;
+    --idle:#f0b232; --base3:#090a0c; --mention:#c9cdfb;
+  }
+  [data-theme="light"] {
+    --base:#e3e5e8; --sunken:#f2f3f5; --surface:#f2f3f5; --canvas:#ffffff;
+    --active:#d4d7dc; --hover:#e0e1e5; --divider:#d3d5d8; --control:#b5bac1;
+    --text:#2e3338; --text2:#4e5058; --text3:#5c5e66; --text4:#6d6f78;
+    --strong:#060607; --base3:#e3e5e8;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; font:14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+    background:var(--canvas); color:var(--text);
+  }
+  .surface { position:fixed; inset:0; display:flex; }
+
+  /* --- sidebar half ------------------------------------------------------- */
+  .rail { flex:1; display:flex; justify-content:flex-end; background:var(--surface); overflow-y:auto; }
+  .rail-inner { width:218px; flex:none; padding:60px 8px 0 20px; display:flex; flex-direction:column; min-height:100%; }
+  .search { position:relative; margin-bottom:16px; }
+  .search input {
+    width:100%; background:var(--sunken); border:1px solid transparent; border-radius:4px;
+    padding:6px 8px 6px 30px; color:var(--strong); font-size:14px; outline:none;
+  }
+  .search input:focus { border-color:var(--brand); }
+  .search svg { position:absolute; left:9px; top:50%; transform:translateY(-50%); color:var(--text3); }
+  .group-title {
+    font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.02em;
+    color:var(--text2); padding:0 10px; margin:0 0 4px;
+  }
+  .nav-item {
+    display:flex; align-items:center; gap:12px; width:100%; padding:6px 10px; margin-bottom:2px;
+    border:0; border-radius:4px; background:none; color:var(--text2);
+    font:500 16px/1.3 inherit; text-align:left; cursor:pointer;
+  }
+  .nav-item:hover { background:color-mix(in srgb, var(--hover) 60%, transparent); color:var(--strong); }
+  .nav-item[aria-current] { background:var(--active); color:var(--strong); }
+  .nav-item.danger:hover { background:var(--danger); color:#fff; }
+  .rule { height:1px; background:var(--divider); margin:16px 0; }
+  .version { font-size:11px; color:var(--text4); padding:0 10px 16px; margin-top:24px; }
+
+  /* --- content half -------------------------------------------------------- */
+  .content { flex:1; display:flex; justify-content:flex-start; overflow-y:auto; position:relative; }
+  .page { width:100%; max-width:740px; min-width:0; padding:60px 8px 60px 40px; }
+  h2.page-title { font-size:20px; font-weight:600; color:var(--strong); margin:0; line-height:1.2; }
+  .lead { margin:6px 0 0; font-size:14px; color:var(--text2); }
+  h3.section {
+    font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.02em;
+    color:var(--text2); margin:24px 0 8px;
+  }
+  .divider { height:1px; background:var(--divider); margin:24px 0; }
+
+  .row { display:flex; align-items:center; justify-content:space-between; gap:24px;
+         padding:16px 0; border-bottom:1px solid var(--divider); }
+  .row:last-child { border-bottom:0; }
+  .row-label { font-size:16px; font-weight:500; color:var(--strong); display:block; line-height:1.35; }
+  .row-hint  { font-size:14px; color:var(--text2); display:block; margin-top:4px; }
+
+  /* toggle */
+  .toggle { position:relative; width:40px; height:24px; border:0; border-radius:999px;
+            background:var(--control); cursor:pointer; flex:none; padding:0; }
+  .toggle[aria-checked="true"] { background:var(--success); }
+  .knob { position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%;
+          background:#fff; display:flex; align-items:center; justify-content:center;
+          transition:transform .15s; }
+  .toggle[aria-checked="true"] .knob { transform:translateX(16px); }
+  .knob svg { width:12px; height:12px; }
+
+  /* radio list */
+  .radio { display:flex; align-items:flex-start; gap:12px; width:100%; text-align:left;
+           padding:12px 16px; margin-bottom:8px; border-radius:8px; cursor:pointer;
+           border:1px solid var(--divider); background:var(--surface); color:inherit; font:inherit; }
+  .radio:hover { border-color:var(--control); }
+  .radio.on { border-color:var(--brand); background:color-mix(in srgb, var(--brand) 10%, transparent); }
+  .dot { width:20px; height:20px; border-radius:50%; border:2px solid var(--control);
+         display:flex; align-items:center; justify-content:center; flex:none; margin-top:2px; }
+  .radio.on .dot { border-color:var(--brand); }
+  .radio.on .dot::after { content:""; width:10px; height:10px; border-radius:50%; background:var(--brand); }
+  .radio b { display:block; font-size:14px; font-weight:500; color:var(--strong); }
+  .radio small { display:block; font-size:12px; color:var(--text2); margin-top:2px; }
+
+  /* slider */
+  .slider-head { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px; }
+  .slider-head span:first-child { font-size:16px; font-weight:500; color:var(--strong); }
+  .slider-head span:last-child  { font-size:14px; font-weight:600; color:var(--text2); font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:var(--brand); height:20px; }
+  .marks { display:flex; justify-content:space-between; font-size:11px; color:var(--text4); margin-top:4px; }
+
+  /* theme swatches */
+  .themes { display:flex; flex-wrap:wrap; gap:12px; }
+  .theme { width:104px; border:2px solid var(--divider); border-radius:8px; overflow:hidden;
+           background:none; padding:0; cursor:pointer; }
+  .theme.on { border-color:var(--brand); }
+  .theme .sw { display:block; height:56px; display:flex; align-items:center; justify-content:center; }
+  .theme .nm { display:block; background:var(--surface); padding:8px; font-size:12px;
+               font-weight:600; color:var(--strong); }
+  .tick { width:24px; height:24px; border-radius:50%; background:var(--brand);
+          display:flex; align-items:center; justify-content:center; }
+
+  /* ESC */
+  .esc { position:sticky; top:60px; flex:none; padding:0 24px 0 8px; }
+  .esc button { background:none; border:0; cursor:pointer; display:flex; flex-direction:column;
+                align-items:center; gap:4px; width:36px; padding:0; }
+  .esc .circle { width:36px; height:36px; border-radius:50%; border:2px solid var(--text3);
+                 color:var(--text3); display:flex; align-items:center; justify-content:center; }
+  .esc button:hover .circle { border-color:var(--strong); color:var(--strong); background:var(--hover); }
+  .esc span.lbl { font-size:11px; font-weight:700; color:var(--text3); }
+  .esc button:hover span.lbl { color:var(--strong); }
+
+  /* save bar */
+  .savebar { position:sticky; bottom:16px; margin-top:32px; display:flex; align-items:center;
+             justify-content:space-between; gap:16px; background:var(--base3);
+             border-radius:8px; padding:12px 16px; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+  .savebar span { font-size:14px; font-weight:500; color:var(--strong); }
+  .btn { border:0; border-radius:8px; padding:8px 16px; font:500 14px inherit; cursor:pointer; }
+  .btn.green { background:var(--success); color:#fff; }
+  .btn.link  { background:none; color:var(--strong); text-decoration:underline; }
+
+  .note { border-left:4px solid var(--brand); background:color-mix(in srgb, var(--brand) 5%, transparent);
+          border-radius:8px; padding:12px 16px; font-size:14px; color:var(--text2); }
+
+  .hidden { display:none; }
+  .theme-switch { position:fixed; right:16px; bottom:16px; z-index:10; background:var(--surface);
+                  border:1px solid var(--divider); color:var(--text2); border-radius:8px;
+                  padding:8px 14px; font:600 12px inherit; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div class="surface">
+  <!-- ================= sidebar ================= -->
+  <div class="rail">
+    <div class="rail-inner">
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="q" type="search" placeholder="ค้นหาการตั้งค่า" aria-label="ค้นหาการตั้งค่า">
+      </div>
+
+      <nav id="nav" style="flex:1">
+        <h3 class="group-title">การตั้งค่าผู้ใช้</h3>
+        <button class="nav-item" data-page="profile" data-kw="โปรไฟล์ profile avatar">👤 โปรไฟล์</button>
+        <button class="nav-item" data-page="none" data-kw="บัญชี account security">🛡️ บัญชีและความปลอดภัย</button>
+        <button class="nav-item" data-page="privacy" data-kw="ความเป็นส่วนตัว privacy dm">🔒 ความเป็นส่วนตัวและความปลอดภัย</button>
+        <button class="nav-item" data-page="none" data-kw="กิจกรรม activity">📶 ความเป็นส่วนตัวของกิจกรรม</button>
+
+        <div class="rule"></div>
+        <h3 class="group-title">การตั้งค่าแอป</h3>
+        <button class="nav-item" aria-current="page" data-page="appearance" data-kw="ธีม appearance theme">🎨 ธีมและการแสดงผล</button>
+        <button class="nav-item" data-page="none" data-kw="การเข้าถึง accessibility">♿ การเข้าถึง</button>
+        <button class="nav-item" data-page="voice" data-kw="เสียง ไมค์ voice mic camera">🔊 เสียงและวิดีโอ</button>
+        <button class="nav-item" data-page="none" data-kw="แจ้งเตือน notifications">🔔 การแจ้งเตือน</button>
+        <button class="nav-item" data-page="none" data-kw="ปุ่มลัด keybinds">⌨️ ปุ่มลัด</button>
+        <button class="nav-item" data-page="none" data-kw="ข้อความ รูปภาพ text images">💬 ข้อความและรูปภาพ</button>
+        <button class="nav-item" data-page="none" data-kw="สตรีมเมอร์ streamer">📡 โหมดสตรีมเมอร์</button>
+
+        <div class="rule"></div>
+        <button class="nav-item danger">🚪 ออกจากระบบ</button>
+      </nav>
+
+      <p class="version">Antigravity 1.0.0</p>
+    </div>
+  </div>
+
+  <!-- ================= content ================= -->
+  <div class="content">
+    <div class="page">
+
+      <!-- ---------- Appearance ---------- -->
+      <section id="page-appearance">
+        <h2 class="page-title">ธีมและการแสดงผล</h2>
+        <p class="lead">หน้าตาของแอป ทุกอย่างที่ปรับจะเห็นผลทันที</p>
+
+        <h3 class="section">ธีม</h3>
+        <div class="themes">
+          <button class="theme" onclick="setTheme('light',this)"><span class="sw" style="background:#ffffff"></span><span class="nm">☀️ สว่าง</span></button>
+          <button class="theme" onclick="setTheme('ash',this)"><span class="sw" style="background:#3b3d42"></span><span class="nm">◐ เถ้า</span></button>
+          <button class="theme on" onclick="setTheme('dark',this)"><span class="sw" style="background:#313338"><span class="tick">✓</span></span><span class="nm">🌙 มืด</span></button>
+          <button class="theme" onclick="setTheme('onyx',this)"><span class="sw" style="background:#111214"></span><span class="nm">● โอนิกซ์</span></button>
+          <button class="theme" onclick="setTheme('dark',this)"><span class="sw" style="background:linear-gradient(135deg,#fff 0 50%,#313338 50% 100%)"></span><span class="nm">🖥️ ตามระบบ</span></button>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="section">ความหนาแน่นของหน้าจอ</h3>
+        <p class="lead" style="margin:0 0 12px">ระยะห่างของส่วนประกอบรอบ ๆ แอป ไม่มีผลกับระยะห่างของข้อความ</p>
+        <div style="display:inline-flex;gap:4px;background:var(--sunken);padding:4px;border-radius:8px">
+          <button class="btn" style="background:none;color:var(--text2)">แน่น</button>
+          <button class="btn" style="background:var(--active);color:var(--strong)">ปกติ</button>
+          <button class="btn" style="background:none;color:var(--text2)">โปร่ง</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="section">การแสดงข้อความ</h3>
+        <button class="radio on"><span class="dot"></span><span><b>สบายตา</b><small>แสดงรูปโปรไฟล์ ข้อความโปร่งกว่า</small></span></button>
+        <button class="radio"><span class="dot"></span><span><b>กระชับ</b><small>ข้อความต่อบรรทัด เห็นได้มากกว่าในหน้าจอเดียว</small></span></button>
+
+        <h3 class="section">การปรับขนาด</h3>
+        <div style="padding:16px 0;border-bottom:1px solid var(--divider)">
+          <div class="slider-head"><span>ระดับการซูม</span><span>100%</span></div>
+          <p class="row-hint" style="margin:0 0 12px">ขยายทุกอย่างรวมถึงตัวอักษร</p>
+          <input type="range" min="50" max="200" value="100" step="10" aria-label="ระดับการซูม">
+          <div class="marks"><span>50%</span><span>100%</span><span>150%</span><span>200%</span></div>
+        </div>
+        <div style="padding:16px 0">
+          <div class="slider-head"><span>ขนาดตัวอักษรในแชท</span><span>100%</span></div>
+          <input type="range" min="80" max="160" value="100" step="5" aria-label="ขนาดตัวอักษรในแชท">
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="row">
+          <span><span class="row-label">แสดงปุ่มส่ง</span></span>
+          <button class="toggle" aria-checked="true" role="switch" aria-label="แสดงปุ่มส่ง" onclick="tog(this)"><span class="knob">✓</span></button>
+        </div>
+        <div class="row">
+          <span><span class="row-label">ซิงก์ข้ามอุปกรณ์</span>
+                <span class="row-hint">ไมค์และลำโพงที่เลือกไว้จะอยู่กับเครื่องนี้เสมอ</span></span>
+          <button class="toggle" aria-checked="true" role="switch" aria-label="ซิงก์ข้ามอุปกรณ์" onclick="tog(this)"><span class="knob">✓</span></button>
+        </div>
+      </section>
+
+      <!-- ---------- Voice ---------- -->
+      <section id="page-voice" class="hidden">
+        <h2 class="page-title">เสียงและวิดีโอ</h2>
+        <p class="lead">ไมค์ ลำโพง และกล้อง การทดสอบด้านล่างใช้เส้นทางเสียงเดียวกับตอนคุยจริง</p>
+
+        <h3 class="section">อุปกรณ์</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <label style="display:block"><span class="group-title" style="padding:0;display:block">อุปกรณ์รับเสียง</span>
+            <select style="width:100%;background:var(--sunken);border:1px solid transparent;border-radius:8px;padding:10px 12px;color:var(--strong);font:inherit">
+              <option>ค่าเริ่มต้นของระบบ</option></select></label>
+          <label style="display:block"><span class="group-title" style="padding:0;display:block">อุปกรณ์ส่งเสียง</span>
+            <select style="width:100%;background:var(--sunken);border:1px solid transparent;border-radius:8px;padding:10px 12px;color:var(--strong);font:inherit">
+              <option>ค่าเริ่มต้นของระบบ</option></select></label>
+        </div>
+        <div style="padding:16px 0;border-bottom:1px solid var(--divider)">
+          <div class="slider-head"><span>ระดับเสียงเข้า</span><span>100%</span></div>
+          <input type="range" min="0" max="200" value="100" step="5" aria-label="ระดับเสียงเข้า">
+        </div>
+
+        <h3 class="section">ทดสอบไมค์</h3>
+        <div style="border:1px solid var(--divider);background:var(--surface);border-radius:8px;padding:16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <span style="font-size:14px;font-weight:500;color:var(--strong)">กำลังฟังเสียงจากไมค์</span>
+            <button class="btn" style="background:var(--danger);color:#fff">🎙 หยุดทดสอบ</button>
+          </div>
+          <div style="position:relative;height:12px;border-radius:999px;background:var(--sunken);overflow:hidden">
+            <div style="height:100%;width:46%;background:var(--success);border-radius:999px"></div>
+            <span style="position:absolute;inset-block:0;left:32%;width:2px;background:var(--danger)"></span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="section">โหมดรับเสียง</h3>
+        <button class="radio on"><span class="dot"></span><span><b>ตรวจจับเสียงพูด</b><small>ส่งเสียงออกทุกครั้งที่คุณพูด</small></span></button>
+        <button class="radio"><span class="dot"></span><span><b>กดเพื่อพูด</b><small>ต้องกดค้าง ไม่ใช่กดครั้งเดียว</small></span></button>
+
+        <div style="margin-top:16px;border-left:2px solid var(--divider);padding-left:16px">
+          <div class="row">
+            <span><span class="row-label">กำหนดความไวอัตโนมัติ</span>
+                  <span class="row-hint">ปรับตามเสียงรบกวนรอบตัวแทนการตั้งค่าคงที่</span></span>
+            <button class="toggle" aria-checked="true" role="switch" aria-label="กำหนดความไวอัตโนมัติ" onclick="tog(this)"><span class="knob">✓</span></button>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="section">วิดีโอ</h3>
+        <div style="aspect-ratio:16/9;background:#000;border-radius:12px;display:flex;align-items:center;
+                    justify-content:center;flex-direction:column;gap:12px;color:var(--text3);position:relative">
+          <span style="font-size:32px">📷</span><span style="font-size:14px">กล้องปิดอยู่</span>
+          <button class="btn" style="position:absolute;bottom:12px;background:var(--brand);color:#fff">ทดสอบกล้อง</button>
+        </div>
+        <div class="row" style="margin-top:16px">
+          <span><span class="row-label">เบลอภาพกล้อง</span>
+                <span class="row-hint">เบลอทั้งภาพก่อนส่งออกไป ทำงานแบบออฟไลน์ ไม่ต้องโหลดโมเดล</span></span>
+          <button class="toggle" aria-checked="false" role="switch" aria-label="เบลอภาพกล้อง" onclick="tog(this)"><span class="knob">✕</span></button>
+        </div>
+      </section>
+
+      <!-- ---------- Privacy ---------- -->
+      <section id="page-privacy" class="hidden">
+        <h2 class="page-title">ความเป็นส่วนตัวและความปลอดภัย</h2>
+        <p class="lead">ใครติดต่อคุณได้ และอะไรจะถูกพักไว้ก่อนจนกว่าคุณจะเปิดดูเอง</p>
+        <div style="height:24px"></div>
+        <div class="note">กฎเรื่องข้อความส่วนตัวและคำขอเป็นเพื่อนบังคับใช้ที่เซิร์ฟเวอร์ ต่อให้ไคลเอนต์ถูกแก้ก็ยังมีผล</div>
+
+        <div class="divider"></div>
+        <h3 class="section">ใครส่งข้อความส่วนตัวถึงคุณได้</h3>
+        <p class="lead" style="margin:0 0 12px">เพื่อนส่งได้เสมอ</p>
+        <button class="radio on"><span class="dot"></span><span><b>ทุกคน</b><small>ทุกคนที่อยู่เซิร์ฟเวอร์เดียวกับคุณ</small></span></button>
+        <button class="radio"><span class="dot"></span><span><b>เฉพาะเพื่อน</b><small>คนอื่นจะถูกเซิร์ฟเวอร์ปฏิเสธ</small></span></button>
+
+        <div class="divider"></div>
+        <h3 class="section">อื่น ๆ</h3>
+        <div class="row">
+          <span><span class="row-label">การเก็บสถิติการใช้งาน</span>
+                <span class="row-hint">ปิดอยู่ และไม่มีการเก็บอะไรเลย — เซิร์ฟเวอร์นี้ไม่มีปลายทางให้ส่ง</span></span>
+          <button class="toggle" aria-checked="false" role="switch" aria-label="การเก็บสถิติ" onclick="tog(this)"><span class="knob">✕</span></button>
+        </div>
+      </section>
+
+      <!-- ---------- Profile (save bar demo) ---------- -->
+      <section id="page-profile" class="hidden">
+        <h2 class="page-title">โปรไฟล์</h2>
+        <p class="lead">นี่คือสิ่งที่คนอื่นเห็นเมื่อกดที่ชื่อของคุณ</p>
+
+        <div style="display:grid;grid-template-columns:1fr 260px;gap:32px;margin-top:24px">
+          <div>
+            <label style="display:block;margin-bottom:16px">
+              <span class="group-title" style="padding:0;display:block">ชื่อที่แสดง</span>
+              <input value="Alex (You)" style="width:100%;background:var(--sunken);border:1px solid transparent;
+                     border-radius:8px;padding:10px 12px;color:var(--strong);font:inherit">
+            </label>
+            <label style="display:block">
+              <span class="group-title" style="padding:0;display:block">เกี่ยวกับฉัน</span>
+              <textarea rows="4" style="width:100%;background:var(--sunken);border:1px solid transparent;
+                        border-radius:8px;padding:10px 12px;color:var(--strong);font:inherit;resize:none">Full-stack Developer &amp; Gamer 🚀</textarea>
+              <span style="display:block;text-align:right;font-size:11px;color:var(--text4)">31/190</span>
+            </label>
+          </div>
+          <div>
+            <h3 class="section" style="margin-top:0">ตัวอย่าง</h3>
+            <div style="border:1px solid var(--divider);background:var(--base);border-radius:12px;overflow:hidden;
+                        box-shadow:0 8px 24px rgba(0,0,0,.3)">
+              <div style="height:60px;background:#5865f2"></div>
+              <div style="padding:0 16px 16px">
+                <div style="width:72px;height:72px;border-radius:50%;background:#7289da;border:6px solid var(--base);
+                            position:relative;top:-32px;margin-bottom:-28px"></div>
+                <h4 style="margin:0;font-size:16px;color:var(--strong)">Alex (You)</h4>
+                <p style="margin:0;font-size:12px;color:var(--text3)">@AlexPro</p>
+                <p style="margin:12px 0 0;padding-top:12px;border-top:1px solid var(--divider);
+                          font-size:12px;color:var(--text)">Full-stack Developer &amp; Gamer 🚀</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="savebar">
+          <span>ระวัง — คุณยังไม่ได้บันทึกการเปลี่ยนแปลง!</span>
+          <div style="display:flex;gap:12px;align-items:center">
+            <button class="btn link">รีเซ็ต</button>
+            <button class="btn green">บันทึก</button>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <div class="esc">
+      <button aria-label="ปิด">
+        <span class="circle">✕</span>
+        <span class="lbl">ESC</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<button class="theme-switch" onclick="flip()">สลับ Light / Dark</button>
+
+<script>
+  function tog(el){
+    const on = el.getAttribute('aria-checked') === 'true';
+    el.setAttribute('aria-checked', String(!on));
+    el.querySelector('.knob').textContent = on ? '✕' : '✓';
+  }
+  function setTheme(name, el){
+    document.querySelectorAll('.theme').forEach(t => t.classList.remove('on'));
+    el.classList.add('on');
+    document.documentElement.dataset.theme = name === 'light' ? 'light' : 'dark';
+  }
+  function flip(){
+    const root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+  }
+  // Nav switching
+  document.querySelectorAll('.nav-item[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const page = btn.dataset.page;
+      if (page === 'none') return;
+      document.querySelectorAll('.nav-item').forEach(b => b.removeAttribute('aria-current'));
+      btn.setAttribute('aria-current','page');
+      document.querySelectorAll('.page > section').forEach(s => s.classList.add('hidden'));
+      document.getElementById('page-' + page).classList.remove('hidden');
+    });
+  });
+  // Search filters the nav, exactly as the React version does
+  document.getElementById('q').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('.nav-item[data-kw]').forEach(btn => {
+      const hit = !q || (btn.textContent + ' ' + btn.dataset.kw).toLowerCase().includes(q);
+      btn.style.display = hit ? '' : 'none';
+    });
+  });
+</script>
+</body>
+</html>

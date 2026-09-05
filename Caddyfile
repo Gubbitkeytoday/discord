@@ -1,0 +1,59 @@
+# ============================================================================
+#  Reverse proxy for Antigravity Discord.
+#
+#  Caddy is used instead of nginx for one reason: it obtains and renews the TLS
+#  certificate on its own. Everything below is otherwise deliberately plain —
+#  one upstream, correct forwarded headers, and no buffering that would break
+#  WebSockets or uploads.
+# ============================================================================
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Socket.IO upgrades on this path. Caddy proxies WebSockets natively, so no
+	# special upgrade block is needed — but it must not be compressed or
+	# buffered, hence the separate matcher with its own handler.
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @websocket {
+		reverse_proxy app:3001
+	}
+
+	# Uploaded files: long-lived, content-addressed, safe to cache at the edge.
+	# The app already sets a restrictive CSP and Content-Disposition on these.
+	handle /uploads/* {
+		reverse_proxy app:3001
+	}
+
+	# The metrics endpoint must never be public. Remove this block if Prometheus
+	# scrapes it over the internal network only (the usual arrangement).
+	handle /metrics {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy app:3001 {
+			# Uploads can be large and slow; do not cut them off early.
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+			health_uri /api/live
+			health_interval 15s
+			health_timeout 5s
+		}
+	}
+
+	header {
+		# HSTS belongs at the edge, where TLS actually terminates.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

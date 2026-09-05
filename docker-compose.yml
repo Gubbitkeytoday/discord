@@ -1,0 +1,67 @@
+# ============================================================================
+#  Antigravity Discord — production stack
+#
+#  Two services: the app, and Caddy in front of it for automatic HTTPS. Caddy is
+#  the reason this is worth using compose at all — a WebSocket app needs TLS and
+#  correct forwarded headers, and getting a certificate by hand is the step most
+#  likely to be skipped.
+#
+#  First run:
+#    cp .env.example .env      # then edit: PUBLIC_URL, STORAGE_URL_SECRET, DOMAIN
+#    docker compose up -d
+#    docker compose exec app node db/seed.js     # optional demo data
+# ============================================================================
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      SERVE_STATIC: 1
+      LOG_FORMAT: json
+      # Caddy is the only thing in front of the app, so exactly one hop of
+      # X-Forwarded-For is trustworthy. Trusting more would let a client forge
+      # its own IP and escape rate limiting.
+      TRUST_PROXY: 1
+      DB_PATH: /data/discord.db
+      STORAGE_ROOT: /data/uploads
+    volumes:
+      - app-data:/data
+    expose:
+      - "3001"
+    # Not published to the host: only Caddy may reach it.
+    networks:
+      - edge
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      # Set DOMAIN in .env. Use `localhost` to get a local self-signed cert
+      # instead of a public ACME certificate.
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"     # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data           # certificates — losing this re-issues them
+      - caddy-config:/config
+    networks:
+      - edge
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  edge:

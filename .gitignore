@@ -1,0 +1,9 @@
+public/uploads/
+discord.db
+discord.db-wal
+discord.db-shm
+*.bak
+node_modules/
+dist/
+.env
+test-init.db*

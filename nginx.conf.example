@@ -1,0 +1,112 @@
+# ============================================================================
+#  nginx reverse proxy for Antigravity Discord.
+#
+#  Use this instead of the bundled Caddyfile if nginx is already your edge. The
+#  three things that actually matter here, and that a default config gets wrong
+#  for this app:
+#
+#    1. WebSocket upgrade headers on /socket.io/ — without them, realtime falls
+#       back to long-polling and typing indicators and voice signalling crawl.
+#    2. proxy_buffering off on that same location — buffering delays every event.
+#    3. client_max_body_size — nginx defaults to 1 MB and would reject uploads
+#       long before the app's own limits apply.
+#
+#  Certificates are your responsibility here; certbot --nginx is the usual route.
+# ============================================================================
+
+upstream antigravity {
+    server 127.0.0.1:3001;
+    keepalive 32;
+}
+
+# Plain HTTP exists only to redirect and to answer ACME challenges.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name example.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # TLS terminates here, so HSTS belongs here.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    server_tokens off;
+
+    # Uploads. The app enforces its own per-file and per-user quotas; this only
+    # has to be generous enough not to reject them first.
+    client_max_body_size 60m;
+    client_body_timeout 300s;
+
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    # --- realtime -------------------------------------------------------------
+    location /socket.io/ {
+        proxy_pass http://antigravity;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # A websocket is idle by design between messages; do not time it out.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # --- uploaded files -------------------------------------------------------
+    # Content-addressed and immutable, so they cache well. The app sets the
+    # Content-Disposition and a locked-down CSP on these responses; do not
+    # override those headers here.
+    location /uploads/ {
+        proxy_pass http://antigravity;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # --- metrics --------------------------------------------------------------
+    # Never expose this publicly. Either delete the block and scrape over the
+    # private network, or restrict it as below.
+    location /metrics {
+        allow 10.0.0.0/8;
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://antigravity;
+    }
+
+    # --- everything else ------------------------------------------------------
+    location / {
+        proxy_pass http://antigravity;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+}

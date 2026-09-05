@@ -1,0 +1,396 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   Theme tokens
+   ---------------------------------------------------------------------------
+   The neutral palette is declared through Tailwind's @theme so it generates
+   real utilities (bg-d-surface, text-d-text3, border-d-edge/40 …). That matters
+   because a Tailwind arbitrary colour value is baked into the stylesheet and
+   can never respond to a theme switch, while a token resolves through a CSS
+   variable that [data-theme="light"] can override.
+
+   Brand and status colours are deliberately identical in both themes — that is
+   what Discord does, and it keeps the accent recognisable.
+   ========================================================================= */
+@theme {
+  /* surfaces */
+  --color-d-base:      #1e1f22;
+  --color-d-base2:     #1a1b1e;
+  --color-d-base3:     #090a0c;
+  --color-d-sunken:    #111214;
+  --color-d-panel:     #232428;
+  --color-d-surface:   #2b2d31;
+  --color-d-canvas:    #313338;
+  --color-d-input:     #383a40;
+  --color-d-active:    #404249;
+  --color-d-hover:     #35373c;
+  --color-d-hover2:    #35363c;
+  --color-d-rowhover:  #2e3035;
+  --color-d-divider:   #3f4147;
+  --color-d-edge:      #1f2023;
+  --color-d-control:   #4e5058;
+  --color-d-control2:  #3b3e45;
+  --color-d-invert:    #f2f3f5;
+
+  /* text */
+  --color-d-text:      #dbdee1;
+  --color-d-text2:     #b5bac1;
+  --color-d-text3:     #949ba4;
+  --color-d-text4:     #80848e;
+  --color-d-mention:   #c9cdfb;
+  --color-d-strong:    #ffffff;
+
+  /* brand + status (theme-invariant) */
+  --color-d-brand:       #5865f2;
+  --color-d-brandhover:  #4752c4;
+  --color-d-brandactive: #3c45a5;
+  --color-d-online:      #23a55a;
+  --color-d-idle:        #f0b232;
+  --color-d-danger:      #f23f43;
+  --color-d-link:        #00a8fc;
+  --color-d-success:     #248046;
+  --color-d-successhover:#1a6334;
+  --color-d-dangerhover: #da373c;
+  --color-d-mint:        #4fddab;
+}
+
+/* Light theme: surfaces invert, text darkens, accents stay put. */
+:root[data-theme="light"] {
+  --color-d-base:      #e3e5e8;
+  --color-d-base2:     #d7d9dd;
+  --color-d-base3:     #c9ccd1;
+  --color-d-sunken:    #f2f3f5;
+  --color-d-panel:     #ebedef;
+  --color-d-surface:   #f2f3f5;
+  --color-d-canvas:    #ffffff;
+  --color-d-input:     #ebedef;
+  --color-d-active:    #d4d7dc;
+  --color-d-hover:     #e0e1e5;
+  --color-d-hover2:    #e0e1e5;
+  --color-d-rowhover:  #f5f6f7;
+  --color-d-divider:   #d3d5d8;
+  --color-d-edge:      #e0e1e5;
+  --color-d-control:   #b5bac1;
+  --color-d-control2:  #c4c9ce;
+  --color-d-invert:    #313338;
+
+  --color-d-text:      #2e3338;
+  --color-d-text2:     #4e5058;
+  --color-d-text3:     #5c5e66;
+  --color-d-text4:     #80848e;
+  --color-d-mention:   #3c45a5;
+  --color-d-strong:    #060607;
+  /* #00a8fc reaches only 2.62:1 on white; darken it for the light theme. */
+  --color-d-link:      #0068a8;
+}
+
+/* Ash: a mid-grey theme that sits between Dark and Light. */
+:root[data-theme="ash"] {
+  --color-d-base:      #2b2d31;
+  --color-d-base2:     #26282c;
+  --color-d-base3:     #1e1f22;
+  --color-d-sunken:    #232529;
+  --color-d-panel:     #313338;
+  --color-d-surface:   #35373c;
+  --color-d-canvas:    #3b3d42;
+  --color-d-input:     #43454b;
+  --color-d-active:    #4a4c53;
+  --color-d-hover:     #41434a;
+  --color-d-hover2:    #41434a;
+  --color-d-rowhover:  #3f4147;
+  --color-d-divider:   #4a4c53;
+  --color-d-edge:      #2b2d31;
+  --color-d-control:   #5c5e66;
+  --color-d-control2:  #494c53;
+}
+
+/* Onyx: darker than Dark, near-black surfaces. */
+:root[data-theme="onyx"] {
+  --color-d-base:      #000000;
+  --color-d-base2:     #050506;
+  --color-d-base3:     #000000;
+  --color-d-sunken:    #060607;
+  --color-d-panel:     #101114;
+  --color-d-surface:   #131417;
+  --color-d-canvas:    #181A1E;
+  --color-d-input:     #202227;
+  --color-d-active:    #26282e;
+  --color-d-hover:     #1f2126;
+  --color-d-hover2:    #1f2126;
+  --color-d-rowhover:  #1b1d21;
+  --color-d-divider:   #26282e;
+  --color-d-edge:      #0a0b0d;
+  --color-d-control:   #3b3e45;
+  --color-d-control2:  #26282e;
+}
+
+/* High contrast: stronger separation on top of whichever theme is active. */
+:root[data-contrast="high"] {
+  --color-d-text:    #ffffff;
+  --color-d-text2:   #f2f3f5;
+  --color-d-text3:   #dbdee1;
+  --color-d-text4:   #b5bac1;
+  --color-d-divider: #ffffff;
+  --color-d-edge:    #ffffff;
+  --color-d-link:    #7ec8ff;
+}
+:root[data-contrast="high"][data-theme="light"] {
+  --color-d-text:    #000000;
+  --color-d-text2:   #16181b;
+  --color-d-text3:   #2e3338;
+  --color-d-text4:   #4e5058;
+  --color-d-divider: #000000;
+  --color-d-edge:    #000000;
+  --color-d-link:    #004a7c;
+}
+:root[data-contrast="high"] :focus-visible {
+  outline-width: 3px;
+}
+
+@layer base {
+  :root {
+    /* Message row density, driven by Appearance settings. */
+    --message-padding-y: 0.375rem;
+    /* Space between one author's group and the next. */
+    --message-group-gap: 1rem;
+    /* Chat text size, independent of the app-wide zoom. */
+    --message-font-size: 16px;
+    /* Padding scale for the app chrome — Appearance › UI density. */
+    --ui-density: 1;
+  }
+
+  /* Compact mode: Discord's alternative message display. */
+  :root[data-message-display="compact"] {
+    --message-padding-y: 0.0625rem;
+    --message-group-gap: 0.25rem;
+  }
+
+  :root[data-ui-density="compact"]  { --ui-density: 0.75; }
+  :root[data-ui-density="spacious"] { --ui-density: 1.35; }
+
+  /* Zoom scales every rem-based size, exactly like the desktop app's slider. */
+  html { font-size: calc(16px * var(--app-zoom, 1)); }
+
+  /*
+   * Saturation is applied to the ROOT element, never to `body` or `#root`.
+   *
+   * This is not a style preference — it is load-bearing. Per CSS Filter
+   * Effects, any `filter` other than `none` makes the element a containing
+   * block for its `position: fixed` descendants, *unless that element is the
+   * document root*. Putting the filter on `body` therefore turned every fixed
+   * overlay in the app into an absolutely-positioned one: the login screen was
+   * clipped off the top of the window, and modals, toasts and the settings
+   * surface all anchored to the page instead of the viewport.
+   *
+   * The `:not([data-saturation="100"])` guard means the default setting emits
+   * no filter at all, so the common case carries neither the bug's blast
+   * radius nor its compositing cost.
+   */
+  :root[data-saturation]:not([data-saturation="100"]) {
+    filter: saturate(var(--app-saturation, 1));
+  }
+
+  :root[data-reduced-motion="true"] *,
+  :root[data-reduced-motion="true"] *::before,
+  :root[data-reduced-motion="true"] *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  body {
+    font-family: 'Inter', 'Kanit', sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: var(--color-d-base);
+    color: var(--color-d-text);
+  }
+
+  /* Visible keyboard focus, without adding a ring on mouse clicks. */
+  :focus-visible {
+    outline: 2px solid var(--color-d-brand);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  /* Respect the OS "reduce motion" preference. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Applied for one frame while the theme swaps — see applyPreferences(). */
+.theme-switching, .theme-switching * {
+  transition: none !important;
+}
+
+/* Screen-reader-only text (skip links, icon-button labels). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Discord-style scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-d-base2);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-d-sunken); }
+
+/* Tooltip */
+.discord-tooltip { position: relative; }
+.discord-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%) scale(0.95);
+  margin-left: 12px;
+  padding: 6px 12px;
+  background-color: var(--color-d-sunken);
+  color: var(--color-d-strong);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.15s ease-in-out;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.discord-tooltip:hover::after { opacity: 1; transform: translateY(-50%) scale(1); }
+
+/* Voice speaking indicator */
+@keyframes voice-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(35, 165, 90, 0.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(35, 165, 90, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(35, 165, 90, 0); }
+}
+.speaking-border {
+  border: 2px solid var(--color-d-online);
+  animation: voice-pulse 1.5s infinite;
+}
+
+/* Toast entry */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Chat text follows Appearance › Chat Font Scaling, on top of the zoom. */
+.message-body { font-size: var(--message-font-size); }
+
+/* Space between message groups — Appearance › Message Group Spacing. */
+.message-group-start { margin-top: var(--message-group-gap); }
+
+/* Accessibility › Role Colors = "next to names": a dot instead of tinted text. */
+:root[data-role-colors="dots"] .role-colored { color: var(--color-d-strong) !important; }
+:root[data-role-colors="off"] .role-colored { color: var(--color-d-strong) !important; }
+:root[data-role-colors="off"] .role-dot { display: none; }
+:root:not([data-role-colors="dots"]) .role-dot { display: none; }
+
+/* Accessibility › animated emoji and GIF autoplay. */
+:root[data-animate-emoji="false"] .animated-emoji { animation-play-state: paused; }
+
+/* Streamer mode blurs anything marked sensitive until hovered. */
+:root[data-streamer-mode="true"] .streamer-sensitive {
+  filter: blur(6px);
+  transition: filter 0.1s;
+}
+:root[data-streamer-mode="true"] .streamer-sensitive:hover { filter: none; }
+
+/* ---------------------------------------------------------------------------
+   Settings surface.
+   Discord opens settings by scaling the whole page up from 92% while fading in
+   — it reads as the app pushing forward rather than a panel sliding over it.
+   Both animations respect the reduced-motion preference via the global block.
+   --------------------------------------------------------------------------- */
+
+@keyframes settingsIn {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* The unsaved-changes bar springs up so it is noticed without a colour alarm. */
+@keyframes settingsBarIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Tailwind has no `15` step; settings uses a 60px top gutter, like Discord. */
+.py-15 { padding-top: 3.75rem; padding-bottom: 3.75rem; }
+.top-15 { top: 3.75rem; }
+
+/* A range input inside settings gets a taller hit area than the browser default
+   — a 4px-tall track is hard to grab, especially on a trackpad. */
+input[type="range"] { height: 1.25rem; }
+
+/* ---------------------------------------------------------------------------
+   Centred overlays that can still scroll.
+
+   `position: fixed; inset: 0; display: flex; align-items: center` centres a
+   dialog beautifully — right up until the dialog is taller than the window.
+   Then flexbox centring overflows in *both* directions and the top of the card
+   is pushed above the viewport, where `body { overflow: hidden }` clips it and
+   nothing can scroll it back. It happens on a short laptop screen, on a long
+   form, and reliably at the 200% end of our own zoom setting.
+
+   Auto block margins fix it: they centre the child while there is free space
+   and collapse to zero when there is not, so a tall dialog simply scrolls.
+   Auto margins also win over `align-items`, so the existing `items-center`
+   on each modal can stay exactly as it is.
+   --------------------------------------------------------------------------- */
+.overlay-center {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.overlay-center > * {
+  margin-block: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Settings surface geometry.
+
+   Discord's settings looks like two halves, but it is really one centred block:
+   a fixed-width rail beside a fixed-measure content column, with the rail's
+   colour bleeding off the left edge of the window.
+
+   Building it as two literal 50% halves aligned toward the gutter only centres
+   correctly when both sides are the same width. Ours are 240 and 740, so on a
+   1919px screen the block landed 261px right of centre with a 742px gap on the
+   left and 220px on the right. Centring one block and painting the split with a
+   gradient gives the same look and is correct at every width.
+
+   The rail is wider than Discord's 218px because Thai labels are longer:
+   "ความเป็นส่วนตัวและความปลอดภัย" does not fit, and truncating it left three of
+   the eleven tabs unreadable.
+   --------------------------------------------------------------------------- */
+.settings-surface {
+  --settings-rail: 240px;
+  --settings-max: 1060px;
+  /* Where the rail's right edge falls, once the block is centred. */
+  --settings-split: calc(
+    max(0px, (100vw - var(--settings-max)) / 2) + var(--settings-rail)
+  );
+  background: linear-gradient(
+    to right,
+    var(--color-d-surface) 0 var(--settings-split),
+    var(--color-d-canvas) var(--settings-split) 100%
+  );
+}

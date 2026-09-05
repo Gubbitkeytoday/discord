@@ -1,0 +1,57 @@
+{
+  "name": "antigravity-discord",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node --watch server.js",
+    "server:once": "node server.js",
+    "start": "node server.js",
+    "storage:stats": "node scripts/storage.js stats",
+    "storage:gc": "node scripts/storage.js gc",
+    "storage:verify": "node scripts/storage.js verify",
+    "search:reindex": "node scripts/storage.js reindex",
+    "test": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs",
+    "test:watch": "node --test --watch scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs",
+    "a11y": "node scripts/a11y-audit.mjs",
+    "i18n:audit": "node scripts/i18n-audit.mjs",
+    "seed": "node db/seed.js",
+    "backup": "node scripts/backup.mjs create --files",
+    "backup:list": "node scripts/backup.mjs list",
+    "backup:prune": "node scripts/backup.mjs prune --keep 7",
+    "backup:verify": "node scripts/backup.mjs verify",
+    "backup:restore": "node scripts/backup.mjs restore",
+    "parse:check": "node scripts/parse-check.mjs",
+    "verify": "npm run jsx:check && npm run parse:check && npm run a11y && npm run i18n:audit && npm run build && npm test",
+    "docker:build": "docker build -t antigravity-discord .",
+    "docker:up": "docker compose up -d --build",
+    "docker:logs": "docker compose logs -f app",
+    "docker:down": "docker compose down",
+    "jsx:check": "node scripts/jsx-check.mjs"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.33.5"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "lucide-react": "^0.469.0",
+    "multer": "^2.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "sqlite3": "^5.1.7",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7"
+  }
+}
