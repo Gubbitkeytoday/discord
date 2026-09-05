@@ -8,13 +8,13 @@
 [![SQLite Engine](https://img.shields.io/badge/sqlite-v3_WAL-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Socket.IO](https://img.shields.io/badge/socket.io-v4.8.1-010101?style=for-the-badge&logo=socket.io&logoColor=white)](https://socket.io/)
 [![WebRTC](https://img.shields.io/badge/WebRTC-Full_Mesh-333333?style=for-the-badge&logo=webrtc&logoColor=white)](https://webrtc.org/)
-[![Schema Version](https://img.shields.io/badge/Schema-v14_Active-8A2BE2?style=for-the-badge)]()
+[![Schema Version](https://img.shields.io/badge/Schema-v15_Active-8A2BE2?style=for-the-badge)]()
 [![Integration Tests](https://img.shields.io/badge/Tests-242%2F242_Passing-brightgreen?style=for-the-badge)]()
 [![A11y Status](https://img.shields.io/badge/A11y-0_Violations-success?style=for-the-badge)]()
 
 <p align="center">
   <b>A self-hosted, enterprise-grade chat architecture built strictly against Discord's actual systems model.</b><br/>
-  Snowflake IDs • 40-Flag Bitfields • Channel Overwrites • Content-Addressable Storage • WebRTC Mesh • Schema v14<br/>
+  Snowflake IDs • 40-Flag Bitfields • Channel Overwrites • Content-Addressable Storage • WebRTC Mesh • Schema v15<br/>
   <i>Engineered to run as a single, self-contained Node.js process over an embedded SQLite WAL database. Zero external brokers, zero Redis, zero vendor lock-in.</i>
 </p>
 
@@ -173,7 +173,8 @@ The database schema is defined declaratively in `db/schema.sql` (45 tables) and 
  ├── [v11] Forum tags, post pinning, forum layout (List vs Gallery)
  ├── [v12] Membership screening, welcome screen & onboarding prompts
  ├── [v13] Announcement channel following & cross-server relays
- └── [v14] Server template engine (Full guild cloning snapshots)
+ ├── [v14] Server template engine (Full guild cloning snapshots)
+ └── [v15] Bot applications, slash commands & interaction callbacks
 ```
 
 ### Relational Entity Graph (Core Entities)
