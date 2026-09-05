@@ -136,6 +136,24 @@ const check = (file) => {
     }
   });
 
+  // --- comments that are not comments --------------------------------------
+  // `//` and `/* */` mean nothing inside JSX children — they are text, and
+  // React renders them on the page. This is silent: the file parses, the app
+  // runs, and the user reads "// A voice channel is two panes:" in their UI.
+  // Real, and shipped once: adding a wrapper element above an existing comment
+  // moved that comment from expression position into children position.
+  traverse(ast, {
+    JSXText(textPath) {
+      const value = textPath.node.value;
+      if (!/^\s*(\/\/|\/\*)/.test(value)) return;
+      const snippet = value.trim().split('\n')[0].slice(0, 60);
+      unresolved += 1;
+      console.log(`  ✗ ${rel}:${textPath.node.loc?.start?.line ?? 0}: `
+        + `"${snippet}" is JSX text, not a comment — React will render it. `
+        + 'Wrap it as {/* … */}, or move it outside the JSX.');
+    }
+  });
+
   const seen = new Set();
   traverse(ast, {
     Program(programPath) {

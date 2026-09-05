@@ -1557,4 +1557,5 @@ export default {
   'security.deleteAccount': 'Delete account',
   'security.deleteConfirm': 'Click again to delete permanently',
   'security.deleteWarning': 'This cannot be undone. Your messages stay in their conversations, attributed to a deleted user.',
+  'voice.joinVoice': 'Join Voice',
 };

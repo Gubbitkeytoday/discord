@@ -37,7 +37,7 @@ const AUTOSCROLL_THRESHOLD_PX = 120;
 const HEADER_ICONS = { announcement: Megaphone, voice: Volume2, forum: MessagesSquare, thread: MessagesSquare };
 
 export default function ChatArea({
-  onStartCall, callBar, onShowEditHistory,
+  onStartCall, callBar, onShowEditHistory, hideHeader = false,
   channel,
   messages,
   pins = [],
@@ -566,11 +566,10 @@ export default function ChatArea({
         </div>
       )}
 
-      {/* A live call sits between the header and the history — visible while
-          reading, and out of the way of the composer. */}
-      {callBar}
-
-      {/* Channel header */}
+      {/* Channel header — suppressed when this chat is the lower half of a
+          voice channel, because the voice room above already names the channel
+          and carries the same controls. */}
+      {!hideHeader && (
       <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center justify-between shrink-0 bg-d-canvas z-10">
         <div className="flex items-center gap-2 min-w-0">
           {/* Phones have no room for a permanent channel column, so the header
@@ -740,6 +739,11 @@ export default function ChatArea({
           </form>
         </div>
       </div>
+      )}
+
+      {/* A live call sits between the header and the history — visible while
+          reading, and out of the way of the composer. */}
+      {callBar}
 
       {/* Messages */}
       <div ref={scrollRef} onScroll={trackScroll} className="flex-1 overflow-y-auto px-4 select-text">

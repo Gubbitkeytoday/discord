@@ -248,6 +248,45 @@ function auditOverlayCentring() {
   }
 }
 
+/**
+ * Panes that clip their own controls.
+ *
+ * A real regression, and an ugly one: splitting the voice channel into a room
+ * on top and its chat below, the room's wrapper was written as
+ * `shrink-0 max-h-[55%]`. That combination cannot shrink *and* is capped, so
+ * anything past the cap — in this case the mute / deafen / hang-up bar, which
+ * is `shrink-0` inside the room — was simply cut in half, with no scrollbar to
+ * reach it. The correct shape for a flex pane is `flex-N min-h-0`, letting the
+ * scrollable region inside give way instead.
+ *
+ * So: flag any element that is both unable to shrink and height-capped.
+ */
+function auditClippedPanes() {
+  for (const file of walk(ROOT)) {
+    const source = fs.readFileSync(file, 'utf8');
+    source.split('\n').forEach((line, index) => {
+      const classes = /className=(?:"([^"]*)"|\{`([^`]*)`\})/.exec(line);
+      if (!classes) return;
+      const value = classes[1] ?? classes[2] ?? '';
+      const capped = /\b(?:max-h-\[|max-h-\d)/.test(value);
+      const rigid = /(?:^|\s)shrink-0(?:\s|$)/.test(value);
+      if (!capped || !rigid) return;
+      // An element that scrolls its own overflow is fine — the cap is the
+      // point, and the scrollbar is the way to the rest.
+      if (/overflow-(?:y-)?(?:auto|scroll)/.test(value)) return;
+      problems.push({
+        file: path.relative(process.cwd(), file),
+        line: index + 1,
+        level: 'error',
+        message:
+          'a pane that is both `shrink-0` and height-capped clips whatever does '
+          + 'not fit, with no way to scroll to it — use `flex-N min-h-0` and let '
+          + 'the scrollable child inside give way instead'
+      });
+    });
+  }
+}
+
 function auditLayoutTraps() {
   const raw = fs.readFileSync('src/index.css', 'utf8');
   // Blank out comments while preserving newlines, so reported line numbers
@@ -338,6 +377,7 @@ for (const file of walk(ROOT)) auditFile(file);
 auditContrast();
 auditLayoutTraps();
 auditOverlayCentring();
+auditClippedPanes();
 
 const errors = problems.filter((p) => p.level === 'error');
 const warnings = problems.filter((p) => p.level === 'warn');

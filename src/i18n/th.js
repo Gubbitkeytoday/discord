@@ -1557,4 +1557,5 @@ export default {
   'security.deleteAccount': 'ลบบัญชี',
   'security.deleteConfirm': 'คลิกอีกครั้งเพื่อลบถาวร',
   'security.deleteWarning': 'ย้อนกลับไม่ได้ ข้อความของคุณจะยังอยู่ในห้องสนทนา โดยแสดงเป็นผู้ใช้ที่ถูกลบ',
+  'voice.joinVoice': 'เข้าห้องเสียง',
 };

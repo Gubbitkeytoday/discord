@@ -1500,3 +1500,43 @@ ownerless, and neither is a decision to make on someone's behalf.
   user command carries what was right-clicked, verified server-side rather than
   trusted, instead of typed options.
 * Pinned channels, Tap to React, and role gradients (`roles.color_secondary`).
+
+## 45. The voice-channel split pane, and two checks it earned
+
+Adding text chat to voice channels was three lines of layout, and every one of
+them was wrong. Worth writing down, because the failures were all silent — the
+app booted, nothing threw, and the damage was only visible on screen.
+
+**The pane clipped its own controls.** The voice room went into a wrapper of
+`shrink-0 max-h-[55%]`. That combination cannot shrink and is capped, so the
+mute / deafen / hang-up bar — itself `shrink-0` inside the room — was cut in
+half with no scrollbar to reach it. Mid-call, with no way to hang up. The
+correct shape for a flex pane is `flex-N min-h-0`: the pane gives way, and the
+scrollable region inside it (here the video grid) absorbs the loss.
+
+`auditClippedPanes()` in the a11y audit now flags any element that is both
+`shrink-0` and height-capped without `overflow-auto`, and the check was proved
+by reintroducing the original class string.
+
+**Two headers.** VoiceRoom draws its own header, and so does ChatArea, so the
+split produced the channel name twice, ten pixels apart. ChatArea now takes
+`hideHeader`, and the channel-level controls it owned — pins, notification
+settings, member list — moved into VoiceRoom's header via `headerActions`. One
+header per channel is the rule; the fix was making that structural rather than
+hoping.
+
+**A comment that was not a comment.** Wrapping the pane in `<ChannelGate>` put
+an existing `//` comment into JSX *children* position, where `//` is not syntax
+— it is text. React renders it. The file parses, the tests pass, and the user
+reads "// A voice channel is two panes:" in their sidebar.
+
+`parse-check.mjs` now walks `JSXText` nodes and rejects any that begin with
+`//` or `/*`, which is the only reliable way to catch this: it is invisible to
+every other check precisely because it is valid code.
+
+**And the behaviour underneath.** Leaving voice used to navigate you to the
+first text channel, on the reasoning that a voice channel had nothing to read.
+It does now, so hanging up leaves you where you are. Conversely the room only
+renders when you are actually connected to *that* channel — browsing a voice
+channel you have not joined shows its chat and a Join button, which is what
+Discord does and what the old code could not express.

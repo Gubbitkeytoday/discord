@@ -29,6 +29,7 @@ function saveJson(key, value) {
 }
 
 export default function VoiceRoom({
+  headerActions = null,
   channel,
   participants,
   currentUser,
@@ -249,6 +250,10 @@ export default function VoiceRoom({
               {layout === 'grid' ? <Maximize2 className="w-4 h-4" /> : <Grid2X2 className="w-4 h-4" />}
             </button>
           )}
+          {/* The channel-level controls. They live here because the chat pane
+              below runs with its own header hidden — one header per channel,
+              not two. */}
+          {headerActions}
         </div>
       </div>
 

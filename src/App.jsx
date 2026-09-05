@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
+import { Volume2, Pin, Bell, Users } from 'lucide-react';
 import ServerRail from './components/ServerRail';
 import ChannelSidebar from './components/ChannelSidebar';
 import ChatArea from './components/ChatArea';
@@ -765,10 +766,14 @@ export default function App() {
         return;
       }
       setActiveCall({ channelId: channel_id, call });
-      // Once someone answers, the ring is over for everyone.
-      setIncomingCall((prev) => (prev?.channelId === channel_id
-        && (call.participants ?? []).some((p) => p.user_id === prev.call?.initiator_id ? false : p.state === 'joined')
-        ? null : prev));
+      // Once somebody other than the caller has answered, the call is a
+      // conversation rather than a ring — so stop ringing.
+      setIncomingCall((prev) => {
+        if (prev?.channelId !== channel_id) return prev;
+        const answered = (call.participants ?? [])
+          .some((p) => p.state === 'joined' && p.user_id !== call.initiator_id);
+        return answered ? null : prev;
+      });
     };
 
     // One event for a whole batch; repaint the history once, not a hundred times.
@@ -1311,10 +1316,8 @@ export default function App() {
     socket.emit('leave_voice', { channelId: currentVoiceChannel.id });
     setCurrentVoiceChannel(null);
     setActiveVoiceParticipants([]);
-    if (activeChannel?.type === 'voice' || activeChannel?.type === 'stage') {
-      const firstText = channels.find((c) => c.type === 'text' || c.type === 'announcement');
-      setActiveChannelId(firstText?.id ?? null);
-    }
+    // Staying put: a voice channel now carries a text channel, so hanging up
+    // leaves you reading it rather than teleporting you somewhere else.
   };
   const handleVideoStateChange = useCallback(({ isVideo, isStreaming }) => {
     if (!currentVoiceChannel) return;
@@ -1788,6 +1791,15 @@ export default function App() {
     />
   );
 
+  // The same conversation, minus its header: under a voice room the room's own
+  // header already names the channel, so a second one is pure duplication.
+  const voiceChatArea = chatArea && React.cloneElement(chatArea, { hideHeader: true });
+
+  // Whether the viewer is actually connected to *this* voice channel. Browsing
+  // a voice channel you have not joined is an ordinary thing to do — you read
+  // its chat and see who is in it — so the room only renders once connected.
+  const isConnectedHere = currentVoiceChannel?.id === activeChannel?.id;
+
   if (authState === null) {
     return (
       <div className="fixed inset-0 bg-d-base flex items-center justify-center text-d-text3 text-sm">
@@ -1929,9 +1941,16 @@ export default function App() {
           />
 
           {isVoiceChannel ? (
-            // The room on top, the channel's own text chat underneath.
+            // A voice channel is two panes: the room on top, its own text chat
+            // underneath. Both are flex children with `min-h-0`, so the video
+            // grid — which scrolls inside VoiceRoom — is what gives way when the
+            // window is short. A fixed `max-h` here would clip the room's
+            // control bar instead, which is the one thing that must never
+            // scroll out of reach mid-call.
+            <ChannelGate channel={activeChannel} onLeave={() => setActiveChannelId(null)}>
             <div className="flex-1 flex flex-col min-h-0">
-              <div className="shrink-0 max-h-[55%] flex flex-col min-h-0">
+              {isConnectedHere && (
+              <div className="flex-[3] flex flex-col min-h-[16rem]">
             <VoiceRoom
               channel={activeChannel}
               participants={activeVoiceParticipants}
@@ -1948,12 +1967,65 @@ export default function App() {
               onOpenVoiceSettings={() => setShowUserSettingsModal('voice')}
               onVideoStateChange={handleVideoStateChange}
               socket={socket}
+              headerActions={(
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowPinsFromSlash((n) => n + 1)}
+                    className="hover:text-d-strong transition-colors"
+                    title={t('chat.pinnedMessages')}
+                    aria-label={t('chat.pinnedMessages')}
+                  >
+                    <Pin className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setNotifPopover({ kind: 'channel', id: activeChannel.id, x: rect.left - 120, y: rect.bottom + 6 });
+                    }}
+                    className="hover:text-d-strong transition-colors"
+                    title={t('notif.notificationSettings')}
+                    aria-label={t('notif.notificationSettings')}
+                  >
+                    <Bell className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowMemberList(!showMemberList)}
+                    aria-pressed={showMemberList}
+                    className="hover:text-d-strong transition-colors"
+                    title={t('chat.memberList')}
+                    aria-label={t('chat.memberList')}
+                  >
+                    <Users className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             />
               </div>
-              <div className="flex-1 flex flex-col min-h-0 border-t border-d-edge">
-                {chatArea}
+              )}
+              {!isConnectedHere && (
+                <div className="shrink-0 px-4 py-3 border-b border-d-edge bg-d-surface/40 flex items-center gap-3">
+                  <Volume2 className="w-5 h-5 text-d-text3 shrink-0" aria-hidden="true" />
+                  <span className="text-sm font-semibold text-d-strong truncate">{activeChannel?.name}</span>
+                  <span className="text-xs text-d-text3">
+                    {t('voice.inRoom', { count: activeVoiceParticipants.length })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleJoinVoice(activeChannel)}
+                    className="ml-auto px-3 py-1.5 rounded-md bg-d-success/90 hover:bg-d-success text-white text-xs font-semibold"
+                  >
+                    {t('voice.joinVoice')}
+                  </button>
+                </div>
+              )}
+              <div className={`${isConnectedHere ? 'flex-[2] min-h-[10rem] border-t border-d-edge' : 'flex-1'} flex flex-col min-h-0`}>
+                {voiceChatArea}
               </div>
             </div>
+            </ChannelGate>
           ) : (
             // Age-restricted and spoiler channels get one interstitial before
             // their history is painted; every other channel renders straight
