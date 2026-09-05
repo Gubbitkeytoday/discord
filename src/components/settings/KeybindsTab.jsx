@@ -21,12 +21,28 @@ const GROUPS = () => [
       { key: 'quickSwitcher',       label: t('keys.quickSwitcher') },
       { key: 'navigateChannelUp',   label: t('keys.navigateChannelUp') },
       { key: 'navigateChannelDown', label: t('keys.navigateChannelDown') },
-      { key: 'markServerRead',      label: t('keys.markServerRead') }
+      { key: 'markServerRead',      label: t('keys.markServerRead') },
+      { key: 'markChannelRead',     label: t('keys.markChannelRead') },
+      { key: 'navigateServerUp',    label: t('keys.navigateServerUp') },
+      { key: 'navigateServerDown',  label: t('keys.navigateServerDown') },
+      { key: 'jumpToHome',          label: t('keys.jumpToHome') }
+    ]
+  },
+  {
+    title: t('keys.groupChat'),
+    actions: [
+      { key: 'search',            label: t('keys.search') },
+      { key: 'togglePins',        label: t('keys.togglePins') },
+      { key: 'toggleMemberList',  label: t('keys.toggleMemberList') },
+      { key: 'toggleEmojiPicker', label: t('keys.toggleEmojiPicker') },
+      { key: 'toggleFormatting',  label: t('keys.toggleFormatting') }
     ]
   },
   {
     title: t('keys.groupOther'),
     actions: [
+      { key: 'openSettings',       label: t('keys.openSettings') },
+      { key: 'openEvents',         label: t('keys.openEvents') },
       { key: 'toggleStreamerMode', label: t('keys.toggleStreamerMode') }
     ]
   }

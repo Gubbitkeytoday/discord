@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
-  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand
+  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3
 } from 'lucide-react';
 
 import { useFocusTrap } from '../hooks/useFocusTrap';
@@ -10,6 +10,7 @@ import AutoModTab from './settings/AutoModTab';
 import WebhooksTab from './settings/WebhooksTab';
 import ChannelPermissionsTab from './settings/ChannelPermissionsTab';
 import OnboardingTab from './settings/OnboardingTab';
+import InsightsTab from './settings/InsightsTab';
 import { t, localeTag } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
 import { DEFAULT_AVATAR } from '../utils/avatar';
@@ -29,6 +30,7 @@ const tabs = () => [
   { key: 'stickers', label: t('settings.stickers'), icon: Sticker },
   { key: 'permissions', label: t('settings.channelPermissions'), icon: KeyRound },
   { key: 'onboarding', label: t('settings.onboarding'), icon: Hand },
+  { key: 'insights', label: t('settings.insights'), icon: BarChart3 },
   { key: 'automod', label: t('settings.automod'), icon: ShieldAlert },
   { key: 'webhooks', label: t('settings.webhooks'), icon: Webhook },
   { key: 'soundboard', label: t('settings.soundboard'), icon: Music },
@@ -193,6 +195,9 @@ export default function ServerSettingsModal({
             webhooks={webhooks} channels={channels} currentUserId={currentUserId}
             reload={() => load('webhooks')} onToast={onToast}
           />
+        )}
+        {tab === 'insights' && (
+          <InsightsTab server={server} channels={channels} onToast={onToast} />
         )}
         {tab === 'onboarding' && (
           <OnboardingTab server={server} channels={channels} roles={roles} onToast={onToast} />

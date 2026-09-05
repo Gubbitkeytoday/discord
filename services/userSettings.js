@@ -102,7 +102,18 @@ export const SETTING_DEFAULTS = {
     navigateChannelUp: 'Alt+ArrowUp',
     navigateChannelDown: 'Alt+ArrowDown',
     toggleStreamerMode: 'Ctrl+Shift+S',
-    disconnectVoice: 'Ctrl+Shift+H'
+    disconnectVoice: 'Ctrl+Shift+H',
+    navigateServerUp: 'Ctrl+Alt+ArrowUp',
+    navigateServerDown: 'Ctrl+Alt+ArrowDown',
+    markChannelRead: 'Escape',
+    toggleMemberList: 'Ctrl+U',
+    togglePins: 'Ctrl+P',
+    search: 'Ctrl+F',
+    openSettings: 'Ctrl+Comma',
+    toggleEmojiPicker: 'Ctrl+E',
+    openEvents: 'Ctrl+Shift+E',
+    toggleFormatting: 'Ctrl+Shift+F',
+    jumpToHome: 'Ctrl+Shift+Home'
   },
   voice: {
     // The behavioural half of Voice & Video. Device ids stay on the device.
@@ -125,7 +136,8 @@ export const SETTING_DEFAULTS = {
     blurStrength: 12,
     showSpeakingIndicator: true,
     silenceWarning: true,
-    voiceJoinSound: true
+    voiceJoinSound: true,
+    spatialAudio: false
   },
   layout: {
     // Server rail: folders group servers (Discord "server folders"); the order

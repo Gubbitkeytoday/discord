@@ -206,8 +206,10 @@ function checkComponentsDeclared(file, source, stripped) {
   }
   for (const m of source.matchAll(/(?:function|const|let|class)\s+([A-Z][\w$]*)/g)) declared.add(m[1]);
   // Destructured locals count as declarations too — from a const, and from a
-  // callback parameter such as `options.map(({ key, Icon }) => …)`.
-  for (const m of source.matchAll(/(?:\((?:\s*)|(?:const|let|var)\s*)\{([^}]*)\}\s*(?:=[^=]|\)\s*=>)/g)) {
+  // callback parameter such as `options.map(({ key, Icon }) => …)`, and from a
+  // function's own parameter list — `function Stat({ icon: StatIcon })`, where
+  // the rename is exactly the component name the JSX below then uses.
+  for (const m of source.matchAll(/(?:\((?:\s*)|(?:const|let|var)\s*)\{([^}]*)\}\s*(?:=[^=]|\)\s*(?:=>|\{))/g)) {
     for (const part of m[1].split(',')) {
       const name = part.trim().split(':').pop().trim();
       if (/^[A-Z][\w$]*$/.test(name)) declared.add(name);

@@ -89,6 +89,19 @@ export const get = (url, headers) => api('GET', url, undefined, headers);
  * x-user-id alongside it, so every assertion also proves the session takes
  * precedence over the dev shortcut.
  */
+/** Call the API as a bot: `Authorization: Bot <token>`. */
+export async function asBot(token, method, url, body) {
+  const res = await fetch(`${BASE}${url}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bot ${token}` },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await res.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+  return { status: res.status, body: parsed };
+}
+
 export async function asSession(token, method, url, body) {
   const res = await fetch(`${BASE}${url}`, {
     method,

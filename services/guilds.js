@@ -275,10 +275,14 @@ export async function getServerDetail(serverId, viewerId = null) {
       ...m,
       display_name: m.nickname || m.display_name,
       avatar_url: m.member_avatar_url || m.avatar_url,
-      roles: roles.map(({ id, name, color, position, hoist, icon_url }) => ({
-        id, name, color, position, hoist: Boolean(hoist), icon_url: icon_url ?? null
+      roles: roles.map(({ id, name, color, color_secondary, position, hoist, icon_url }) => ({
+        id, name, color, color_secondary: color_secondary ?? null,
+        position, hoist: Boolean(hoist), icon_url: icon_url ?? null
       })),
       role_color: topColoured?.color ?? null,
+      // Present only when that role has a second colour: the name renders as a
+      // gradient rather than a flat fill.
+      role_color_secondary: topColoured?.color_secondary ?? null,
       role_icon: topIcon ? { url: topIcon.icon_url, name: topIcon.name } : null,
       // Derived compatibility field for MemberList's badge logic.
       role: deriveRoleLabel({
@@ -440,7 +444,7 @@ export async function updateChannel({ channelId, patch, userId }) {
     }
   }
 
-  const allowed = ['name', 'topic', 'position', 'nsfw', 'rate_limit_per_user',
+  const allowed = ['name', 'topic', 'position', 'nsfw', 'spoiler', 'rate_limit_per_user',
                    'bitrate', 'user_limit', 'parent_id', 'locked', 'archived'];
   const sets = [];
   const params = [];
@@ -458,7 +462,7 @@ export async function updateChannel({ channelId, patch, userId }) {
     if (key === 'topic') value = value === null ? null : String(value).slice(0, 1024);
     if (key === 'rate_limit_per_user') value = Math.max(0, Math.min(21600, Number(value) || 0));
     if (key === 'user_limit') value = Math.max(0, Math.min(99, Number(value) || 0));
-    if (['nsfw', 'locked', 'archived'].includes(key)) value = value ? 1 : 0;
+    if (['nsfw', 'spoiler', 'locked', 'archived'].includes(key)) value = value ? 1 : 0;
     sets.push(`${key} = ?`); params.push(value);
   }
   if (!sets.length) return channel;
@@ -559,6 +563,10 @@ export async function joinServer({ serverId, userId }) {
   );
   if (banned) throw ApiError.forbidden('You are banned from this server');
   await assertVerificationLevel(serverId, userId);
+  // Raid protection sits here, after the ban and verification checks and
+  // before anything is written: a flood is refused, not cleaned up later.
+  const { guardJoin } = await import('./insights.js');
+  await guardJoin(serverId);
 
   const existing = await getQuery(
     `SELECT * FROM server_members WHERE server_id = ? AND user_id = ?`, [serverId, userId]
@@ -1087,6 +1095,104 @@ export async function listAuditLog(serverId, { limit = 50, before = null } = {})
     params
   );
   return rows.map((r) => ({ ...r, changes: JSON.parse(r.changes || '[]') }));
+}
+
+/**
+ * Reorder (and optionally re-parent) channels in one atomic move.
+ *
+ * Drag-and-drop sends the whole resulting order rather than a delta, because a
+ * delta computed on a stale sidebar reorders the wrong things. Every id is
+ * checked against this server first, so a crafted payload cannot drag someone
+ * else's channel into your category.
+ */
+export async function reorderChannels({ serverId, userId, order }) {
+  if (userId) await assertPermission({ userId, serverId, permission: 'MANAGE_CHANNELS' });
+  if (!Array.isArray(order) || order.length === 0) {
+    throw new ApiError('An order is required', { code: 'INVALID_ORDER' });
+  }
+
+  const owned = await allQuery(
+    `SELECT id, type FROM channels WHERE server_id = ? AND deleted_at IS NULL`, [serverId]
+  );
+  const byId = new Map(owned.map((c) => [c.id, c]));
+
+  for (const entry of order) {
+    const channel = byId.get(entry.id);
+    if (!channel) throw ApiError.notFound(`Channel ${entry.id}`);
+    if (entry.parent_id) {
+      const parent = byId.get(entry.parent_id);
+      if (!parent || parent.type !== 'category') {
+        throw new ApiError('A channel can only be moved into a category of this server', {
+          code: 'INVALID_PARENT'
+        });
+      }
+      // A category inside a category is not a thing Discord has, and the
+      // sidebar cannot render it.
+      if (channel.type === 'category') {
+        throw new ApiError('Categories cannot be nested', { code: 'NESTED_CATEGORY' });
+      }
+    }
+  }
+
+  await transaction(async () => {
+    for (const [index, entry] of order.entries()) {
+      await runQuery(
+        `UPDATE channels SET position = ?, parent_id = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          WHERE id = ? AND server_id = ?`,
+        [entry.position ?? index, entry.parent_id ?? null, entry.id, serverId]
+      );
+    }
+  });
+
+  return allQuery(
+    `SELECT id, name, type, parent_id, position FROM channels
+      WHERE server_id = ? AND deleted_at IS NULL
+      ORDER BY position ASC, created_at ASC`,
+    [serverId]
+  );
+}
+
+/**
+ * Copy a category's permission overwrites onto one of its children — Discord's
+ * "Sync Now", and the thing that makes categories worth having at all.
+ *
+ * The child's own overwrites are replaced, not merged: a sync that left
+ * leftovers behind would not be a sync, and the whole point is that the child
+ * afterwards matches the category exactly.
+ */
+export async function syncChannelPermissions({ channelId, userId }) {
+  const channel = await getQuery(
+    `SELECT id, server_id, parent_id, type FROM channels WHERE id = ? AND deleted_at IS NULL`,
+    [channelId]
+  );
+  if (!channel) throw ApiError.notFound('Channel');
+  if (!channel.parent_id) {
+    throw new ApiError('This channel is not inside a category', { code: 'NO_CATEGORY' });
+  }
+  if (userId) {
+    await assertPermission({
+      userId, serverId: channel.server_id, channelId, permission: 'MANAGE_ROLES'
+    });
+  }
+
+  const parentOverwrites = await allQuery(
+    `SELECT target_type, target_id, allow, deny FROM channel_overwrites WHERE channel_id = ?`,
+    [channel.parent_id]
+  );
+
+  await transaction(async () => {
+    await runQuery(`DELETE FROM channel_overwrites WHERE channel_id = ?`, [channelId]);
+    for (const o of parentOverwrites) {
+      await runQuery(
+        `INSERT INTO channel_overwrites (channel_id, target_type, target_id, allow, deny)
+         VALUES (?, ?, ?, ?, ?)`,
+        [channelId, o.target_type, o.target_id, o.allow, o.deny]
+      );
+    }
+  });
+
+  return { channel_id: channelId, synced: parentOverwrites.length };
 }
 
 export { PERMISSIONS };

@@ -78,6 +78,12 @@ export default function ChatTab() {
           onChange={(value) => set({ convertEmoticons: value })}
         />
         <SettingToggle
+          label={t('chatTab.tapToReact')}
+          hint={t('chatTab.tapToReactHint')}
+          checked={Boolean(chat.tapToReactEmoji)}
+          onChange={(value) => set({ tapToReactEmoji: value ? '❤️' : null })}
+        />
+        <SettingToggle
           label={t('chatTab.typingIndicator')}
           hint={t('chatTab.typingIndicatorHint')}
           checked={chat.showTypingIndicator}

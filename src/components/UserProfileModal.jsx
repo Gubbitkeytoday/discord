@@ -15,8 +15,8 @@ const STATUS_COLORS = {
 };
 
 export default function UserProfileModal({
-  user, currentUser, member, roles = [], friend, isBlocked,
-  onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile
+  user, currentUser, member, roles = [], friend, isBlocked, serverId = null,
+  onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile, onToast
 }) {
   const dialogRef = useFocusTrap(true, onClose);
   if (!user) return null;
@@ -92,6 +92,10 @@ export default function UserProfileModal({
                 </p>
               )}
             </div>
+
+            {isSelf && serverId && serverId !== 'home' && (
+              <GuildProfileEditor serverId={serverId} onToast={onToast} />
+            )}
 
             {!isSelf && <PrivateNote userId={user.id} initial={user.my_note} />}
 
@@ -202,6 +206,103 @@ export default function UserProfileModal({
  * to leave the field, and blur does not fire reliably when the element unmounts
  * underneath the cursor. A 600ms debounce plus a flush on unmount covers both.
  */
+/**
+ * Your profile *in this server*: Discord lets you look different in each one.
+ * Only the fields that differ are stored; anything left blank falls back to
+ * the account profile, which is why the placeholders show what you would get.
+ */
+function GuildProfileEditor({ serverId, onToast }) {
+  const [open, setOpen] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [draft, setDraft] = useState({ nickname: '', bio: '', pronouns: '' });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open || profile) return;
+    api(`/api/servers/${serverId}/profile/@me`)
+      .then((p) => {
+        setProfile(p);
+        setDraft({ nickname: p.nickname ?? '', bio: p.bio ?? '', pronouns: p.pronouns ?? '' });
+      })
+      .catch((err) => onToast?.(err.message, { type: 'error' }));
+  }, [open, profile, serverId, onToast]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const saved = await api(`/api/servers/${serverId}/profile/@me`, {
+        method: 'PATCH',
+        body: {
+          nickname: draft.nickname.trim() || null,
+          bio: draft.bio.trim() || null,
+          pronouns: draft.pronouns.trim() || null
+        }
+      });
+      setProfile(saved);
+      onToast?.(t('profile.guildSaved'), { type: 'success', ttl: 2000 });
+    } catch (err) {
+      onToast?.(err.message, { type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const field = 'w-full bg-d-input text-d-strong rounded px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-d-brand';
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="text-xs font-bold text-d-text2 uppercase tracking-wider hover:text-d-strong"
+      >
+        {t('profile.guildProfile')}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <label className="block">
+            <span className="block text-[10px] uppercase tracking-wide text-d-text3 mb-0.5">{t('profile.guildNickname')}</span>
+            <input
+              value={draft.nickname}
+              onChange={(e) => setDraft({ ...draft, nickname: e.target.value.slice(0, 32) })}
+              placeholder={profile?.effective?.display_name ?? ''}
+              className={field}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-[10px] uppercase tracking-wide text-d-text3 mb-0.5">{t('profile.guildPronouns')}</span>
+            <input
+              value={draft.pronouns}
+              onChange={(e) => setDraft({ ...draft, pronouns: e.target.value.slice(0, 40) })}
+              placeholder={profile?.effective?.pronouns ?? ''}
+              className={field}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-[10px] uppercase tracking-wide text-d-text3 mb-0.5">{t('profile.guildBio')}</span>
+            <textarea
+              rows={2}
+              value={draft.bio}
+              onChange={(e) => setDraft({ ...draft, bio: e.target.value.slice(0, 190) })}
+              placeholder={profile?.effective?.bio ?? ''}
+              className={`${field} resize-none`}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={save}
+            disabled={busy}
+            className="w-full bg-d-brand hover:bg-d-brand-hover disabled:opacity-50 text-white text-xs font-semibold py-1.5 rounded"
+          >
+            {t('common.save')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PrivateNote({ userId, initial = '' }) {
   const [note, setNote] = useState(initial ?? '');
   const [state, setState] = useState('idle');   // idle | saving | saved | error

@@ -188,6 +188,15 @@ CREATE TABLE IF NOT EXISTS servers (
                                 CHECK (default_notifications IN ('all_messages','only_mentions')),
   system_channel_id             TEXT,
   rules_channel_id              TEXT,
+  -- raid protection
+  raid_protection               INTEGER NOT NULL DEFAULT 0,
+  raid_join_threshold           INTEGER NOT NULL DEFAULT 10,
+  raid_join_window_secs         INTEGER NOT NULL DEFAULT 60,
+  raid_action                   TEXT NOT NULL DEFAULT 'lockdown'
+                                CHECK (raid_action IN ('lockdown','screen')),
+  -- public widget
+  widget_enabled                INTEGER NOT NULL DEFAULT 0,
+  widget_channel_id             TEXT,
   -- membership screening / welcome screen / onboarding
   screening_enabled             INTEGER NOT NULL DEFAULT 0,
   screening_rules               TEXT,                 -- JSON array of strings (≤10)
@@ -211,6 +220,7 @@ CREATE TABLE IF NOT EXISTS roles (
   server_id    TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   name         TEXT NOT NULL,
   color        TEXT,
+  color_secondary TEXT,   -- when set, the role name renders as a gradient
   icon_url     TEXT,
   position     INTEGER NOT NULL DEFAULT 0,
   permissions  TEXT NOT NULL DEFAULT '0',
@@ -228,6 +238,9 @@ CREATE TABLE IF NOT EXISTS server_members (
   user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   nickname       TEXT,
   avatar_url     TEXT,                  -- per-guild avatar override
+  banner_url     TEXT,                  -- per-guild banner
+  bio            TEXT,                  -- per-guild "about me"
+  pronouns       TEXT,
   joined_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   premium_since  TEXT,
   is_deaf        INTEGER NOT NULL DEFAULT 0,
@@ -292,6 +305,7 @@ CREATE TABLE IF NOT EXISTS channels (
   owner_id              TEXT REFERENCES users(id) ON DELETE SET NULL,
   position              INTEGER NOT NULL DEFAULT 0,
   nsfw                  INTEGER NOT NULL DEFAULT 0,
+  spoiler               INTEGER NOT NULL DEFAULT 0,  -- contents blurred until opened
   rate_limit_per_user   INTEGER NOT NULL DEFAULT 0,  -- slowmode seconds
   -- voice
   bitrate               INTEGER,
@@ -902,6 +916,9 @@ CREATE TABLE IF NOT EXISTS application_commands (
   server_id      TEXT REFERENCES servers(id) ON DELETE CASCADE,  -- NULL = global
   name           TEXT NOT NULL,
   description    TEXT NOT NULL,
+  -- 'slash' is typed in the composer; 'message'/'user' appear in the right-click
+  -- menu of a message or a member and carry that target instead of options.
+  type           TEXT NOT NULL DEFAULT 'slash' CHECK (type IN ('slash','message','user')),
   options        TEXT NOT NULL DEFAULT '[]',   -- JSON [{name,description,type,required,choices}]
   created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE (application_id, server_id, name)
@@ -927,3 +944,60 @@ CREATE TABLE IF NOT EXISTS interactions (
   created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id, created_at);
+
+-- ============================================================================
+--  Raid protection and the public widget.
+--
+--  Raid protection watches the join rate: when more than `raid_join_threshold`
+--  accounts join inside `raid_join_window_secs`, the server locks down —
+--  new joins are refused until staff lift it. Lockdowns are recorded so the
+--  audit log can explain what happened.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS guild_lockdowns (
+  id          TEXT PRIMARY KEY,
+  server_id   TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  reason      TEXT NOT NULL,
+  joins       INTEGER NOT NULL DEFAULT 0,
+  started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  lifted_at   TEXT,
+  lifted_by   TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lockdowns_server ON guild_lockdowns(server_id, started_at);
+
+-- ============================================================================
+--  Calls in DMs and group DMs.
+--
+--  A call is a thin record around the voice machinery that already exists:
+--  participants still live in `voice_states` keyed by the DM channel, so the
+--  same mesh, the same mute/deafen flags and the same screen-share path all
+--  apply. What a call adds is the ring: who started it, who is still being
+--  rung, and when it ended — which is what turns into the `call` system
+--  message in the conversation afterwards.
+--
+--  At most one call is open per channel; `idx_calls_open` enforces that.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS calls (
+  id           TEXT PRIMARY KEY,
+  channel_id   TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  initiator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  video        INTEGER NOT NULL DEFAULT 0,
+  message_id   TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  started_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  ended_at     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_open ON calls(channel_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_calls_channel ON calls(channel_id, started_at);
+
+-- Who the call rang, and what they did about it. A row per recipient means an
+-- unanswered call can say "no answer" for one person and "declined" for another.
+CREATE TABLE IF NOT EXISTS call_participants (
+  call_id   TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+  user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  state     TEXT NOT NULL DEFAULT 'ringing'
+            CHECK (state IN ('ringing','joined','declined','missed','left')),
+  joined_at TEXT,
+  left_at   TEXT,
+  PRIMARY KEY (call_id, user_id)
+);

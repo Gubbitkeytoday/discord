@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { io as ioClient } from 'socket.io-client';
 
 import {
-  startServer, stopServer, api, get, asSession, login, uploadFile, PNG, ADMIN, BASE
+  startServer, stopServer, api, get, asSession, asBot, login, uploadFile, PNG, ADMIN, BASE
 } from './testHarness.mjs';
 
 before(startServer);
@@ -947,5 +947,72 @@ describe('stage channels', () => {
     const stepped = rosterWhere(mod, (p) => p.participants.some((x) => x.userId === 'user-5' && x.isSuppressed));
     assert.equal((await emitAck(listener, 'stage_set_speaker', { channelId: stageId, userId: 'user-5', speaker: false }))?.ok, true);
     assert.ok(await stepped, 'step-down did not reach the roster');
+  });
+});
+
+// ============================================================================
+//  The bot gateway: an application receives interactions and answers them.
+// ============================================================================
+
+describe('bot gateway', () => {
+  let sockets = [];
+  const track = (socket) => { sockets.push(socket); return socket; };
+  after(() => { for (const s of sockets) s.close(); sockets = []; });
+
+  test('a bot identifies with its token, is handed an interaction, and answers it', async () => {
+    const created = await api('POST', '/api/applications', { name: 'GatewayBot' });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const { id: appId, token } = created.body;
+    await api('POST', `/api/applications/${appId}/invite`, {
+      server_id: 'server-1', permissions: ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS']
+    });
+
+    // Connect as the bot. A bad token must be refused outright.
+    const rejected = track(ioClient(BASE, { transports: ['websocket'], forceNew: true }));
+    await new Promise((resolve) => rejected.on('connect', resolve));
+    const refusal = new Promise((resolve) => rejected.once('identify_error', resolve));
+    rejected.emit('identify', { botToken: 'nonsense' });
+    assert.ok(await refusal, 'the gateway accepted a forged bot token');
+
+    const bot = track(ioClient(BASE, { transports: ['websocket'], forceNew: true }));
+    const identified = new Promise((resolve) => bot.once('identified', resolve));
+    bot.on('connect', () => bot.emit('identify', { botToken: token }));
+    const hello = await identified;
+    assert.equal(hello.applicationId, appId);
+
+    // The bot posts a message with a button, then a person presses it.
+    const posted = await asBot(token, 'POST', '/api/messages', {
+      channel_id: 'chan-102',
+      content: 'Ready?',
+      components: [{ components: [{ type: 'button', style: 'primary', label: 'Go', custom_id: 'go' }] }]
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+
+    const incoming = waitFor(bot, 'interaction_created', 4000);
+    const pressed = await api('POST', `/api/messages/${posted.body.id}/interactions`, { custom_id: 'go' });
+    assert.equal(pressed.status, 202);
+
+    const interaction = await incoming;
+    assert.ok(interaction, 'the bot never received the interaction');
+    assert.equal(interaction.custom_id, 'go');
+    assert.equal(interaction.user_id, 'user-me');
+    assert.ok(interaction.token, 'the interaction carries the token the bot answers with');
+
+    // The person who pressed hears back when the bot responds.
+    const watcher = track(await connectAs('user-me'));
+    await new Promise((resolve) => watcher.emit('join_channel', 'chan-102', resolve));
+    const resolved = waitFor(watcher, 'interaction_resolved', 4000);
+    const delivered = waitFor(watcher, 'new_message', 4000);
+
+    const answered = await asBot(token, 'POST', `/api/interactions/${interaction.id}/callback`, {
+      token: interaction.token, type: 'message', content: 'Off we go.'
+    });
+    assert.equal(answered.status, 200, JSON.stringify(answered.body));
+
+    const reply = await delivered;
+    assert.equal(reply?.content, 'Off we go.');
+    assert.equal((await resolved)?.interaction_id, interaction.id);
+
+    await api('DELETE', `/api/applications/${appId}`);
   });
 });

@@ -28,6 +28,9 @@ import MemberContextMenu from './components/MemberContextMenu';
 import ForwardMessageModal from './components/ForwardMessageModal';
 import CreateGroupDmModal from './components/CreateGroupDmModal';
 import NotificationsInbox from './components/NotificationsInbox';
+import { IncomingCall, CallBar } from './components/CallPanel';
+import ChannelGate from './components/ChannelGate';
+import EditHistoryModal from './components/EditHistoryModal';
 import { api, get, post, put, patch, del, upload, setApiIdentity } from './api';
 import { maskOf } from './utils/permissionCatalog';
 import {
@@ -47,7 +50,7 @@ const LAST_SERVER_KEY = 'antigravity.lastServer';
 
 // Bumped with every db.js migration. The client compares it to the running
 // server's own number (GET /api/health) so a stale backend is loud, not silent.
-const EXPECTED_SCHEMA_VERSION = 14;
+const EXPECTED_SCHEMA_VERSION = 17;
 
 /** Parse a Discord-style path: /channels/@me/:dm, /channels/:server/:channel, /invite/:code */
 function parseLocation() {
@@ -87,6 +90,7 @@ export default function App() {
   const [roles, setRoles] = useState([]);
   const [serverEmojis, setServerEmojis] = useState([]);
   const [externalEmojiGroups, setExternalEmojiGroups] = useState([]);   // emoji from every server I am in
+  const [botCommands, setBotCommands] = useState([]);                   // slash commands offered in this channel
   const [serverStickers, setServerStickers] = useState([]);
   const [friends, setFriends] = useState([]);
   const [dmChannels, setDmChannels] = useState([]);
@@ -119,12 +123,24 @@ export default function App() {
 
   // Modals & UI
   const [showMemberList, setShowMemberList] = useState(true);
+  // Below the `md` breakpoint the channel list is a drawer rather than a
+  // column, so it needs an explicit open state; on desktop it is always shown
+  // and this value is ignored.
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   // A /template/:code link opens the "use template" flow with the code filled in.
   const [showCreateServerModal, setShowCreateServerModal] = useState(() => (parseLocation().template ? { templateCode: parseLocation().template } : false));
   const [showCreateChannelModal, setShowCreateChannelModal] = useState(false);
   const [createChannelDefaultType, setCreateChannelDefaultType] = useState('text');
   const [showUserSettingsModal, setShowUserSettingsModal] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
+  // A bump that tells ChatArea to open its pinned-messages popover.
+  const [showPinsFromSlash, setShowPinsFromSlash] = useState(0);
+  // Two more "do it now" bumps, for the shortcuts that poke the composer.
+  const [openEmojiSignal, setOpenEmojiSignal] = useState(0);
+  const [toggleFormattingSignal, setToggleFormattingSignal] = useState(0);
+
+  // Picking a channel on a phone should get the drawer out of the way.
+  useEffect(() => { setMobileSidebarOpen(false); }, [activeChannelId]);
   const [selectedProfileUser, setSelectedProfileUser] = useState(null);
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [serverSettingsTab, setServerSettingsTab] = useState(null);
@@ -137,6 +153,12 @@ export default function App() {
   const [memberMenu, setMemberMenu] = useState(null);     // { user, x, y }
   const [forwardMessage, setForwardMessage] = useState(null);
   const [followSource, setFollowSource] = useState(null);   // announcement channel being followed
+  // A DM call has two halves: `incomingCall` is the ring that can arrive while
+  // the user is anywhere in the app, and `activeCall` is the call in whichever
+  // conversation is currently open.
+  const [editHistoryFor, setEditHistoryFor] = useState(null);  // message whose trail is open
+  const [incomingCall, setIncomingCall] = useState(null);   // { channelId, call }
+  const [activeCall, setActiveCall] = useState(null);       // { channelId, call }
   const [showGroupDmModal, setShowGroupDmModal] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
@@ -395,9 +417,11 @@ export default function App() {
       : `/channels/${activeServerId}/${activeChannelId}`;
     if (window.location.pathname !== path && !pendingJumpMessageId) window.history.replaceState(null, '', path);
 
+    // Discord voice channels carry a text channel too, and people use it
+    // constantly — links, "brb", the thing you cannot say over a hot mic. So
+    // joining the room no longer replaces the conversation: it loads as well.
     if (activeChan.type === 'voice' || activeChan.type === 'stage') {
       handleJoinVoice(activeChan);
-      return;
     }
 
     setChannelReadMarker(readStates[activeChannelId]?.last_read_message_id ?? null);
@@ -425,6 +449,16 @@ export default function App() {
       });
 
     loadPins(activeChannelId);
+
+    // Which bot commands this channel offers depends on which bots are in the
+    // server, so it is fetched per channel rather than held globally.
+    if (activeChan.server_id) {
+      get(`/api/channels/${activeChannelId}/commands`)
+        .then((list) => setBotCommands(Array.isArray(list) ? list : []))
+        .catch(() => setBotCommands([]));
+    } else {
+      setBotCommands([]);
+    }
 
     if (activeChan.type !== 'thread' && activeChan.server_id) {
       get(`/api/channels/${activeChannelId}/threads`)
@@ -720,6 +754,30 @@ export default function App() {
       if (activeChannelIdRef.current === id) setActiveChannelId(null);
     };
 
+    // Someone is calling. The ring is deliberately not tied to the open
+    // conversation — that is the whole point of it.
+    const onCallRing = ({ channel_id, call }) => setIncomingCall({ channelId: channel_id, call });
+
+    const onCallUpdated = ({ channel_id, call }) => {
+      if (!call) {
+        setIncomingCall((prev) => (prev?.channelId === channel_id ? null : prev));
+        setActiveCall((prev) => (prev?.channelId === channel_id ? null : prev));
+        return;
+      }
+      setActiveCall({ channelId: channel_id, call });
+      // Once someone answers, the ring is over for everyone.
+      setIncomingCall((prev) => (prev?.channelId === channel_id
+        && (call.participants ?? []).some((p) => p.user_id === prev.call?.initiator_id ? false : p.state === 'joined')
+        ? null : prev));
+    };
+
+    // One event for a whole batch; repaint the history once, not a hundred times.
+    const onBulkDeleted = ({ channel_id, ids }) => {
+      if (channel_id !== activeChannelIdRef.current) return;
+      const gone = new Set(ids);
+      setMessages((prev) => prev.filter((m) => !gone.has(m.id)));
+    };
+
     const onActionError = ({ error }) => pushToast(error, { type: 'error' });
     const onIdentifyError = () => {
       // The session is gone server-side; the only honest answer is the login screen.
@@ -769,6 +827,11 @@ export default function App() {
       dm_channel_updated: onDmCreated,
       dm_channel_removed: onDmRemoved,
       user_settings_updated: ({ category, value }) => applyCategoryFromServer(category, value),
+      call_ring: onCallRing,
+      call_updated: onCallUpdated,
+      messages_bulk_deleted: onBulkDeleted,
+      channels_reordered: refreshServer,
+      channel_permissions_synced: refreshServer,
       action_error: onActionError,
       message_error: onActionError,
       identify_error: onIdentifyError
@@ -802,6 +865,14 @@ export default function App() {
     if (next) setActiveChannelId(next.id);
   }, [activeServerId, dmChannels, channels, activeChannelId]);
 
+  /** Move up or down the server rail, wrapping, with Home at the top. */
+  const stepServer = useCallback((direction) => {
+    const list = ['home', ...servers.map((s) => s.id)];
+    const index = list.indexOf(activeServerId);
+    const next = list[(index + direction + list.length) % list.length];
+    if (next) setActiveServerId(next);
+  }, [servers, activeServerId]);
+
   const markEverythingRead = useCallback(() => {
     for (const channelId of Object.keys(readStates)) {
       const state = readStates[channelId];
@@ -825,7 +896,20 @@ export default function App() {
       const next = !prefs.streamerMode.enabled;
       updatePreferences('streamerMode', { enabled: next });
       pushToast(next ? t('streamer.turnedOn') : t('streamer.turnedOff'), { type: 'info', ttl: 2500 });
-    }
+    },
+    // Each of these drives the same state the mouse does, so a shortcut and a
+    // click can never disagree.
+    navigateServerUp: () => stepServer(-1),
+    navigateServerDown: () => stepServer(1),
+    markChannelRead: () => { if (activeChannelId) handleMarkChannelRead(activeChannelId); },
+    toggleMemberList: () => setShowMemberList((v) => !v),
+    togglePins: () => setShowPinsFromSlash(Date.now()),
+    search: () => setShowQuickSwitcher(true),
+    openSettings: () => setShowUserSettingsModal(true),
+    openEvents: () => { if (activeServerId !== 'home') setShowEvents(true); },
+    toggleEmojiPicker: () => setOpenEmojiSignal(Date.now()),
+    toggleFormatting: () => setToggleFormattingSignal(Date.now()),
+    jumpToHome: () => setActiveServerId('home')
   });
 
   // Mark the open channel read when the tab regains focus.
@@ -922,6 +1006,43 @@ export default function App() {
         if (!activeChannelId) return;
         const thread = await post(`/api/channels/${activeChannelId}/threads`, { name: value });
         if (thread?.id) setActiveChannelId(thread.id);
+        return;
+      }
+      // Each of these opens something the UI already has, so a command and
+      // its button can never drift apart.
+      if (action === 'settings') { setShowUserSettingsModal(true); return; }
+      if (action === 'events') {
+        if (activeServerId === 'home') { pushToast(t('slash.needsServer'), { type: 'error' }); return; }
+        setShowEvents(true);
+        return;
+      }
+      if (action === 'pins') { setShowPinsFromSlash(Date.now()); return; }
+      if (action === 'status') {
+        handleSetStatus(currentUser?.status ?? 'online', value || null);
+        pushToast(value ? t('slash.statusSet', { text: value }) : t('slash.statusCleared'), { type: 'success', ttl: 2500 });
+        return;
+      }
+      if (action === 'mute-channel' || action === 'unmute-channel') {
+        if (!activeChannelId) return;
+        await handleUpdateChannelSettings(activeChannelId, { muted: action === 'mute-channel' });
+        pushToast(action === 'mute-channel' ? t('slash.channelMuted') : t('slash.channelUnmuted'),
+          { type: 'success', ttl: 2500 });
+        return;
+      }
+      if (action === 'invite') {
+        if (!activeServerId || activeServerId === 'home' || !activeChannelId) {
+          pushToast(t('slash.needsServer'), { type: 'error' });
+          return;
+        }
+        const invite = await post(`/api/servers/${activeServerId}/invites`, { channelId: activeChannelId, maxAge: 86400 });
+        const link = `${window.location.origin}/invite/${invite.code}`;
+        await navigator.clipboard?.writeText(link).catch(() => {});
+        pushToast(t('server.inviteCopied', { code: invite.code }), { type: 'success' });
+        return;
+      }
+      if (action === 'leave') {
+        if (!activeServerId || activeServerId === 'home') { pushToast(t('slash.needsServer'), { type: 'error' }); return; }
+        handleLeaveServer();
         return;
       }
       if (action === 'nick') {
@@ -1505,8 +1626,72 @@ export default function App() {
       channelSettings={channelSettings[activeChannelId]}
       onToggleMemberList={() => setShowMemberList(!showMemberList)}
       showMemberList={showMemberList}
+      onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
     />
   ) : null;
+
+  // --- DM calls ---------------------------------------------------------------
+  // The ring is HTTP; the media rides the same voice mesh a guild channel uses,
+  // so answering is "join the voice room for this DM channel" and nothing more.
+  const isDmConversation = activeChannel?.type === 'dm' || activeChannel?.type === 'group_dm';
+
+  useEffect(() => {
+    if (!isDmConversation || !activeChannelId) { setActiveCall(null); return undefined; }
+    let cancelled = false;
+    // A call may already be in progress when the conversation is opened —
+    // realtime only tells us about changes from here on.
+    get(`/api/channels/${activeChannelId}/call`)
+      .then(({ call }) => { if (!cancelled) setActiveCall(call ? { channelId: activeChannelId, call } : null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeChannelId, isDmConversation]);
+
+  const handleStartCall = useCallback(async (video = false) => {
+    if (!activeChannelId) return;
+    try {
+      const { call } = await post(`/api/channels/${activeChannelId}/call`, { video });
+      setActiveCall({ channelId: activeChannelId, call });
+      handleJoinVoice(activeChannel);
+    } catch (err) { toastError(err); }
+  }, [activeChannelId, activeChannel, toastError]);
+
+  const handleAcceptCall = useCallback(async () => {
+    const target = incomingCall?.channelId;
+    if (!target) return;
+    setIncomingCall(null);
+    try {
+      const { call } = await post(`/api/channels/${target}/call/join`, {});
+      setActiveCall({ channelId: target, call });
+      setActiveChannelId(target);
+      const dm = dmChannels.find((d) => d.id === target);
+      if (dm) handleJoinVoice(dm);
+    } catch (err) { toastError(err); }
+  }, [incomingCall, dmChannels, toastError]);
+
+  const handleDeclineCall = useCallback(async () => {
+    const target = incomingCall?.channelId;
+    setIncomingCall(null);
+    if (!target) return;
+    try { await post(`/api/channels/${target}/call/decline`, {}); }
+    catch (err) { toastError(err); }
+  }, [incomingCall, toastError]);
+
+  const handleHangUp = useCallback(async () => {
+    const target = activeCall?.channelId ?? activeChannelId;
+    if (!target) return;
+    const inCall = (activeCall?.call?.participants ?? [])
+      .some((p) => p.user_id === currentUser?.id && p.state === 'joined');
+    try {
+      if (inCall) {
+        await post(`/api/channels/${target}/call/leave`, {});
+        handleLeaveVoice?.();
+      } else {
+        const { call } = await post(`/api/channels/${target}/call/join`, {});
+        setActiveCall({ channelId: target, call });
+        if (activeChannel?.id === target) handleJoinVoice(activeChannel);
+      }
+    } catch (err) { toastError(err); }
+  }, [activeCall, activeChannelId, activeChannel, currentUser, toastError]);
 
   const chatArea = forumView ?? (
     <ChatArea
@@ -1546,6 +1731,25 @@ export default function App() {
       onSelectChannel={(id) => setActiveChannelId(id)}
       onCreateThread={activeChannel?.server_id && activeChannel.type !== 'thread' ? handleCreateThread : null}
       onForward={(msg) => setForwardMessage(msg)}
+      botCommands={botCommands}
+      onRunBotCommand={async (command, options, target = null) => {
+        try {
+          await post(`/api/channels/${activeChannelId}/commands/${encodeURIComponent(command.name)}`, { options, target });
+          pushToast(t('bot.commandSent', { name: command.name }), { type: 'info', ttl: 2500 });
+        } catch (err) { toastError(err); }
+      }}
+      openPinsSignal={showPinsFromSlash}
+      openEmojiSignal={openEmojiSignal}
+      toggleFormattingSignal={toggleFormattingSignal}
+      onSuperReact={(messageId, emoji) => socket.emit('super_reaction', { channelId: activeChannelId, messageId, emoji })}
+      onSuperReactionEvent={(handler) => {
+        const listener = (payload) => {
+          if (payload.channelId !== activeChannelIdRef.current) return;
+          handler({ messageId: payload.messageId, emoji: payload.emoji });
+        };
+        socket.on('super_reaction', listener);
+        return () => socket.off('super_reaction', listener);
+      }}
       onPublish={async (msg) => {
         try {
           const result = await post(`/api/messages/${msg.id}/crosspost`, {});
@@ -1561,7 +1765,20 @@ export default function App() {
       blockedIds={blockedIds}
       onOpenInbox={(x, y) => setShowInbox({ x, y })}
       inboxCount={notifications.filter((n) => !n.read_at).length}
-      onAddGroupRecipients={activeChannel?.type === 'dm' || activeChannel?.type === 'group_dm' ? () => setShowGroupDmModal({ channel: activeChannel }) : null}
+      onAddGroupRecipients={isDmConversation ? () => setShowGroupDmModal({ channel: activeChannel }) : null}
+      onStartCall={isDmConversation && !activeCall ? handleStartCall : null}
+      onShowEditHistory={(msg) => setEditHistoryFor(msg)}
+      callBar={activeCall?.channelId === activeChannelId ? (
+        <CallBar
+          call={activeCall.call}
+          currentUserId={currentUser?.id}
+          isMuted={isMuted}
+          onToggleMute={handleToggleMute}
+          isVideo={Boolean(activeCall.call?.video)}
+          onToggleVideo={() => handleVideoStateChange({ isVideo: !activeCall.call?.video })}
+          onHangUp={handleHangUp}
+        />
+      ) : null}
       onArchiveThread={activeChannel?.type === 'thread' ? async (archived) => {
         try {
           const updated = await patch(`/api/threads/${activeChannel.id}`, { archived });
@@ -1675,6 +1892,8 @@ export default function App() {
             }}
             readStates={readStates}
             channelSettings={channelSettings}
+            mobileOpen={mobileSidebarOpen}
+            onCloseMobile={() => setMobileSidebarOpen(false)}
             serverSettings={serverSettings[activeServerId]}
             viewerPermissions={viewerPermissions}
             isOwner={isOwner}
@@ -1710,6 +1929,9 @@ export default function App() {
           />
 
           {isVoiceChannel ? (
+            // The room on top, the channel's own text chat underneath.
+            <div className="flex-1 flex flex-col min-h-0">
+              <div className="shrink-0 max-h-[55%] flex flex-col min-h-0">
             <VoiceRoom
               channel={activeChannel}
               participants={activeVoiceParticipants}
@@ -1727,8 +1949,21 @@ export default function App() {
               onVideoStateChange={handleVideoStateChange}
               socket={socket}
             />
+              </div>
+              <div className="flex-1 flex flex-col min-h-0 border-t border-d-edge">
+                {chatArea}
+              </div>
+            </div>
           ) : (
-            chatArea
+            // Age-restricted and spoiler channels get one interstitial before
+            // their history is painted; every other channel renders straight
+            // through with no wrapper at all.
+            <ChannelGate
+              channel={activeChannel}
+              onLeave={() => setActiveChannelId(null)}
+            >
+              {chatArea}
+            </ChannelGate>
           )}
 
           {searchResults !== null && (
@@ -1741,12 +1976,22 @@ export default function App() {
             />
           )}
 
-          {!isVoiceChannel && searchResults === null && showMemberList && (
-            <MemberList
-              members={members}
-              onSelectMember={openProfile}
-              onMemberContextMenu={(member, x, y) => openMemberMenu(member, x, y)}
-            />
+          {searchResults === null && showMemberList && (
+            <>
+              {/* On a phone the member list is a sheet over the chat, not a
+                  third column there is no room for. */}
+              <button
+                type="button"
+                aria-label={t('common.close')}
+                onClick={() => setShowMemberList(false)}
+                className="lg:hidden fixed inset-0 bg-black/50 z-20"
+              />
+              <MemberList
+                members={members}
+                onSelectMember={openProfile}
+                onMemberContextMenu={(member, x, y) => openMemberMenu(member, x, y)}
+              />
+            </>
           )}
         </div>
       )}
@@ -1797,6 +2042,7 @@ export default function App() {
       {showUserSettingsModal && (
         <UserSettingsModal
           currentUser={currentUser}
+          servers={servers}
           initialTab={typeof showUserSettingsModal === 'string' ? showUserSettingsModal : 'profile'}
           onClose={() => setShowUserSettingsModal(false)}
           onSaveProfile={handleSaveProfile}
@@ -1993,10 +2239,26 @@ export default function App() {
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
+      {editHistoryFor && (
+        <EditHistoryModal message={editHistoryFor} onClose={() => setEditHistoryFor(null)} />
+      )}
+
+      {/* A call rings wherever the user is, not only inside the conversation. */}
+      {incomingCall && (
+        <IncomingCall
+          call={incomingCall.call}
+          channel={dmChannels.find((d) => d.id === incomingCall.channelId)}
+          onAccept={handleAcceptCall}
+          onDecline={handleDeclineCall}
+        />
+      )}
+
       {selectedProfileUser && (
         <UserProfileModal
           user={selectedProfileUser}
           currentUser={currentUser}
+          serverId={activeServerId}
+          onToast={pushToast}
           member={members.find((m) => m.id === selectedProfileUser.id)}
           roles={roles}
           friend={friends.find((f) => f.id === selectedProfileUser.id)}

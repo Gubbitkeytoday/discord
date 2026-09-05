@@ -9,12 +9,14 @@
 import { runQuery, getQuery, allQuery, transaction } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { getFile, addReference, releaseReference, formatBytes } from '../storageService.js';
+import { validateEmbeds, validateComponents } from './applications.js';
 import { getFileType } from '../lib/mediaProbe.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { computeBasePermissions, ALL_PERMISSIONS, has } from '../lib/permissions.js';
 import * as automod from './automod.js';
 import { assertChannelAccess, canInChannel } from './access.js';
 import { validatePollInput, writePollRows, attachPolls } from './polls.js';
+import { parseSearchQuery, hasFilters, periodBounds } from '../lib/searchQuery.js';
 
 const MENTION_USER    = /<@!?(\d+|user-[\w-]+)>/g;
 const MENTION_ROLE    = /<@&([\w-]+)>/g;
@@ -207,6 +209,10 @@ async function hydrate(rows, viewerId = null) {
       mention_everyone: Boolean(row.mention_everyone),
       webhook_id: row.webhook_id ?? null,
       embeds: safeParse(row.embeds, []),
+      components: safeParse(row.components, []),
+      application_id: row.application_id ?? null,
+      ephemeral: Boolean(row.ephemeral_user_id),
+      ephemeral_for: row.ephemeral_user_id ?? null,
       sticker: row.sticker_id
         ? { id: row.sticker_id, name: row.sticker_name, url: row.sticker_url, format: row.sticker_format }
         : null,
@@ -252,7 +258,11 @@ export async function listMessages(channelId, {
   // in a guild, recipient membership in a DM.
   if (viewerId) await assertChannelAccess({ channelId, userId: viewerId, permission: 'READ_MESSAGE_HISTORY' });
   const params = [channelId];
-  let where = 'm.channel_id = ? AND m.deleted_at IS NULL';
+  // An ephemeral reply is a real row (moderation and audit still see it) but
+  // only its recipient ever reads it back.
+  let where = 'm.channel_id = ? AND m.deleted_at IS NULL'
+    + ' AND (m.ephemeral_user_id IS NULL OR m.ephemeral_user_id = ?)';
+  params.push(viewerId ?? '');
   let order = 'DESC';
 
   if (around) {
@@ -260,11 +270,11 @@ export async function listMessages(channelId, {
     const half = Math.floor(limit / 2);
     const older = await allQuery(
       `${SELECT_MESSAGE} WHERE ${where} AND m.id <= ? ORDER BY m.id DESC LIMIT ?`,
-      [channelId, around, half + 1]
+      [channelId, viewerId ?? '', around, half + 1]
     );
     const newer = await allQuery(
       `${SELECT_MESSAGE} WHERE ${where} AND m.id > ? ORDER BY m.id ASC LIMIT ?`,
-      [channelId, around, half]
+      [channelId, viewerId ?? '', around, half]
     );
     return hydrate([...older.reverse(), ...newer], viewerId);
   }
@@ -323,7 +333,7 @@ async function assertExternalEmojiAllowed({ content, userId, channel, senderPerm
 export async function createMessage({
   channelId, userId, content = '', attachments = [], replyToId = null,
   nonce = null, type = 'default', tts = false, skipModeration = false, stickerId = null,
-  poll = null
+  poll = null, embeds = null, components = null, applicationId = null, ephemeralUserId = null
 }) {
   const channel = await getQuery(
     `SELECT id, server_id, rate_limit_per_user, locked, archived, type AS channel_type
@@ -371,7 +381,11 @@ export async function createMessage({
       throw ApiError.forbidden('That sticker belongs to another server');
     }
   }
-  if (!trimmed && attachments.length === 0 && !sticker && !poll) {
+  // A bot may say nothing but show an embed or a set of buttons.
+  const richEmbeds = embeds ? validateEmbeds(embeds) : [];
+  const messageComponents = components ? validateComponents(components) : [];
+  if (!trimmed && attachments.length === 0 && !sticker && !poll
+      && richEmbeds.length === 0 && messageComponents.length === 0) {
     throw new ApiError('A message needs content or an attachment', { code: 'EMPTY_MESSAGE' });
   }
 
@@ -450,11 +464,13 @@ export async function createMessage({
   await transaction(async () => {
     await runQuery(
       `INSERT INTO messages (id, channel_id, server_id, user_id, content, type,
-                             reply_to_id, mention_everyone, tts, nonce, sticker_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             reply_to_id, mention_everyone, tts, nonce, sticker_id,
+                             embeds, components, application_id, ephemeral_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [messageId, channelId, channel.server_id, userId, trimmed,
        replyToId ? 'reply' : type, replyToId, mentions.everyone ? 1 : 0, tts ? 1 : 0, nonce,
-       sticker?.id ?? null]
+       sticker?.id ?? null, JSON.stringify(richEmbeds), JSON.stringify(messageComponents),
+       applicationId, ephemeralUserId]
     );
 
     await runQuery(
@@ -688,15 +704,22 @@ async function bumpUnreadCounters({
   return notifications;
 }
 
-export async function editMessage({ messageId, userId, content }) {
+export async function editMessage({ messageId, userId, content, embeds = undefined, components = undefined }) {
   const message = await getQuery(
     `SELECT * FROM messages WHERE id = ? AND deleted_at IS NULL`, [messageId]
   );
   if (!message) throw ApiError.notFound('Message');
   if (message.user_id !== userId) throw ApiError.forbidden('You can only edit your own messages');
 
-  const trimmed = String(content ?? '').trim().slice(0, 4000);
-  if (!trimmed) {
+  // An edit may change the text, the embeds, the components, or any mix. A
+  // bot updating only its buttons should not have to resend the text.
+  const keepsContent = content === undefined || content === null;
+  const trimmed = keepsContent ? String(message.content ?? '') : String(content).trim().slice(0, 4000);
+  const nextEmbeds = embeds === undefined ? null : JSON.stringify(validateEmbeds(embeds));
+  const nextComponents = components === undefined ? null : JSON.stringify(validateComponents(components));
+  const willHaveEmbeds = nextEmbeds !== null ? nextEmbeds !== '[]' : (message.embeds ?? '[]') !== '[]';
+  const willHaveComponents = nextComponents !== null ? nextComponents !== '[]' : (message.components ?? '[]') !== '[]';
+  if (!trimmed && !willHaveEmbeds && !willHaveComponents) {
     throw new ApiError('An edit cannot empty a message — delete it instead', { code: 'EMPTY_MESSAGE' });
   }
   const mentions = parseMentions(trimmed);
@@ -710,9 +733,10 @@ export async function editMessage({ messageId, userId, content }) {
     await runQuery(
       `UPDATE messages
           SET content = ?, mention_everyone = ?,
+              embeds = COALESCE(?, embeds), components = COALESCE(?, components),
               edited_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
         WHERE id = ?`,
-      [trimmed, mentions.everyone ? 1 : 0, messageId]
+      [trimmed, mentions.everyone ? 1 : 0, nextEmbeds, nextComponents, messageId]
     );
     await runQuery(`DELETE FROM messages_fts WHERE message_id = ?`, [messageId]);
     await runQuery(
@@ -883,8 +907,13 @@ export async function searchMessages({
   query, channelId = null, serverId = null, authorId = null, hasAttachment = false,
   limit = 25, viewerId = null
 }) {
-  const term = String(query ?? '').trim();
-  if (!term) return [];
+  // `from:`, `in:`, `has:` and the date operators are part of the query string
+  // itself, exactly as they are on Discord.
+  const parsed = parseSearchQuery(query);
+  const term = parsed.term;
+  // A query that is nothing but operators is still a search — "everything user-2
+  // ever posted here" is a perfectly ordinary thing to ask for.
+  if (!term && !hasFilters(parsed.filters)) return [];
 
   const where = ['m.deleted_at IS NULL'];
   const filterParams = [];
@@ -892,6 +921,81 @@ export async function searchMessages({
   if (serverId)  { where.push('m.server_id = ?');  filterParams.push(serverId); }
   if (authorId)  { where.push('m.user_id = ?');    filterParams.push(authorId); }
   if (hasAttachment) where.push('EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)');
+
+  // --- operator filters ------------------------------------------------------
+  // Names are resolved to ids here rather than in the parser, because a name
+  // lookup needs the database and an id must never be guessed from user text.
+  const resolveUsers = async (names) => {
+    const ids = [];
+    for (const name of names) {
+      const row = await getQuery(
+        `SELECT id FROM users WHERE (id = ? OR username = ? OR display_name = ?) AND deleted_at IS NULL LIMIT 1`,
+        [name, name, name]
+      );
+      // An unmatched name must narrow to nothing, not widen to everything.
+      ids.push(row?.id ?? '~none~');
+    }
+    return ids;
+  };
+
+  const inList = (column, values) => {
+    where.push(`${column} IN (${values.map(() => '?').join(',')})`);
+    filterParams.push(...values);
+  };
+
+  if (parsed.filters.from.length) inList('m.user_id', await resolveUsers(parsed.filters.from));
+
+  if (parsed.filters.mentions.length) {
+    const mentionIds = await resolveUsers(parsed.filters.mentions);
+    where.push(`EXISTS (SELECT 1 FROM mentions mn WHERE mn.message_id = m.id
+                          AND mn.target_type = 'user' AND mn.target_id IN (${
+      mentionIds.map(() => '?').join(',')}))`);
+    filterParams.push(...mentionIds);
+  }
+
+  if (parsed.filters.in.length) {
+    const channelIds = [];
+    for (const name of parsed.filters.in) {
+      const row = await getQuery(
+        `SELECT id FROM channels WHERE (id = ? OR name = ?) AND deleted_at IS NULL
+           ${serverId ? 'AND server_id = ?' : ''} LIMIT 1`,
+        serverId ? [name, name, serverId] : [name, name]
+      );
+      channelIds.push(row?.id ?? '~none~');
+    }
+    inList('m.channel_id', channelIds);
+  }
+
+  for (const kind of parsed.filters.has) {
+    if (kind === 'link' || kind === 'embed') {
+      where.push(kind === 'link'
+        ? `m.content LIKE '%http%'`
+        : `(m.embeds IS NOT NULL AND m.embeds <> '[]')`);
+    } else if (kind === 'poll') {
+      where.push(`EXISTS (SELECT 1 FROM polls p WHERE p.message_id = m.id)`);
+    } else if (kind === 'sticker') {
+      where.push(`m.sticker_id IS NOT NULL`);
+    } else if (kind === 'image' || kind === 'video' || kind === 'sound') {
+      const prefix = kind === 'sound' ? 'audio/' : `${kind}/`;
+      where.push(`EXISTS (SELECT 1 FROM attachments a JOIN files f ON f.id = a.file_id
+                           WHERE a.message_id = m.id AND f.mime_type LIKE ?)`);
+      filterParams.push(`${prefix}%`);
+    } else {
+      where.push(`EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)`);
+    }
+  }
+
+  if (parsed.filters.pinned !== null) where.push(`m.pinned = ${parsed.filters.pinned ? 1 : 0}`);
+
+  // Dates compare against created_at, which is ISO-8601 UTC text — so a plain
+  // string comparison is also a chronological one.
+  if (parsed.filters.before) { where.push('m.created_at < ?'); filterParams.push(`${parsed.filters.before}T00:00:00.000Z`); }
+  if (parsed.filters.after)  { where.push('m.created_at > ?'); filterParams.push(`${parsed.filters.after}T23:59:59.999Z`); }
+  if (parsed.filters.during) {
+    const bounds = periodBounds(parsed.filters.during);
+    where.push('m.created_at BETWEEN ? AND ?');
+    filterParams.push(bounds.from, bounds.to);
+  }
 
   const cap = Math.min(limit, 100);
   const projection = `
@@ -906,7 +1010,14 @@ export async function searchMessages({
   `;
 
   let rows;
-  if (term.length >= 3) {
+  if (!term) {
+    // Operators only — no text to match, so the filters are the whole query.
+    rows = await allQuery(
+      `${projection} FROM messages m ${joins}
+        WHERE ${where.join(' AND ')} ORDER BY m.id DESC LIMIT ?`,
+      [...filterParams, cap]
+    );
+  } else if (term.length >= 3) {
     // The trigram tokenizer treats a double-quoted string as a literal
     // substring, so no FTS operators can leak in from user input.
     const ftsQuery = `"${term.replace(/"/g, '""')}"`;
@@ -1039,4 +1150,84 @@ export async function getUnreadSummary(userId) {
     }
   }
   return visible;
+}
+
+/**
+ * The edit trail of one message, newest first.
+ *
+ * Every edit already writes a `message_edits` row; until now nothing read them
+ * back. Discord shows the trail to anyone who can read the channel, which is
+ * the right default: an edited message that quietly changed meaning is exactly
+ * what people want to check.
+ */
+export async function listEditHistory(messageId, viewerId) {
+  const message = await getQuery(
+    `SELECT id, channel_id, content, edited_at FROM messages WHERE id = ? AND deleted_at IS NULL`,
+    [messageId]
+  );
+  if (!message) throw ApiError.notFound('Message');
+  await assertChannelAccess({
+    channelId: message.channel_id, userId: viewerId, permission: 'READ_MESSAGE_HISTORY'
+  });
+
+  const revisions = await allQuery(
+    `SELECT id, content, edited_at FROM message_edits WHERE message_id = ? ORDER BY edited_at DESC`,
+    [messageId]
+  );
+  // The current text is the head of the trail, so the client can diff pairs
+  // without special-casing "now".
+  return {
+    message_id: messageId,
+    revisions: [
+      { id: 'current', content: message.content, edited_at: message.edited_at, current: true },
+      ...revisions
+    ]
+  };
+}
+
+// Discord's bulk delete: at most 100 at a time, and nothing older than two
+// weeks — the age limit is what stops it being a "wipe the channel" button.
+const BULK_DELETE_MAX = 100;
+const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete many messages in one action. Returns the ids actually removed, so the
+ * caller can emit one `messages_bulk_deleted` rather than a hundred events.
+ */
+export async function bulkDeleteMessages({ channelId, messageIds, userId }) {
+  await assertChannelAccess({ channelId, userId, permission: 'MANAGE_MESSAGES' });
+
+  const ids = [...new Set((messageIds ?? []).map(String))];
+  if (ids.length < 2) {
+    throw new ApiError('Bulk delete needs at least two messages', { code: 'BULK_TOO_FEW' });
+  }
+  if (ids.length > BULK_DELETE_MAX) {
+    throw new ApiError(`Bulk delete is limited to ${BULK_DELETE_MAX} messages`, { code: 'BULK_TOO_MANY' });
+  }
+
+  const cutoff = new Date(Date.now() - BULK_DELETE_MAX_AGE_MS).toISOString();
+  const rows = await allQuery(
+    `SELECT id, created_at FROM messages
+      WHERE id IN (${ids.map(() => '?').join(',')}) AND channel_id = ? AND deleted_at IS NULL`,
+    [...ids, channelId]
+  );
+  // A message from another channel, or one already gone, is not an error — but
+  // an over-age message is, because silently skipping it would leave the
+  // moderator believing the channel was cleared when it was not.
+  const tooOld = rows.filter((r) => r.created_at < cutoff);
+  if (tooOld.length) {
+    throw new ApiError('Bulk delete cannot remove messages older than 14 days', {
+      code: 'BULK_TOO_OLD', details: { count: tooOld.length }
+    });
+  }
+
+  const deletable = rows.map((r) => r.id);
+  if (!deletable.length) return { channel_id: channelId, ids: [] };
+
+  await runQuery(
+    `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
+  );
+  return { channel_id: channelId, ids: deletable };
 }

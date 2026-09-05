@@ -332,6 +332,54 @@ const MIGRATIONS = [
       await addColumn('messages', 'application_id', 'TEXT');
     }
   }
+  ,{
+    version: 16,
+    name: 'raid protection, widget, per-guild profiles',
+    up: async () => {
+      const table = await getQuery(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'guild_lockdowns'`);
+      if (!table) throw new Error('guild_lockdowns missing — schema.sql did not apply');
+      const addColumn = async (t, column, ddl) => {
+        const cols = await allQuery(`PRAGMA table_info(${t})`);
+        if (!cols.some((c) => c.name === column)) await runQuery(`ALTER TABLE ${t} ADD COLUMN ${column} ${ddl}`);
+      };
+      await addColumn('servers', 'raid_protection', 'INTEGER NOT NULL DEFAULT 0');
+      await addColumn('servers', 'raid_join_threshold', 'INTEGER NOT NULL DEFAULT 10');
+      await addColumn('servers', 'raid_join_window_secs', 'INTEGER NOT NULL DEFAULT 60');
+      await addColumn('servers', 'raid_action', "TEXT NOT NULL DEFAULT 'lockdown'");
+      await addColumn('servers', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
+      await addColumn('servers', 'widget_channel_id', 'TEXT');
+      // A per-guild profile: Discord lets a member look different in each
+      // server, and the pieces are the same ones the global profile has.
+      await addColumn('server_members', 'banner_url', 'TEXT');
+      await addColumn('server_members', 'bio', 'TEXT');
+      await addColumn('server_members', 'pronouns', 'TEXT');
+    }
+  }
+  ,{
+    version: 17,
+    name: 'DM calls, spoiler channels, gradient roles, context-menu commands',
+    up: async () => {
+      for (const name of ['calls', 'call_participants']) {
+        const table = await getQuery(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, [name]
+        );
+        if (!table) throw new Error(`${name} missing — schema.sql did not apply`);
+      }
+      const addColumn = async (t, column, ddl) => {
+        const cols = await allQuery(`PRAGMA table_info(${t})`);
+        if (!cols.some((c) => c.name === column)) await runQuery(`ALTER TABLE ${t} ADD COLUMN ${column} ${ddl}`);
+      };
+      // A spoiler channel hides its contents behind one click, the way a
+      // spoiler attachment does — useful for episode-discussion channels.
+      await addColumn('channels', 'spoiler', 'INTEGER NOT NULL DEFAULT 0');
+      // A second colour turns the role name into a gradient. NULL keeps the
+      // flat colour every existing role already has.
+      await addColumn('roles', 'color_secondary', 'TEXT');
+      // Existing commands are all slash commands; the new kinds are opt-in.
+      // ALTER TABLE cannot add a CHECK, so the constraint lives in the service.
+      await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
+    }
+  }
 ];
 
 // Applied in array order, so the array order must be the version order — and

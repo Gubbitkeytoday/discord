@@ -66,6 +66,18 @@ export default function VoiceRoom({
   const speakers = isStage ? participants.filter((p) => !p.isSuppressed) : participants;
   const audience = isStage ? participants.filter((p) => p.isSuppressed) : [];
 
+  // Spatial audio places each participant where their tile is: the row of
+  // tiles is mapped onto -1 … 1, so the person on the left sounds left. It is
+  // derived from the roster, so it stays right as people come and go.
+  const spatialPositions = useMemo(() => {
+    const others = participants.filter((p) => p.userId !== currentUser?.id);
+    const map = {};
+    others.forEach((p, index) => {
+      map[p.userId] = others.length === 1 ? 0 : (index / (others.length - 1)) * 2 - 1;
+    });
+    return map;
+  }, [participants, currentUser?.id]);
+
   const media = useVoiceMedia({ enabled: true, isMuted: isMuted || suppressed, onSpeakingChange });
 
   const requestSpeak = (requesting) => socket?.emit('stage_request_speak', { channelId: channel.id, requesting }, (ack) => {
@@ -101,7 +113,9 @@ export default function VoiceRoom({
     outputDeviceId: voiceSettings.outputDeviceId,
     attenuation: voiceSettings.attenuation,
     attenuateWhileSpeaking: voiceSettings.attenuateWhileSpeaking,
-    selfSpeaking: media.isSpeaking
+    selfSpeaking: media.isSpeaking,
+    spatialAudio: voiceSettings.spatialAudio,
+    positions: spatialPositions
   });
 
   useEffect(() => { if (voiceSettings.voiceJoinSound) playJoinVoiceSound(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps

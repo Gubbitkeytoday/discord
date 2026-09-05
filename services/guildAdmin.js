@@ -196,7 +196,9 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     nextPermissions: patch.permissions
   });
 
-  const writable = ['name', 'color', 'permissions', 'hoist', 'mentionable', 'position', 'icon_url'];
+  // `color_secondary` turns the name into a gradient; NULL keeps it flat.
+  const writable = ['name', 'color', 'color_secondary', 'permissions', 'hoist',
+                    'mentionable', 'position', 'icon_url'];
   const sets = [];
   const params = [];
   const changes = [];
@@ -324,7 +326,8 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
 
   const members = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url, u.status, u.is_bot,
-            sm.nickname, sm.joined_at, sm.timeout_until, sm.pending
+            sm.nickname, sm.joined_at, sm.timeout_until, sm.pending,
+            sm.avatar_url AS member_avatar_url, sm.pronouns AS member_pronouns
        FROM server_members sm JOIN users u ON u.id = sm.user_id
       WHERE ${where} ORDER BY sm.joined_at ASC LIMIT ?`,
     params
@@ -349,11 +352,75 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
     const iconed = roles.find((r) => r.icon_url);
     return {
       ...m,
+      // A per-server avatar wins over the account one, as it does in Discord.
+      avatar_url: m.member_avatar_url || m.avatar_url,
+      pronouns: m.member_pronouns ?? null,
       pending: Boolean(m.pending),
       roles,
       role_icon: iconed ? { url: iconed.icon_url, name: iconed.name } : null
     };
   });
+}
+
+/**
+ * A member's per-server profile: nickname, avatar, banner, bio, pronouns.
+ * You may edit your own; changing someone else's nickname needs
+ * MANAGE_NICKNAMES, and the decorative fields are always your own only —
+ * nobody should be able to write words into another person's profile.
+ */
+export async function setGuildProfile({ serverId, userId, actorId, patch }) {
+  const member = await getQuery(
+    `SELECT * FROM server_members WHERE server_id = ? AND user_id = ? AND left_at IS NULL`, [serverId, userId]
+  );
+  if (!member) throw ApiError.notFound('Member');
+  if (actorId !== userId) {
+    throw ApiError.forbidden('You can only edit your own server profile');
+  }
+  const sets = []; const params = [];
+  const text = (value, max) => (value ? String(value).trim().slice(0, max) : null);
+  if (patch.avatar_url !== undefined) { sets.push('avatar_url = ?'); params.push(patch.avatar_url || null); }
+  if (patch.banner_url !== undefined) { sets.push('banner_url = ?'); params.push(patch.banner_url || null); }
+  if (patch.bio !== undefined) { sets.push('bio = ?'); params.push(text(patch.bio, 190)); }
+  if (patch.pronouns !== undefined) { sets.push('pronouns = ?'); params.push(text(patch.pronouns, 40)); }
+  if (patch.nickname !== undefined) { sets.push('nickname = ?'); params.push(text(patch.nickname, 32)); }
+  if (sets.length) {
+    await runQuery(
+      `UPDATE server_members SET ${sets.join(', ')} WHERE server_id = ? AND user_id = ?`,
+      [...params, serverId, userId]
+    );
+  }
+  return getGuildProfile({ serverId, userId });
+}
+
+/** The per-server profile, with the global one filled in behind it. */
+export async function getGuildProfile({ serverId, userId }) {
+  const row = await getQuery(
+    `SELECT sm.nickname, sm.avatar_url, sm.banner_url, sm.bio, sm.pronouns, sm.joined_at,
+            u.username, u.display_name, u.avatar_url AS global_avatar_url, u.banner_url AS global_banner_url,
+            u.bio AS global_bio, u.pronouns AS global_pronouns
+       FROM server_members sm JOIN users u ON u.id = sm.user_id
+      WHERE sm.server_id = ? AND sm.user_id = ? AND sm.left_at IS NULL`,
+    [serverId, userId]
+  );
+  if (!row) throw ApiError.notFound('Member');
+  return {
+    server_id: serverId,
+    user_id: userId,
+    nickname: row.nickname ?? null,
+    avatar_url: row.avatar_url ?? null,
+    banner_url: row.banner_url ?? null,
+    bio: row.bio ?? null,
+    pronouns: row.pronouns ?? null,
+    joined_at: row.joined_at,
+    // What the member actually looks like here, once the overrides are applied.
+    effective: {
+      display_name: row.nickname || row.display_name || row.username,
+      avatar_url: row.avatar_url || row.global_avatar_url,
+      banner_url: row.banner_url || row.global_banner_url,
+      bio: row.bio ?? row.global_bio,
+      pronouns: row.pronouns ?? row.global_pronouns
+    }
+  };
 }
 
 export async function setNickname({ serverId, userId, actorId, nickname }) {

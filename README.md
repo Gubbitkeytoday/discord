@@ -8,13 +8,13 @@
 [![SQLite Engine](https://img.shields.io/badge/sqlite-v3_WAL-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Socket.IO](https://img.shields.io/badge/socket.io-v4.8.1-010101?style=for-the-badge&logo=socket.io&logoColor=white)](https://socket.io/)
 [![WebRTC](https://img.shields.io/badge/WebRTC-Full_Mesh-333333?style=for-the-badge&logo=webrtc&logoColor=white)](https://webrtc.org/)
-[![Schema Version](https://img.shields.io/badge/Schema-v15_Active-8A2BE2?style=for-the-badge)]()
-[![Integration Tests](https://img.shields.io/badge/Tests-242%2F242_Passing-brightgreen?style=for-the-badge)]()
+[![Schema Version](https://img.shields.io/badge/Schema-v17_Active-8A2BE2?style=for-the-badge)]()
+[![Integration Tests](https://img.shields.io/badge/Tests-281%2F281_Passing-brightgreen?style=for-the-badge)]()
 [![A11y Status](https://img.shields.io/badge/A11y-0_Violations-success?style=for-the-badge)]()
 
 <p align="center">
   <b>A self-hosted, enterprise-grade chat architecture built strictly against Discord's actual systems model.</b><br/>
-  Snowflake IDs • 40-Flag Bitfields • Channel Overwrites • Content-Addressable Storage • WebRTC Mesh • Schema v15<br/>
+  Snowflake IDs • 40-Flag Bitfields • Channel Overwrites • Content-Addressable Storage • WebRTC Mesh • Schema v17<br/>
   <i>Engineered to run as a single, self-contained Node.js process over an embedded SQLite WAL database. Zero external brokers, zero Redis, zero vendor lock-in.</i>
 </p>
 
@@ -174,7 +174,9 @@ The database schema is defined declaratively in `db/schema.sql` (45 tables) and 
  ├── [v12] Membership screening, welcome screen & onboarding prompts
  ├── [v13] Announcement channel following & cross-server relays
  ├── [v14] Server template engine (Full guild cloning snapshots)
- └── [v15] Bot applications, slash commands & interaction callbacks
+ ├── [v15] Bot applications, slash commands & interaction callbacks
+ ├── [v16] Raid protection, public widgets & per-server member profiles
+ └── [v17] DM calls, spoiler channels, gradient roles & context-menu commands
 ```
 
 ### Relational Entity Graph (Core Entities)
@@ -283,14 +285,14 @@ Caddy automatically handles HTTPS certificates, HTTP/2 multiplexing, and reverse
 The codebase includes an exhaustive test and static analysis pipeline:
 
 ```bash
-# Run the complete verification battery (JSX + Build + 242 Tests + A11y + i18n)
+# Run the complete verification battery (JSX + Build + 281 Tests + A11y + i18n)
 npm run verify
 ```
 
 ### Individual Quality Commands
 | Command | Purpose | Coverage / Metric |
 | :--- | :--- | :--- |
-| `npm test` | Node test runner integration suite | **242 / 242 tests passing (100%)** |
+| `npm test` | Node test runner integration suite | **281 / 281 tests passing (100%)** |
 | `npm run jsx:check` | AST & syntax integrity audit | Verifies tags, imports, component exports |
 | `npm run a11y` | Accessibility and ARIA linter | **0 WCAG violations across all components** |
 | `npm run i18n:audit` | Dictionary coverage analyzer | 1,288 translation keys synchronized (EN / TH) |

@@ -15,6 +15,7 @@ import * as linkEmbeds from './services/linkEmbeds.js';
 import { resolveSession, SESSION_COOKIE } from './lib/auth.js';
 import { config } from './lib/config.js';
 import { assertChannelAccess, canInChannel } from './services/access.js';
+import { resolveBotToken } from './services/applications.js';
 import { checkSocketLimit } from './lib/rateLimit.js';
 import { resolvePermissions } from './services/guilds.js';
 
@@ -53,7 +54,15 @@ function cookieToken(socket) {
  * HttpOnly cookie from the handshake, then — only with ALLOW_DEV_IDENTITY — the
  * bare userId the client claims. Production never trusts a claimed id.
  */
-async function authenticateSocket(socket, { userId, token }) {
+async function authenticateSocket(socket, { userId, token, botToken }) {
+  // A bot connects with its application token; it lands on the same socket
+  // plumbing as a person, plus one extra room for its interactions.
+  if (botToken) {
+    const bot = await resolveBotToken(botToken);
+    if (!bot) return null;
+    socket.data.applicationId = bot.applicationId;
+    return bot.userId;
+  }
   const candidate = token || cookieToken(socket);
   if (candidate) {
     const session = await resolveSession(candidate);
@@ -73,8 +82,8 @@ export function registerRealtime(io) {
     // --- identity ------------------------------------------------------------
     // The client announces who it is; replace with session-token validation
     // when auth lands (see lib/httpUtils.js identify()).
-    socket.on('identify', async ({ userId, token } = {}) => {
-      const resolvedId = await authenticateSocket(socket, { userId, token });
+    socket.on('identify', async ({ userId, token, botToken } = {}) => {
+      const resolvedId = await authenticateSocket(socket, { userId, token, botToken });
       if (!resolvedId) {
         socket.emit('identify_error', { error: 'Authentication required', code: 'UNAUTHENTICATED' });
         return;
@@ -86,6 +95,8 @@ export function registerRealtime(io) {
 
       // A user's own room makes it easy to push notifications to every device.
       socket.join(`user-${userId}`);
+      // An application's room is where its interactions are delivered.
+      if (socket.data.applicationId) socket.join(`application-${socket.data.applicationId}`);
 
       // First socket for this user means they just came online. A user who
       // chose "invisible" stays invisible to others, as on Discord.
@@ -96,7 +107,7 @@ export function registerRealtime(io) {
         io.emit('presence_updated', { userId, status: user.status === 'invisible' ? 'offline' : user.status });
       }
       await userService.touchLastSeen(userId);
-      socket.emit('identified', { userId });
+      socket.emit('identified', { userId, applicationId: socket.data.applicationId ?? null });
     });
 
     // Rooms decide who receives new_message, typing and reaction events, so
@@ -421,6 +432,21 @@ export function registerRealtime(io) {
       ack?.({ ok: true });
     });
 
+    /**
+     * A Super Reaction is pure flourish: the reaction itself already went
+     * through the REST API, and this only tells the room to play the burst.
+     * Nothing is stored, and the sender must be able to see the channel.
+     */
+    socket.on('super_reaction', async ({ channelId, messageId, emoji }) => {
+      const userId = socket.data.userId;
+      if (!userId || !channelId || !messageId || !emoji) return;
+      const allowed = await canInChannel({ channelId, userId, permission: 'ADD_REACTIONS' });
+      if (!allowed) return;
+      socket.to(channelId).emit('super_reaction', {
+        channelId, messageId, emoji: String(emoji).slice(0, 64), userId
+      });
+    });
+
     socket.on('play_sound', async ({ channelId, soundId }) => {
       const userId = socket.data.userId;
       if (!userId || !channelId || !soundId) return;
@@ -579,6 +605,13 @@ export function resolveEmbedsInBackground(io, message) {
 export function fanOutMessage(io, message) {
   // An idempotent retry resolves to the message that already went out.
   if (message.duplicate) return;
+  // An ephemeral reply goes to one person's sockets, never to the channel
+  // room — everyone else must not learn it exists.
+  if (message.ephemeral) {
+    const target = message.ephemeral_for ?? null;
+    if (target) io.to(`user-${target}`).emit('new_message', message);
+    return;
+  }
   io.to(message.channel_id).emit('new_message', message);
   const activity = {
     channel_id: message.channel_id,

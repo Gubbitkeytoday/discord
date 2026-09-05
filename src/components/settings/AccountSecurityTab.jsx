@@ -24,6 +24,40 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
   const [code, setCode] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState(null);
   const [busy, setBusy] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  /**
+   * Fetch the export and hand it to the browser as a file. Done with fetch
+   * rather than a plain link because the endpoint needs the session header.
+   */
+  const downloadExport = async () => {
+    setBusy('export');
+    try {
+      const data = await get('/api/users/@me/export');
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'antigravity-export.json';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      onToast?.(err.message, { type: 'error' });
+    } finally { setBusy(null); }
+  };
+
+  /** Deleting is permanent, so the first click only arms the second. */
+  const removeAccount = async () => {
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    setBusy('delete');
+    try {
+      await del('/api/users/@me');
+      window.location.reload();
+    } catch (err) {
+      onToast?.(err.message, { type: 'error' });
+      setConfirmDelete(false);
+    } finally { setBusy(null); }
+  };
   const [passwords, setPasswords] = useState({ current: '', next: '', confirm: '' });
   const [passwordDone, setPasswordDone] = useState(false);
 
@@ -368,6 +402,38 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
             </div>
           ))}
         </div>
+      </section>
+
+      <Divider />
+
+      {/* Your data. An export is a plain JSON file of what this account made;
+          deletion is permanent and is deliberately two clicks away. */}
+      <section>
+        <h3 className="text-xs font-bold uppercase tracking-wide text-d-text3 mb-2">
+          {t('security.yourData')}
+        </h3>
+        <p className="text-sm text-d-text3 mb-3">{t('security.exportHint')}</p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={downloadExport}
+            disabled={busy === 'export'}
+            className="px-3 py-2 rounded-md bg-d-surface hover:bg-d-surface/70 text-sm font-semibold text-d-strong"
+          >
+            {busy === 'export' ? t('common.loading') : t('security.requestExport')}
+          </button>
+          <button
+            type="button"
+            onClick={removeAccount}
+            disabled={busy === 'delete'}
+            className="px-3 py-2 rounded-md bg-d-danger/90 hover:bg-d-danger text-sm font-semibold text-white"
+          >
+            {confirmDelete ? t('security.deleteConfirm') : t('security.deleteAccount')}
+          </button>
+        </div>
+        {confirmDelete && (
+          <p className="mt-2 text-xs text-d-danger">{t('security.deleteWarning')}</p>
+        )}
       </section>
     </div>
   );

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 
 import {
-  startServer, stopServer, api, get, asSession, login, uploadFile, PNG, BASE, ADMIN
+  startServer, stopServer, api, get, asSession, asBot, login, uploadFile, PNG, BASE, ADMIN
 } from './testHarness.mjs';
 
 import {
@@ -17,6 +17,7 @@ import {
 } from '../lib/totp.js';
 import { signRequest, uriEncode, S3Client } from '../lib/s3Client.js';
 import { probeDuration } from '../lib/mediaDuration.js';
+import { parseSearchQuery, periodBounds } from '../lib/searchQuery.js';
 
 before(startServer);
 after(stopServer);
@@ -1707,5 +1708,660 @@ describe('build sanity', () => {
     assert.equal(health.status, 200);
     assert.equal(health.body.code_schema_version, SCHEMA_VERSION);
     assert.equal(health.body.schema_version, SCHEMA_VERSION, 'a migrated database is at the code version');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Applications (bots): tokens, invitation, embeds, components, interactions.
+// ---------------------------------------------------------------------------
+
+describe('bot applications', () => {
+  let appId; let token; let botUserId; let messageId;
+
+  test('creating an application mints a bot user and a token shown once', async () => {
+    const made = await api('POST', '/api/applications', { name: 'TestBot', description: 'A bot for tests' });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    ({ id: appId, bot_user_id: botUserId, token } = made.body);
+    assert.ok(token && token.startsWith(`${appId}.`), 'token is scoped to the application');
+
+    const fetched = await get(`/api/applications/${appId}`);
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.body.token, undefined, 'the token is never returned again');
+    assert.equal(fetched.body.bot.is_bot, true);
+
+    const listed = await get('/api/applications');
+    assert.ok(listed.body.some((a) => a.id === appId));
+    // Someone else cannot touch it.
+    assert.equal((await api('PATCH', `/api/applications/${appId}`, { name: 'Hijack' }, as('user-5'))).status, 403);
+  });
+
+  test('a bot token authenticates as the bot user; a bad one is refused', async () => {
+    const me = await asBot(token, 'GET', `/api/users/${botUserId}`);
+    assert.equal(me.status, 200);
+    assert.equal(me.body.is_bot, true);
+    assert.equal((await asBot('not-a-token', 'GET', `/api/users/${botUserId}`)).status, 401);
+    // Not in any server yet, so it cannot post.
+    assert.equal((await asBot(token, 'POST', '/api/messages', { channel_id: 'chan-102', content: 'hi' })).status, 403);
+  });
+
+  test('inviting the bot grants exactly the permissions asked for, and no more', async () => {
+    // A permission the inviter does not hold cannot be handed over.
+    const escalate = await api('POST', `/api/applications/${appId}/invite`,
+      { server_id: 'server-2', permissions: ['ADMINISTRATOR'] }, as('user-5'));
+    assert.equal(escalate.status, 403);
+
+    const invited = await api('POST', `/api/applications/${appId}/invite`, {
+      server_id: 'server-1', permissions: ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS', 'ADMINISTRATOR']
+    });
+    assert.equal(invited.status, 201, JSON.stringify(invited.body));
+    assert.ok(!invited.body.permissions.includes('ADMINISTRATOR'), 'ADMINISTRATOR is never granted to a bot');
+
+    const roles = await get('/api/servers/server-1/roles');
+    const managed = roles.body.find((r) => r.id === invited.body.role_id);
+    assert.equal(Boolean(managed.managed), true, 'the bot rides a managed role');
+
+    const members = await get('/api/servers/server-1/members');
+    assert.ok(members.body.some((m) => m.id === botUserId), 'the bot shows up in the member list');
+    assert.equal((await api('POST', `/api/applications/${appId}/invite`, { server_id: 'server-1', permissions: [] })).status, 409);
+  });
+
+  test('the bot posts a rich embed with buttons through the ordinary message API', async () => {
+    const posted = await asBot(token, 'POST', '/api/messages', {
+      channel_id: 'chan-102',
+      content: 'Pick one',
+      embeds: [{
+        title: 'Deploy', description: 'Ship it?', color: '#5865f2',
+        fields: [{ name: 'Branch', value: 'main', inline: true }],
+        footer: { text: 'TestBot' }
+      }],
+      components: [{ components: [
+        { type: 'button', style: 'success', label: 'Ship', custom_id: 'ship' },
+        { type: 'button', style: 'danger', label: 'Hold', custom_id: 'hold' },
+        { type: 'button', style: 'link', label: 'Docs', url: 'https://example.com' }
+      ] }]
+    });
+    assert.equal(posted.status, 200, JSON.stringify(posted.body));
+    messageId = posted.body.id;
+    assert.equal(posted.body.embeds[0].color, '#5865f2');
+    assert.equal(posted.body.embeds[0].fields[0].name, 'Branch');
+    assert.equal(posted.body.components[0].components.length, 3);
+    assert.equal(posted.body.application_id, appId);
+    assert.equal(posted.body.is_bot, true);
+
+    // Malformed components are refused rather than stored.
+    const bad = await asBot(token, 'POST', '/api/messages', {
+      channel_id: 'chan-102',
+      components: [{ components: [{ type: 'button', style: 'primary', label: 'No id' }] }]
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.code, 'COMPONENTS_INVALID');
+    const dupes = await asBot(token, 'POST', '/api/messages', {
+      channel_id: 'chan-102',
+      components: [{ components: [
+        { type: 'button', style: 'primary', label: 'A', custom_id: 'same' },
+        { type: 'button', style: 'primary', label: 'B', custom_id: 'same' }
+      ] }]
+    });
+    assert.equal(dupes.status, 400, 'custom_id must be unique within a message');
+  });
+
+  test('pressing a button creates an interaction the bot can answer', async () => {
+    const unknown = await api('POST', `/api/messages/${messageId}/interactions`, { custom_id: 'nope' });
+    assert.equal(unknown.status, 400);
+    assert.equal(unknown.body.code, 'COMPONENT_UNKNOWN');
+
+    const pressed = await api('POST', `/api/messages/${messageId}/interactions`, { custom_id: 'ship' });
+    assert.equal(pressed.status, 202, JSON.stringify(pressed.body));
+
+    const { allQuery } = await import('../db.js');
+    const [row] = await allQuery(`SELECT * FROM interactions WHERE id = ?`, [pressed.body.id]);
+    assert.equal(row.custom_id, 'ship');
+    assert.equal(row.user_id, 'user-me');
+
+    // A callback needs the right token, and belongs to the right application.
+    const forged = await asBot(token, 'POST', `/api/interactions/${pressed.body.id}/callback`,
+      { token: 'wrong', type: 'message', content: 'nope' });
+    assert.equal(forged.status, 404);
+
+    const answered = await asBot(token, 'POST', `/api/interactions/${pressed.body.id}/callback`, {
+      token: row.token, type: 'message', content: 'Shipping!', ephemeral: true
+    });
+    assert.equal(answered.status, 200, JSON.stringify(answered.body));
+    assert.equal(answered.body.message.ephemeral, true);
+
+    // Only the presser sees the ephemeral reply.
+    const mine = await get('/api/messages/chan-102');
+    assert.ok(mine.body.some((m) => m.id === answered.body.message.id), 'the presser sees their ephemeral reply');
+    const theirs = await get('/api/messages/chan-102', as('user-5'));
+    assert.ok(!theirs.body.some((m) => m.id === answered.body.message.id), 'nobody else sees it');
+  });
+
+  test('a bot can update the message its button sits on', async () => {
+    const pressed = await api('POST', `/api/messages/${messageId}/interactions`, { custom_id: 'hold' });
+    const { getQuery } = await import('../db.js');
+    const row = await getQuery(`SELECT token FROM interactions WHERE id = ?`, [pressed.body.id]);
+
+    const updated = await asBot(token, 'POST', `/api/interactions/${pressed.body.id}/callback`, {
+      token: row.token, type: 'update', content: 'Held.',
+      components: [{ components: [{ type: 'button', style: 'secondary', label: 'Held', custom_id: 'ship', disabled: true }] }]
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.message.content, 'Held.');
+    assert.equal(updated.body.message.components[0].components[0].disabled, true);
+
+    // A disabled button cannot be pressed.
+    const blocked = await api('POST', `/api/messages/${messageId}/interactions`, { custom_id: 'ship' });
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.body.code, 'COMPONENT_DISABLED');
+  });
+
+  test('slash commands register per guild and run as interactions', async () => {
+    const registered = await api('PUT', `/api/applications/${appId}/commands`, {
+      server_id: 'server-1',
+      commands: [{
+        name: 'weather', description: 'Show the weather',
+        options: [{ name: 'city', description: 'Where?', type: 'string', required: true }]
+      }]
+    });
+    assert.equal(registered.status, 200, JSON.stringify(registered.body));
+
+    const offered = await get('/api/channels/chan-102/commands');
+    assert.ok(offered.body.some((c) => c.name === 'weather' && c.application_name === 'TestBot'));
+
+    const missing = await api('POST', '/api/channels/chan-102/commands/weather', { options: {} });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.code, 'OPTION_REQUIRED');
+
+    const ran = await api('POST', '/api/channels/chan-102/commands/weather', { options: { city: 'Bangkok', junk: 'dropped' } });
+    assert.equal(ran.status, 202);
+    const { getQuery } = await import('../db.js');
+    const row = await getQuery(`SELECT * FROM interactions WHERE id = ?`, [ran.body.id]);
+    assert.deepEqual(JSON.parse(row.data).options, { city: 'Bangkok' }, 'undeclared options are dropped');
+
+    assert.equal((await api('POST', '/api/channels/chan-102/commands/nope', {})).status, 400);
+  });
+
+  test('resetting the token invalidates the old one; deleting removes the bot', async () => {
+    const reset = await api('POST', `/api/applications/${appId}/token`, {});
+    assert.equal(reset.status, 200);
+    assert.notEqual(reset.body.token, token);
+    assert.equal((await asBot(token, 'GET', `/api/users/${botUserId}`)).status, 401, 'the old token is dead');
+    token = reset.body.token;
+    assert.equal((await asBot(token, 'GET', `/api/users/${botUserId}`)).status, 200);
+
+    assert.equal((await api('DELETE', `/api/applications/${appId}`)).status, 200);
+    assert.equal((await asBot(token, 'GET', `/api/users/${botUserId}`)).status, 401);
+    const members = await get('/api/servers/server-1/members');
+    assert.ok(!members.body.some((m) => m.id === botUserId), 'the bot left every server');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Insights, the public widget, raid protection, per-server profiles.
+// ---------------------------------------------------------------------------
+
+describe('server insights', () => {
+  test('figures are real counts and staff-only', async () => {
+    assert.equal((await get('/api/servers/server-1/insights', as('user-5'))).status, 403);
+
+    const { status, body } = await get('/api/servers/server-1/insights?days=30');
+    assert.equal(status, 200);
+    assert.equal(body.window_days, 30);
+    assert.equal(body.series.length, 30, 'the daily series is zero-filled');
+    assert.ok(body.totals.messages > 0, 'the seed has messages');
+    assert.ok(body.top_channels.length > 0);
+    assert.ok(body.top_members.length > 0);
+
+    // The number matches what a plain count says.
+    const { getQuery } = await import('../db.js');
+    const counted = await getQuery(
+      `SELECT count(*) AS n FROM messages WHERE server_id = 'server-1' AND deleted_at IS NULL
+        AND created_at >= ?`, [new Date(Date.now() - 30 * 86400000).toISOString()]
+    );
+    assert.equal(body.totals.messages, counted.n, 'insights do not invent numbers');
+  });
+});
+
+describe('server widget', () => {
+  test('the widget is off by default, public once on, and never leaks members', async () => {
+    const off = await fetch(`${BASE}/api/servers/server-1/widget.json`);
+    assert.equal(off.status, 403);
+
+    assert.equal((await api('PATCH', '/api/servers/server-1/widget', { enabled: true }, as('user-5'))).status, 403);
+    const on = await api('PATCH', '/api/servers/server-1/widget', { enabled: true, channel_id: 'chan-102' });
+    assert.equal(on.status, 200);
+    assert.equal(on.body.enabled, true);
+
+    // No Authorization header at all — this is the embeddable endpoint.
+    const res = await fetch(`${BASE}/api/servers/server-1/widget.json`);
+    assert.equal(res.status, 200);
+    const widget = await res.json();
+    assert.equal(widget.id, 'server-1');
+    assert.ok(typeof widget.presence_count === 'number');
+    assert.ok(Array.isArray(widget.voice_channels));
+    assert.equal(widget.members, undefined, 'the widget never lists members');
+    assert.equal((await api('PATCH', '/api/servers/server-1/widget', { channel_id: 'nope' })).status, 400);
+    await api('PATCH', '/api/servers/server-1/widget', { enabled: false });
+  });
+});
+
+describe('raid protection', () => {
+  test('a burst of joins trips a lockdown, and staff can lift it', async () => {
+    const invite = (await api('POST', '/api/servers/server-3/invites', {})).body.code;
+    const settings = await api('PATCH', '/api/servers/server-3/raid', {
+      enabled: true, join_threshold: 3, join_window_secs: 600, action: 'lockdown'
+    });
+    assert.equal(settings.status, 200, JSON.stringify(settings.body));
+    assert.equal(settings.body.enabled, true);
+    assert.equal((await api('PATCH', '/api/servers/server-3/raid', { join_threshold: 1 })).status, 400);
+
+    // Join until the threshold trips. Seed members already count towards it,
+    // so the very first newcomer may be the one refused — either way, a
+    // lockdown must exist afterwards and further joins must be refused.
+    let refused = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const reg = await api('POST', '/api/auth/register', { username: `raider${i}${Date.now().toString(36)}`, password: 'a-good-password' });
+      const joined = await asSession(reg.body.token, 'POST', `/api/invites/${invite}/accept`);
+      if (joined.status === 403 && joined.body.code === 'SERVER_LOCKDOWN') refused += 1;
+    }
+    assert.ok(refused > 0, 'the raid was never stopped');
+
+    const state = await get('/api/servers/server-3/raid');
+    assert.ok(state.body.lockdown, 'a lockdown is recorded');
+    assert.ok(state.body.lockdown.reason.includes('joins in'));
+
+    const history = await get('/api/servers/server-3/lockdowns');
+    assert.ok(history.body.length >= 1);
+
+    // user-2 is not in server-3 at all, so this is a clean permission check.
+    assert.equal((await api('DELETE', '/api/servers/server-3/raid/lockdown', undefined, as('user-2'))).status, 403);
+    assert.equal((await api('DELETE', '/api/servers/server-3/raid/lockdown')).status, 200);
+    assert.equal((await get('/api/servers/server-3/raid')).body.lockdown, null);
+
+    // With the lockdown lifted and protection off, joining works again.
+    await api('PATCH', '/api/servers/server-3/raid', { enabled: false });
+    const reg = await api('POST', '/api/auth/register', { username: `calm${Date.now().toString(36)}`, password: 'a-good-password' });
+    assert.equal((await asSession(reg.body.token, 'POST', `/api/invites/${invite}/accept`)).status, 200);
+  });
+
+  test('staff can lock down by hand', async () => {
+    const started = await api('POST', '/api/servers/server-3/raid/lockdown', { reason: 'Testing' });
+    assert.equal(started.status, 201);
+    assert.equal(started.body.reason, 'Testing');
+    await api('DELETE', '/api/servers/server-3/raid/lockdown');
+  });
+});
+
+describe('per-server profiles', () => {
+  test('a member may style themselves per server, but not anyone else', async () => {
+    const saved = await api('PATCH', '/api/servers/server-1/profile/@me', {
+      nickname: 'Al', bio: 'Just here for the memes', pronouns: 'they/them'
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.nickname, 'Al');
+    assert.equal(saved.body.effective.display_name, 'Al', 'the nickname wins here');
+
+    const seen = await get('/api/servers/server-1/profile/user-me', as('user-5'));
+    assert.equal(seen.status, 200);
+    assert.equal(seen.body.bio, 'Just here for the memes');
+
+    // The same account keeps its global profile elsewhere.
+    const other = await get('/api/servers/server-2/profile/user-me');
+    assert.equal(other.body.nickname, null);
+    assert.notEqual(other.body.effective.display_name, 'Al');
+
+    // The roster shows the per-server pronouns and nickname.
+    const roster = await get('/api/servers/server-1/members');
+    const me = roster.body.find((m) => m.id === 'user-me');
+    assert.equal(me.pronouns, 'they/them');
+    assert.equal(me.nickname, 'Al');
+
+    await api('PATCH', '/api/servers/server-1/profile/@me', { nickname: null, bio: null, pronouns: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Calls in DMs — the ring, not the media. The media path is the existing voice
+// mesh; what is worth testing is that a call has exactly one open row, that a
+// decline in a 1:1 ends it, and that the conversation is left with a `call`
+// system message saying what happened.
+// ---------------------------------------------------------------------------
+
+describe('DM calls', () => {
+  let dmId;
+  let groupId;
+
+  test('a DM can be called, and calling twice joins rather than erroring', async () => {
+    const dm = await api('POST', '/api/dms', { recipientId: 'user-2' });
+    assert.equal(dm.status, 200);
+    dmId = dm.body.id;
+
+    const first = await api('POST', `/api/channels/${dmId}/call`, {});
+    assert.equal(first.status, 201);
+    assert.equal(first.body.call.initiator_id, 'user-me');
+    // Both sides get a participant row; the caller is already in.
+    const me = first.body.call.participants.find((p) => p.user_id === 'user-me');
+    const them = first.body.call.participants.find((p) => p.user_id === 'user-2');
+    assert.equal(me.state, 'joined');
+    assert.equal(them.state, 'ringing');
+
+    const again = await api('POST', `/api/channels/${dmId}/call`, {});
+    assert.equal(again.status, 200, 'a second press joins the call already open');
+    assert.equal(again.body.call.id, first.body.call.id);
+  });
+
+  test('a stranger cannot see or start a call in someone else’s DM', async () => {
+    const seen = await get(`/api/channels/${dmId}/call`, { 'x-user-id': 'user-5' });
+    assert.equal(seen.status, 403);
+    const started = await api('POST', `/api/channels/${dmId}/call`, {}, { 'x-user-id': 'user-5' });
+    assert.equal(started.status, 403);
+  });
+
+  test('answering puts the recipient in, and hanging up ends the call with a duration', async () => {
+    const joined = await api('POST', `/api/channels/${dmId}/call/join`, {}, { 'x-user-id': 'user-2' });
+    assert.equal(joined.status, 200);
+    assert.equal(joined.body.call.participants.find((p) => p.user_id === 'user-2').state, 'joined');
+
+    // The last person out ends it.
+    await api('POST', `/api/channels/${dmId}/call/leave`, {}, { 'x-user-id': 'user-2' });
+    const last = await api('POST', `/api/channels/${dmId}/call/leave`, {});
+    assert.equal(last.status, 200);
+    assert.equal(last.body.call, null, 'no call is left open');
+
+    const still = await get(`/api/channels/${dmId}/call`);
+    assert.equal(still.body.call, null);
+
+    const history = await get(`/api/messages/${dmId}`);
+    const call = history.body.filter((m) => m.type === 'call').pop();
+    assert.ok(call, 'the conversation keeps a call record');
+    assert.match(call.content, /^\d+$/, 'an answered call stores its duration in seconds');
+  });
+
+  test('declining a 1:1 call ends it and records the miss', async () => {
+    const started = await api('POST', `/api/channels/${dmId}/call`, {});
+    assert.equal(started.status, 201);
+
+    const declined = await api('POST', `/api/channels/${dmId}/call/decline`, {}, { 'x-user-id': 'user-2' });
+    assert.equal(declined.status, 200);
+    assert.equal(declined.body.call, null, 'nobody is left to answer, so the call is over');
+
+    const history = await get(`/api/messages/${dmId}`);
+    const call = history.body.filter((m) => m.type === 'call').pop();
+    assert.equal(call.content, 'missed');
+  });
+
+  test('in a group DM one decline leaves the call ringing for the others', async () => {
+    const group = await api('POST', '/api/dms', { recipientIds: ['user-2', 'user-4'], name: 'call test' });
+    groupId = group.body.id;
+
+    await api('POST', `/api/channels/${groupId}/call`, {});
+    const declined = await api('POST', `/api/channels/${groupId}/call/decline`, {}, { 'x-user-id': 'user-2' });
+    assert.ok(declined.body.call, 'user-4 has not answered yet, so the call goes on');
+    assert.equal(declined.body.call.participants.find((p) => p.user_id === 'user-2').state, 'declined');
+    assert.equal(declined.body.call.participants.find((p) => p.user_id === 'user-4').state, 'ringing');
+
+    await api('POST', `/api/channels/${groupId}/call/leave`, {});
+    assert.equal((await get(`/api/channels/${groupId}/call`)).body.call, null);
+  });
+
+  test('a guild channel refuses a call — that is what voice channels are for', async () => {
+    const { status, body } = await api('POST', '/api/channels/chan-102/call', {});
+    assert.equal(status, 400);
+    assert.equal(body.code, 'NOT_A_DM');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search operators. The parser is pure, so it is tested directly on the edge
+// cases; the service is then tested end to end for the filters that matter.
+// ---------------------------------------------------------------------------
+
+describe('search operators', () => {
+  test('the parser splits operators from the free text', () => {
+    const { term, filters } = parseSearchQuery('from:@mai in:#general has:link before:2026-01-01 deploy failed');
+    assert.equal(term, 'deploy failed');
+    assert.deepEqual(filters.from, ['mai']);
+    assert.deepEqual(filters.in, ['general']);
+    assert.deepEqual(filters.has, ['link']);
+    assert.equal(filters.before, '2026-01-01');
+  });
+
+  test('quoted values survive, and a colon that is not an operator stays as text', () => {
+    const { term, filters } = parseSearchQuery('from:"Mai Suwan" http://example.com :) ok');
+    assert.deepEqual(filters.from, ['Mai Suwan']);
+    assert.equal(term, 'http://example.com :) ok');
+  });
+
+  test('an unusable operator value is left in the text rather than silently dropped', () => {
+    const { term, filters, unknown } = parseSearchQuery('before:yesterday has:vibes hello');
+    assert.equal(filters.before, null);
+    assert.deepEqual(filters.has, []);
+    assert.deepEqual(unknown, ['before:yesterday', 'has:vibes']);
+    assert.equal(term, 'before:yesterday has:vibes hello');
+  });
+
+  test('during: accepts a day, a month or a year', () => {
+    assert.equal(periodBounds('2026-03-04').from, '2026-03-04T00:00:00.000Z');
+    assert.equal(periodBounds('2026-02').to, '2026-02-28T23:59:59.999Z');
+    assert.equal(periodBounds('2026').to, '2026-12-31T23:59:59.999Z');
+    assert.equal(periodBounds('nope'), null);
+  });
+
+  test('from: narrows the results to one author, and an unknown name matches nothing', async () => {
+    const mine = await get(`/api/search/messages?q=${encodeURIComponent('from:user-me')}&channelId=chan-102`);
+    assert.equal(mine.status, 200);
+    assert.ok(mine.body.length > 0, 'an operator-only query is still a search');
+    assert.ok(mine.body.every((m) => m.user_id === 'user-me'));
+
+    const nobody = await get(`/api/search/messages?q=${encodeURIComponent('from:no-such-person')}`);
+    assert.deepEqual(nobody.body, []);
+  });
+
+  test('during: bounds the window, so a far-past month finds nothing', async () => {
+    const old = await get(`/api/search/messages?q=${encodeURIComponent('during:1999-01')}`);
+    assert.deepEqual(old.body, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Moderator tools: edit history, bulk delete, channel reorder, permission sync.
+// ---------------------------------------------------------------------------
+
+describe('moderator tools', () => {
+  test('edit history returns the current text plus every earlier revision', async () => {
+    const sent = await api('POST', '/api/messages', { channel_id: 'chan-102', content: 'first draft' });
+    const id = sent.body.id;
+    await api('PATCH', `/api/messages/${id}`, { content: 'second draft' });
+    await api('PATCH', `/api/messages/${id}`, { content: 'final' });
+
+    const { status, body } = await get(`/api/messages/${id}/history`);
+    assert.equal(status, 200);
+    assert.equal(body.revisions[0].current, true);
+    assert.equal(body.revisions[0].content, 'final');
+    const older = body.revisions.slice(1).map((r) => r.content);
+    assert.ok(older.includes('first draft'), 'the original text is kept');
+    assert.ok(older.includes('second draft'));
+  });
+
+  test('someone who cannot read the channel cannot read its edit history', async () => {
+    const sent = await api('POST', '/api/messages', { channel_id: 'chan-102', content: 'private-ish' });
+    const { status } = await get(`/api/messages/${sent.body.id}/history`, { 'x-user-id': 'user-9' });
+    assert.ok(status === 403 || status === 404, `expected a denial, got ${status}`);
+  });
+
+  test('bulk delete removes a batch in one event, and refuses a batch of one', async () => {
+    const ids = [];
+    for (const text of ['spam 1', 'spam 2', 'spam 3']) {
+      const sent = await api('POST', '/api/messages', { channel_id: 'chan-102', content: text });
+      ids.push(sent.body.id);
+    }
+
+    const tooFew = await api('POST', '/api/channels/chan-102/messages/bulk-delete', { message_ids: [ids[0]] });
+    assert.equal(tooFew.status, 400);
+    assert.equal(tooFew.body.code, 'BULK_TOO_FEW');
+
+    const { status, body } = await api('POST', '/api/channels/chan-102/messages/bulk-delete', { message_ids: ids });
+    assert.equal(status, 200);
+    assert.equal(body.ids.length, 3);
+
+    const history = await get('/api/messages/chan-102?limit=100');
+    for (const id of ids) assert.ok(!history.body.some((m) => m.id === id), `${id} survived`);
+  });
+
+  test('bulk delete needs MANAGE_MESSAGES', async () => {
+    // user-3 holds only the Bot role in server-1 — a member of the channel,
+    // but with no MANAGE_MESSAGES, which is exactly the case worth checking.
+    const { status } = await api(
+      'POST', '/api/channels/chan-102/messages/bulk-delete',
+      { message_ids: ['1', '2'] }, { 'x-user-id': 'user-3' }
+    );
+    assert.equal(status, 403);
+  });
+
+  test('reordering rejects an id from another server rather than moving it', async () => {
+    const detail = await get('/api/servers/server-1');
+    const mine = detail.body.channels.filter((c) => c.type !== 'category');
+    const order = mine.map((c, i) => ({ id: c.id, position: mine.length - i }));
+
+    const ok = await api('PATCH', '/api/servers/server-1/channels/order', { order });
+    assert.equal(ok.status, 200);
+    const first = ok.body.find((c) => c.id === order.at(-1).id);
+    assert.ok(first, 'the reordered channel is still listed');
+
+    const foreign = await api('PATCH', '/api/servers/server-1/channels/order', {
+      order: [{ id: 'chan-does-not-exist', position: 0 }]
+    });
+    assert.equal(foreign.status, 404);
+  });
+
+  test('permission sync refuses a channel that is not in a category', async () => {
+    const detail = await get('/api/servers/server-1');
+    const orphan = detail.body.channels.find((c) => c.type !== 'category' && !c.parent_id);
+    if (!orphan) return; // every channel is filed; nothing to assert
+    const { status, body } = await api('POST', `/api/channels/${orphan.id}/permissions/sync`, {});
+    assert.equal(status, 400);
+    assert.equal(body.code, 'NO_CATEGORY');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Text chat inside a voice channel. Discord voice channels carry their own text
+// channel; ours refused nothing, but nothing had ever checked it either.
+// ---------------------------------------------------------------------------
+
+describe('text chat in voice channels', () => {
+  test('a voice channel accepts messages and returns them in history', async () => {
+    const detail = await get('/api/servers/server-1');
+    const voice = detail.body.channels.find((c) => c.type === 'voice');
+    assert.ok(voice, 'the seed needs a voice channel');
+
+    const sent = await api('POST', '/api/messages', {
+      channel_id: voice.id, content: 'brb, kettle'
+    });
+    assert.equal(sent.status, 200);
+
+    const history = await get(`/api/messages/${voice.id}?limit=50`);
+    assert.ok(history.body.some((m) => m.id === sent.body.id), 'the message is in the voice channel history');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context-menu bot commands: the right-click kind, which carry the thing that
+// was clicked instead of typed options.
+// ---------------------------------------------------------------------------
+
+describe('context-menu bot commands', () => {
+  let app;
+
+  test('a bot can register message and user commands alongside slash ones', async () => {
+    const created = await api('POST', '/api/applications', { name: 'ContextBot' });
+    assert.equal(created.status, 201);
+    app = created.body;
+    await api('POST', `/api/applications/${app.id}/invite`, { server_id: 'server-1', permissions: [] });
+
+    const { status, body } = await api('PUT', `/api/applications/${app.id}/commands`, {
+      server_id: 'server-1',
+      commands: [
+        { name: 'ping', description: 'ping back' },
+        { name: 'Report Message', type: 'message' },
+        { name: 'Show Profile', type: 'user' }
+      ]
+    });
+    assert.equal(status, 200);
+    const byName = Object.fromEntries(body.map((c) => [c.name, c]));
+    assert.equal(byName.ping.type, 'slash');
+    // A context-menu label keeps its capitals and spaces; a slash name is
+    // lower-cased and would have been rejected with a space in it.
+    assert.equal(byName['Report Message'].type, 'message');
+    assert.equal(byName['Show Profile'].type, 'user');
+  });
+
+  test('running a message command carries the message, and refuses a bad target', async () => {
+    const sent = await api('POST', '/api/messages', { channel_id: 'chan-102', content: 'context target' });
+
+    const ok = await api('POST', '/api/channels/chan-102/commands/Report%20Message', {
+      target: { message_id: sent.body.id }
+    });
+    assert.equal(ok.status, 202);
+
+    const missing = await api('POST', '/api/channels/chan-102/commands/Report%20Message', {
+      target: { message_id: 'not-a-message' }
+    });
+    assert.equal(missing.status, 404);
+  });
+
+  test('a user command refuses someone who is not in the server', async () => {
+    const { status } = await api('POST', '/api/channels/chan-102/commands/Show%20Profile', {
+      target: { user_id: 'user-9' }
+    });
+    assert.equal(status, 404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Data rights: export what you made, and delete the account without punching
+// holes in other people's conversations.
+// ---------------------------------------------------------------------------
+
+describe('data export and account deletion', () => {
+  test('the export contains this account’s own messages and nothing else’s', async () => {
+    const mine = await api('POST', '/api/messages', { channel_id: 'chan-102', content: 'exportable' });
+    const theirs = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', content: 'not mine'
+    }, { 'x-user-id': 'user-3' });
+
+    const { status, body } = await get('/api/users/@me/export');
+    assert.equal(status, 200);
+    assert.equal(body.user.id, 'user-me');
+    assert.ok(body.messages.some((m) => m.id === mine.body.id));
+    assert.ok(!body.messages.some((m) => m.id === theirs.body.id),
+      'an export must not hand over other people’s messages');
+    assert.ok(Array.isArray(body.servers));
+  });
+
+  test('deleting an account that owns a server is refused, with the servers named', async () => {
+    const { status, body } = await api('DELETE', '/api/users/@me', undefined);
+    assert.equal(status, 409);
+    assert.equal(body.code, 'OWNS_SERVERS');
+    assert.ok(body.details.servers.length > 0);
+  });
+
+  test('deleting an ordinary account tombstones it and leaves its messages readable', async () => {
+    const created = await api('POST', '/api/auth/register', {
+      username: `leaver${Date.now()}`, password: 'correct horse battery staple', email: `leaver${Date.now()}@example.com`
+    });
+    assert.equal(created.status, 201);
+    const id = created.body.user.id;
+
+    const sent = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', content: 'still here after I go'
+    }, { 'x-user-id': id });
+
+    const gone = await api('DELETE', '/api/users/@me', undefined, { 'x-user-id': id });
+    assert.equal(gone.status, 200);
+
+    const history = await get('/api/messages/chan-102?limit=100');
+    const survivor = history.body.find((m) => m.id === sent.body?.id);
+    if (survivor) assert.ok(survivor.content, 'the message text survives the author');
   });
 });

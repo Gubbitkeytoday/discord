@@ -49,6 +49,45 @@ const GLOBALS = new Set([
   'Buffer', 'setImmediate', 'clearImmediate', '__dirname', '__filename', 'AbortSignal'
 ]);
 
+
+/** Does this `if` (or its branches) return? */
+function containsReturn(node) {
+  if (!node) return false;
+  if (node.type === 'ReturnStatement') return true;
+  if (node.type === 'BlockStatement') return node.body.some(containsReturn);
+  if (node.type === 'IfStatement') return containsReturn(node.consequent) || containsReturn(node.alternate);
+  return false;
+}
+
+const HOOK_NAME = /^use[A-Z]/;
+
+/** The first top-level hook call inside a statement, if any. */
+function findHookCall(node) {
+  let found = null;
+  const walk = (n) => {
+    if (!n || typeof n !== 'object' || found) return;
+    if (n.type === 'CallExpression') {
+      const callee = n.callee;
+      const name = callee?.type === 'Identifier' ? callee.name
+        : callee?.type === 'MemberExpression' && callee.property?.type === 'Identifier' ? callee.property.name
+        : null;
+      if (name && HOOK_NAME.test(name)) {
+        found = { name, line: n.loc?.start?.line ?? 0 };
+        return;
+      }
+    }
+    // Do not descend into nested functions: their hooks belong to them.
+    if (n.type === 'FunctionDeclaration' || n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression') return;
+    for (const key of Object.keys(n)) {
+      const value = n[key];
+      if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value.type === 'string') walk(value);
+    }
+  };
+  walk(node);
+  return found;
+}
+
 let files = 0;
 let syntaxFailures = 0;
 let unresolved = 0;
@@ -64,6 +103,38 @@ const check = (file) => {
     console.log(`  ✗ ${rel}: ${err.message}`);
     return;
   }
+
+  // --- hooks after an early return ----------------------------------------
+  // React requires every hook to run on every render. A `useX()` that sits
+  // after a top-level `return` in a component runs only sometimes, which
+  // throws "Rendered more hooks than during the previous render" — a blank
+  // screen, and only on the render where the early return did not fire.
+  traverse(ast, {
+    Function(fnPath) {
+      const body = fnPath.node.body;
+      if (!body || body.type !== 'BlockStatement') return;
+      const name = fnPath.node.id?.name
+        ?? (fnPath.parent?.type === 'VariableDeclarator' ? fnPath.parent.id?.name : null);
+      // Only components/hooks: PascalCase or useSomething.
+      if (!name || !/^([A-Z]|use[A-Z])/.test(name)) return;
+
+      let returnedAt = null;
+      for (const statement of body.body) {
+        if (returnedAt === null && (statement.type === 'ReturnStatement'
+          || (statement.type === 'IfStatement' && containsReturn(statement)))) {
+          returnedAt = statement.loc?.start?.line ?? 0;
+          continue;
+        }
+        if (returnedAt === null) continue;
+        const hook = findHookCall(statement);
+        if (hook) {
+          unresolved += 1;
+          console.log(`  ✗ ${rel}:${hook.line}: ${hook.name}() runs after an early return in ${name}() `
+            + `(line ${returnedAt}) — move every hook above it`);
+        }
+      }
+    }
+  });
 
   const seen = new Set();
   traverse(ast, {

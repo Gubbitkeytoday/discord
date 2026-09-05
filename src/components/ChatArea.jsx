@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import {
   Hash, Bell, BellOff, Pin, Users, Search, PlusCircle, Smile, Send, Trash2, Reply, X,
   FileText, Download, Pencil, ArrowDown, Loader2, Check, Sticker, Inbox, UserPlus,
-  MessagesSquare, Archive, AlertTriangle, RotateCcw, Megaphone, Volume2, Lock, BarChart3, ChevronRight
+  MessagesSquare, Archive, AlertTriangle, RotateCcw, Megaphone, Volume2, Lock, BarChart3, ChevronRight,
+  Bold, Italic, Underline, Strikethrough, Code, Code2, Quote, EyeOff, Type, Link2 as Link2Icon, Menu, Phone, Video, History
 } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { playMessageIncomingSound } from '../utils/soundEffects';
@@ -13,6 +14,7 @@ import {
 
 import ImageLightboxModal from './ImageLightboxModal';
 import LinkEmbed from './LinkEmbed';
+import { RichEmbed, MessageComponents } from './RichEmbed';
 import PinnedMessagesPopover from './PinnedMessagesPopover';
 import MessageContextMenu from './MessageContextMenu';
 import EmojiPicker from './EmojiPicker';
@@ -20,7 +22,8 @@ import StickerPicker from './StickerPicker';
 import PollCard from './PollCard';
 import CreatePollModal from './CreatePollModal';
 import { VoiceNotePlayer, VoiceNoteRecorder, VoiceNoteButton } from './VoiceNote';
-import { runSlashCommand } from '../utils/slashCommands';
+import SuperReaction, { motionAllowed } from './SuperReaction';
+import { runSlashCommand, parseSlashInput } from '../utils/slashCommands';
 import { t } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
 import ComposerAutocomplete, { detectTrigger, buildOptions } from './ComposerAutocomplete';
@@ -34,6 +37,7 @@ const AUTOSCROLL_THRESHOLD_PX = 120;
 const HEADER_ICONS = { announcement: Megaphone, voice: Volume2, forum: MessagesSquare, thread: MessagesSquare };
 
 export default function ChatArea({
+  onStartCall, callBar, onShowEditHistory,
   channel,
   messages,
   pins = [],
@@ -70,6 +74,14 @@ export default function ChatArea({
   onCreateThread,
   onForward,
   onPublish = null,
+  openPinsSignal = 0,
+  openEmojiSignal = 0,
+  toggleFormattingSignal = 0,
+  onOpenMobileSidebar = null,
+  onSuperReact = null,
+  onSuperReactionEvent = null,
+  botCommands = [],
+  onRunBotCommand = null,
   onFollowChannel = null,
   onMarkUnread,
   onReport,
@@ -89,7 +101,10 @@ export default function ChatArea({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showPollComposer, setShowPollComposer] = useState(false);
+  // messageId -> emoji currently bursting over that message.
+  const [superBursts, setSuperBursts] = useState({});
   const [recordingNote, setRecordingNote] = useState(false);
+  const [showFormatting, setShowFormatting] = useState(false);
 
   /**
    * Resolve a user id to a display name for the reaction tooltip.
@@ -160,8 +175,8 @@ export default function ChatArea({
   );
 
   const autocompleteOptions = useMemo(
-    () => buildOptions(trigger, { members, channels, customEmojis }),
-    [trigger, members, channels, customEmojis]
+    () => buildOptions(trigger, { members, channels, customEmojis, botCommands }),
+    [trigger, members, channels, customEmojis, botCommands]
   );
 
   const markdownContext = useMemo(() => ({
@@ -218,6 +233,33 @@ export default function ChatArea({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [channel?.id]);
+
+  // Hooks must run on every render, so anything hook-shaped lives above the
+  // "no channel selected" early return below.
+  const showBurst = useCallback((messageId, emoji) => {
+    if (!motionAllowed()) return;
+    setSuperBursts((current) => ({ ...current, [messageId]: emoji }));
+  }, []);
+
+  // Someone else's super reaction arrives over the socket.
+  useEffect(() => {
+    if (!onSuperReactionEvent) return undefined;
+    return onSuperReactionEvent(({ messageId, emoji }) => showBurst(messageId, emoji));
+  }, [onSuperReactionEvent, showBurst]);
+
+  // /pins asks the composer's popover to open; a changing number is enough of
+  // a signal and avoids threading an imperative handle through the tree.
+  useEffect(() => {
+    if (openPinsSignal) setShowPins(true);
+  }, [openPinsSignal]);
+
+  useEffect(() => {
+    if (openEmojiSignal) setShowEmojiPicker((v) => !v);
+  }, [openEmojiSignal]);
+
+  useEffect(() => {
+    if (toggleFormattingSignal) setShowFormatting((v) => !v);
+  }, [toggleFormattingSignal]);
 
   if (!channel) {
     return (
@@ -296,6 +338,23 @@ export default function ChatArea({
     const command = runSlashCommand(inputText.trim());
     if (command) {
       if (command.unknown) {
+        // Not a built-in — a bot in this channel may still own it. Its options
+        // are taken positionally from what follows the name, in the order the
+        // bot declared them, which is what people type anyway.
+        const bot = botCommands.find((c) => c.name === command.name);
+        if (bot) {
+          const parsed = parseSlashInput(inputText.trim());
+          const words = (parsed?.rest ?? '').split(/\s+/).filter(Boolean);
+          const options = {};
+          bot.options.forEach((option, index) => {
+            const isLast = index === bot.options.length - 1;
+            const value = isLast ? words.slice(index).join(' ') : words[index];
+            if (value !== undefined && value !== '') options[option.name] = value;
+          });
+          clearComposer();
+          onRunBotCommand?.(bot, options);
+          return;
+        }
         onToast?.(t('slash.unknown', { name: command.name }), { type: 'error' });
         return;
       }
@@ -317,6 +376,53 @@ export default function ChatArea({
     onSendMessage(inputText, attachments, replyToMsg?.id);
     playMessageIncomingSound();
     clearComposer();
+  };
+
+  /**
+   * React, and on shift-click also fire a Super Reaction: the burst is a local
+   * flourish, so it is broadcast as a lightweight event rather than stored —
+   * a reaction is data, an animation is not.
+   */
+  const superReact = (msg, emoji, isSuper) => {
+    onToggleReaction(msg.id, emoji);
+    if (!isSuper) return;
+    onSuperReact?.(msg.id, emoji);
+    showBurst(msg.id, emoji);
+  };
+
+  /**
+   * The formatting toolbar. Discord shipped a WYSIWYG-ish bar in Aug 2026: it
+   * still writes Markdown, it just spares you remembering the characters.
+   * Wrapping the selection (or, with nothing selected, inserting the markers
+   * and placing the caret between them) is the whole behaviour.
+   */
+  const applyFormat = (before, after = before) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? inputText.length;
+    const end = el.selectionEnd ?? start;
+    const selected = inputText.slice(start, end);
+
+    // Toggling: if the selection is already wrapped, unwrap it instead of
+    // nesting a second pair of markers.
+    const alreadyWrapped = inputText.slice(Math.max(0, start - before.length), start) === before
+      && inputText.slice(end, end + after.length) === after;
+
+    let next; let caretStart; let caretEnd;
+    if (alreadyWrapped) {
+      next = inputText.slice(0, start - before.length) + selected + inputText.slice(end + after.length);
+      caretStart = start - before.length;
+      caretEnd = caretStart + selected.length;
+    } else {
+      next = inputText.slice(0, start) + before + selected + after + inputText.slice(end);
+      caretStart = start + before.length;
+      caretEnd = caretStart + selected.length;
+    }
+    setInputText(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(caretStart, caretEnd);
+    });
   };
 
   const sendSticker = (sticker) => {
@@ -460,9 +566,25 @@ export default function ChatArea({
         </div>
       )}
 
+      {/* A live call sits between the header and the history — visible while
+          reading, and out of the way of the composer. */}
+      {callBar}
+
       {/* Channel header */}
       <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center justify-between shrink-0 bg-d-canvas z-10">
         <div className="flex items-center gap-2 min-w-0">
+          {/* Phones have no room for a permanent channel column, so the header
+              carries the handle that opens it. */}
+          {onOpenMobileSidebar && (
+            <button
+              type="button"
+              onClick={onOpenMobileSidebar}
+              className="md:hidden text-d-text2 hover:text-d-strong shrink-0"
+              aria-label={t('sidebar.openChannels')}
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+          )}
           {isDM ? (
             <img src={channel.avatar_url || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
           ) : (
@@ -497,6 +619,28 @@ export default function ChatArea({
         </div>
 
         <div className="flex items-center gap-3 text-d-text2">
+          {onStartCall && (
+            <>
+              <button
+                type="button"
+                onClick={() => onStartCall(false)}
+                className="hover:text-d-strong transition-colors"
+                title={t('call.start')}
+                aria-label={t('call.start')}
+              >
+                <Phone className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onStartCall(true)}
+                className="hover:text-d-strong transition-colors"
+                title={t('call.startVideo')}
+                aria-label={t('call.startVideo')}
+              >
+                <Video className="w-5 h-5" />
+              </button>
+            </>
+          )}
           {channel.type === 'announcement' && onFollowChannel && (
             <button
               type="button"
@@ -670,6 +814,17 @@ export default function ChatArea({
                   e.preventDefault();
                   setContextMenu({ message: msg, x: e.clientX, y: e.clientY });
                 }}
+                onDoubleClick={(e) => {
+                  // Tap to React. Ignored on anything you might legitimately be
+                  // double-clicking for another reason, and on a message that
+                  // has not been accepted by the server yet.
+                  const emoji = chatPrefs?.tapToReactEmoji;
+                  if (!emoji || msg.pending || msg.failed) return;
+                  if (e.target.closest('a, img, video, audio, textarea, input, button')) return;
+                  // A double-click that was really a text selection is not a tap.
+                  if (window.getSelection?.()?.toString()) return;
+                  onToggleReaction?.(msg.id, emoji);
+                }}
                 className={`group flex gap-4 px-2 -mx-2 rounded hover:bg-d-rowhover transition-colors relative ${
                   msg.isGrouped ? 'py-[1px]' : 'py-[var(--message-padding-y)] message-group-start'
                 } ${msg.pending ? 'opacity-50' : ''} ${msg.failed ? 'opacity-70' : ''} ${msg.isFirstUnread ? 'bg-d-danger/[0.04]' : ''}`}
@@ -741,6 +896,11 @@ export default function ChatArea({
                       {msg.is_bot && (
                         <span className="bg-d-brand text-white text-[10px] font-bold px-1.5 rounded">BOT</span>
                       )}
+                      {msg.ephemeral && (
+                        <span className="text-[9px] uppercase tracking-wide bg-d-surface text-d-text3 px-1 rounded shrink-0" title={t('bot.ephemeralHint')}>
+                          {t('bot.ephemeral')}
+                        </span>
+                      )}
                       {msg.crossposted && (
                         <span className="text-[9px] uppercase tracking-wide bg-d-surface text-d-text3 px-1 rounded shrink-0" title={t('chat.publishedHint')}>
                           {t('chat.published')}
@@ -786,11 +946,22 @@ export default function ChatArea({
                     msg.content ? (
                       <div className="message-body text-d-text leading-relaxed whitespace-pre-wrap break-words">
                         {parseDiscordMarkdown(msg.content, markdownContext)}
-                        {msg.edited_at && (
+                        {msg.edited_at && (onShowEditHistory ? (
+                          // The "(edited)" marker is the natural place to ask
+                          // "edited from what?", so it is the button.
+                          <button
+                            type="button"
+                            onClick={() => onShowEditHistory(msg)}
+                            className="text-[10px] text-d-text3 hover:text-d-strong hover:underline ml-1 align-baseline"
+                            title={t('chat.editedHistory')}
+                          >
+                            {t('chat.edited')}
+                          </button>
+                        ) : (
                           <span className="text-[10px] text-d-text3 ml-1 align-baseline" title={formatFullTimestamp(msg.edited_at)}>
                             {t('chat.edited')}
                           </span>
-                        )}
+                        ))}
                       </div>
                     ) : null
                   )}
@@ -821,12 +992,23 @@ export default function ChatArea({
                     />
                   )}
 
-                  {chatPrefs.showEmbeds && chatPrefs.showLinkPreviews && msg.embeds?.length > 0 && (
+                  {chatPrefs.showEmbeds && msg.embeds?.length > 0 && (
                     <div className="space-y-1">
                       {msg.embeds.map((embed, i) => (
-                        <LinkEmbed key={i} embed={embed} onOpenImage={setLightboxImg} />
+                        // A bot's rich embed is authored data; a link preview
+                        // is something we unfurled. They render differently and
+                        // only the preview obeys the link-preview preference.
+                        embed.type === 'rich'
+                          ? <RichEmbed key={i} embed={embed} />
+                          : chatPrefs.showLinkPreviews
+                            ? <LinkEmbed key={i} embed={embed} onOpenImage={setLightboxImg} />
+                            : null
                       ))}
                     </div>
+                  )}
+
+                  {msg.components?.length > 0 && (
+                    <MessageComponents message={msg} onToast={onToast} />
                   )}
 
                   {msg.attachments?.length > 0 && (
@@ -874,15 +1056,28 @@ export default function ChatArea({
                   )}
                 </div>
 
+                {superBursts[msg.id] && (
+                  <SuperReaction
+                    emoji={superBursts[msg.id]}
+                    onDone={() => setSuperBursts((current) => {
+                      const next = { ...current };
+                      delete next[msg.id];
+                      return next;
+                    })}
+                  />
+                )}
+
                 {/* Hover toolbar */}
                 {!msg.pending && !msg.failed && editingId !== msg.id && (
                   <div className="absolute right-4 -top-3.5 hidden group-hover:flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-1 z-10">
                     {QUICK_EMOJIS.slice(0, 3).map((emoji) => (
                       <button
                         key={emoji}
-                        onClick={() => onToggleReaction(msg.id, emoji)}
+                        // Shift-click is Discord's "super" gesture: the same
+                        // reaction, plus a burst everyone in the channel sees.
+                        onClick={(e) => superReact(msg, emoji, e.shiftKey)}
                         className="p-1 hover:bg-d-hover rounded text-xs transition-colors"
-                        title={t('chat.reactWith', { emoji })}
+                        title={`${t('chat.reactWith', { emoji })} — ${t('chat.superHint')}`}
                       >
                         {emoji}
                       </button>
@@ -1041,8 +1236,37 @@ export default function ChatArea({
 
         <form
           onSubmit={handleSend}
-          className={`bg-d-input rounded-lg px-4 py-2.5 flex items-end gap-3 ${!canSend || isArchived ? 'opacity-60' : ''}`}
+          className={`bg-d-input rounded-lg px-4 py-2.5 ${!canSend || isArchived ? 'opacity-60' : ''}`}
         >
+          {showFormatting && !recordingNote && (
+            <div className="flex items-center gap-0.5 pb-1.5 mb-1.5 border-b border-d-divider" role="toolbar" aria-label={t('chat.formatting')}>
+              {[
+                { key: 'bold', markers: ['**'], icon: Bold, label: t('chat.bold') },
+                { key: 'italic', markers: ['*'], icon: Italic, label: t('chat.italic') },
+                { key: 'underline', markers: ['__'], icon: Underline, label: t('chat.underline') },
+                { key: 'strike', markers: ['~~'], icon: Strikethrough, label: t('chat.strikethrough') },
+                { key: 'code', markers: ['`'], icon: Code, label: t('chat.inlineCode') },
+                { key: 'block', markers: ['```\n', '\n```'], icon: Code2, label: t('chat.codeBlock') },
+                { key: 'quote', markers: ['> ', ''], icon: Quote, label: t('chat.quote') },
+                { key: 'spoiler', markers: ['||'], icon: EyeOff, label: t('chat.spoiler') },
+                { key: 'link', markers: ['[', '](url)'], icon: Link2Icon, label: t('chat.link') }
+              ].map(({ key, markers, icon: Icon, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => applyFormat(markers[0], markers[1] ?? markers[0])}
+                  disabled={!canSend || isArchived}
+                  className="p-1.5 rounded text-d-text2 hover:text-d-strong hover:bg-d-hover disabled:opacity-40"
+                  title={label}
+                  aria-label={label}
+                >
+                  <Icon className="w-4 h-4" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-end gap-3">
           {recordingNote ? (
             <VoiceNoteRecorder
               onCancel={() => setRecordingNote(false)}
@@ -1063,6 +1287,17 @@ export default function ChatArea({
             title={canAttach ? t('chat.uploadFiles') : t('chat.noAttachPermission')}
           >
             <PlusCircle className={`w-6 h-6 ${isUploading ? 'animate-spin text-d-brand' : ''}`} />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowFormatting((v) => !v)}
+            aria-pressed={showFormatting}
+            className={`transition-colors pb-0.5 ${showFormatting ? 'text-d-strong' : 'text-d-text2 hover:text-d-strong'}`}
+            title={t('chat.formatting')}
+            aria-label={t('chat.formatting')}
+          >
+            <Type className="w-5 h-5" />
           </button>
 
           {/* textarea, not input: Shift+Enter must insert a newline like Discord */}
@@ -1148,6 +1383,7 @@ export default function ChatArea({
           </button>
           </>
           )}
+          </div>
         </form>
 
         {/* Typing indicator sits in the composer's gutter, as in Discord */}
@@ -1184,6 +1420,8 @@ export default function ChatArea({
 
       {contextMenu && (
         <MessageContextMenu
+          botCommands={botCommands}
+          onRunBotCommand={onRunBotCommand ? (command, target) => onRunBotCommand(command, {}, target) : null}
           message={contextMenu.message}
           x={contextMenu.x}
           y={contextMenu.y}

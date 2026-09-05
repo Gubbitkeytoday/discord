@@ -34,7 +34,9 @@ export async function getUser(userId, viewerId = null) {
     [userId]
   );
 
-  const shaped = { ...user, mutual_servers: mutualServers };
+  // SQLite has no boolean type; normalise on the way out so the wire shape is
+  // the same here as it is on a message.
+  const shaped = { ...user, is_bot: Boolean(user.is_bot), mutual_servers: mutualServers };
 
   // Private profile (Discord, Aug 2026): the bio and banner are what a
   // profile "shows", so those are what visibility hides. Name, avatar and

@@ -338,7 +338,8 @@ export function Note({ children, tone = 'info' }) {
   const tones = {
     info: 'bg-d-sunken border-d-divider text-d-text2',
     brand: 'border-l-4 border-l-d-brand bg-d-brand/5 border-y-transparent border-r-transparent text-d-text2',
-    warn: 'border-l-4 border-l-d-idle bg-d-idle/5 border-y-transparent border-r-transparent text-d-text2'
+    warn: 'border-l-4 border-l-d-idle bg-d-idle/5 border-y-transparent border-r-transparent text-d-text2',
+    danger: 'border-l-4 border-l-d-danger bg-d-danger/5 border-y-transparent border-r-transparent text-d-text2'
   };
   return (
     <div className={`rounded-lg border px-4 py-3 text-sm leading-relaxed ${tones[tone]}`}>

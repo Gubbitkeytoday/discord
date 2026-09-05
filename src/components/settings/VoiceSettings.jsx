@@ -510,6 +510,12 @@ export default function VoiceSettings({ onToast }) {
           label={t('voice.joinLeaveSounds')}
           checked={settings.voiceJoinSound}
           onChange={(value) => update({ voiceJoinSound: value })}
+        />
+        <SettingToggle
+          label={t('voice.spatialAudio')}
+          hint={t('voice.spatialAudioHint')}
+          checked={settings.spatialAudio}
+          onChange={(value) => update({ spatialAudio: value })}
           last
         />
       </Section>

@@ -44,7 +44,11 @@ import * as threadService from './services/threads.js';
 import * as forumService from './services/forum.js';
 import * as onboardingService from './services/onboarding.js';
 import * as followingService from './services/following.js';
+import * as callService from './services/calls.js';
+import * as dataRights from './services/dataRights.js';
 import * as templateService from './services/templates.js';
+import * as appService from './services/applications.js';
+import * as insightsService from './services/insights.js';
 import * as linkEmbeds from './services/linkEmbeds.js';
 import * as automod from './services/automod.js';
 import * as webhookService from './services/webhooks.js';
@@ -628,7 +632,12 @@ app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, re
     replyToId: req.body.reply_to_id ?? null,
     nonce: req.body.nonce ?? null,
     stickerId: req.body.sticker_id ?? null,
-    poll: req.body.poll ?? null
+    poll: req.body.poll ?? null,
+    // Embeds and components are a bot's vocabulary; a person's client never
+    // sends them, and the validators reject anything malformed either way.
+    embeds: req.botApplicationId ? req.body.embeds ?? null : null,
+    components: req.botApplicationId ? req.body.components ?? null : null,
+    applicationId: req.botApplicationId ?? null
   });
   fanOutMessage(io, message);
   res.json(message);
@@ -1082,6 +1091,241 @@ app.patch('/api/threads/:threadId', requireUser, asyncRoute(async (req, res) => 
   res.json(thread);
 }));
 
+// --- insights, widget, raid protection, per-server profiles ------------------
+
+app.get('/api/servers/:serverId/insights', requireUser, asyncRoute(async (req, res) => {
+  res.json(await insightsService.getInsights({
+    serverId: req.params.serverId, userId: req.userId, days: req.query.days
+  }));
+}));
+
+// The widget is public on purpose — no authentication, and nothing in it that
+// would not already be visible to someone holding an invite.
+app.get('/api/servers/:serverId/widget.json', asyncRoute(async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=60');
+  res.json(await insightsService.getWidget(req.params.serverId));
+}));
+
+app.patch('/api/servers/:serverId/widget', requireUser, asyncRoute(async (req, res) => {
+  res.json(await insightsService.updateWidget({
+    serverId: req.params.serverId, userId: req.userId,
+    enabled: req.body?.enabled, channelId: req.body?.channel_id
+  }));
+}));
+
+app.get('/api/servers/:serverId/raid', requireUser, asyncRoute(async (req, res) => {
+  res.json(await insightsService.getRaidSettings(req.params.serverId, req.userId));
+}));
+
+app.patch('/api/servers/:serverId/raid', requireUser, asyncRoute(async (req, res) => {
+  const settings = await insightsService.updateRaidSettings({
+    serverId: req.params.serverId, userId: req.userId, patch: req.body ?? {}
+  });
+  io.to(req.params.serverId).emit('raid_settings_updated', { server_id: req.params.serverId });
+  res.json(settings);
+}));
+
+app.post('/api/servers/:serverId/raid/lockdown', requireUser, asyncRoute(async (req, res) => {
+  const lockdown = await insightsService.startLockdown({
+    serverId: req.params.serverId, userId: req.userId, reason: req.body?.reason
+  });
+  io.to(req.params.serverId).emit('raid_settings_updated', { server_id: req.params.serverId });
+  res.status(201).json(lockdown);
+}));
+
+app.delete('/api/servers/:serverId/raid/lockdown', requireUser, asyncRoute(async (req, res) => {
+  const result = await insightsService.liftLockdown({ serverId: req.params.serverId, userId: req.userId });
+  io.to(req.params.serverId).emit('raid_settings_updated', { server_id: req.params.serverId });
+  res.json(result);
+}));
+
+app.get('/api/servers/:serverId/lockdowns', requireUser, asyncRoute(async (req, res) => {
+  res.json(await insightsService.listLockdowns(req.params.serverId, req.userId));
+}));
+
+app.get('/api/servers/:serverId/profile/:userId', requireUser, asyncRoute(async (req, res) => {
+  await requireMembership(req);
+  res.json(await guildAdmin.getGuildProfile({ serverId: req.params.serverId, userId: req.params.userId }));
+}));
+
+app.patch('/api/servers/:serverId/profile/@me', requireUser, asyncRoute(async (req, res) => {
+  const profile = await guildAdmin.setGuildProfile({
+    serverId: req.params.serverId, userId: req.userId, actorId: req.userId, patch: req.body ?? {}
+  });
+  io.to(req.params.serverId).emit('member_updated', { serverId: req.params.serverId, userId: req.userId });
+  res.json(profile);
+}));
+
+// --- applications (bots) -----------------------------------------------------
+//
+// A bot is a user, so there is no bot-only message API: a bot calls
+// /api/messages with `Authorization: Bot <token>` and meets the same
+// permission gate as anyone else. These routes only cover what is specific to
+// applications — identity, invitation, commands and interactions.
+
+const requireBot = (req) => {
+  if (!req.botApplicationId) {
+    throw new ApiError('This endpoint is for bots (Authorization: Bot <token>)', {
+      status: 401, code: 'BOT_TOKEN_REQUIRED'
+    });
+  }
+  return req.botApplicationId;
+};
+
+app.get('/api/applications', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.listApplications(req.userId));
+}));
+
+app.post('/api/applications', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // The token is in this response and nowhere else, ever again.
+  res.status(201).json(await appService.createApplication({
+    ownerId: req.userId, name: req.body?.name, description: req.body?.description ?? null
+  }));
+}));
+
+app.get('/api/applications/:applicationId', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.getApplication(req.params.applicationId));
+}));
+
+app.patch('/api/applications/:applicationId', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.updateApplication({
+    applicationId: req.params.applicationId, userId: req.userId, patch: req.body ?? {}
+  }));
+}));
+
+app.post('/api/applications/:applicationId/token', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.resetToken({ applicationId: req.params.applicationId, userId: req.userId }));
+}));
+
+app.delete('/api/applications/:applicationId', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.deleteApplication({ applicationId: req.params.applicationId, userId: req.userId }));
+}));
+
+app.get('/api/applications/:applicationId/guilds', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.listBotGuilds({ applicationId: req.params.applicationId, userId: req.userId }));
+}));
+
+app.get('/api/meta/bot-permissions', (_req, res) => res.json(appService.invitablePermissions()));
+
+app.post('/api/applications/:applicationId/invite', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  const result = await appService.inviteBot({
+    applicationId: req.params.applicationId,
+    serverId: req.body?.server_id,
+    userId: req.userId,
+    permissionNames: Array.isArray(req.body?.permissions) ? req.body.permissions : []
+  });
+  const detail = await guildService.getServerDetail(req.body.server_id, req.userId);
+  io.to(req.body.server_id).emit('member_joined', { serverId: req.body.server_id, userId: result.bot_user_id });
+  io.to(req.body.server_id).emit('roles_updated', { serverId: req.body.server_id });
+  res.status(201).json({ ...result, server: detail.server, members: detail.members, roles: detail.roles });
+}));
+
+app.delete('/api/servers/:serverId/bots/:applicationId', requireUser, asyncRoute(async (req, res) => {
+  const result = await appService.removeBot({
+    applicationId: req.params.applicationId, serverId: req.params.serverId, userId: req.userId
+  });
+  io.to(req.params.serverId).emit('member_updated', { serverId: req.params.serverId });
+  io.to(req.params.serverId).emit('roles_updated', { serverId: req.params.serverId });
+  res.json(result);
+}));
+
+// --- slash commands a bot registers -----------------------------------------
+
+app.get('/api/applications/:applicationId/commands', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.listCommands({
+    applicationId: req.params.applicationId, serverId: req.query.server_id ?? null
+  }));
+}));
+
+app.put('/api/applications/:applicationId/commands', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.putCommands({
+    applicationId: req.params.applicationId, userId: req.userId,
+    serverId: req.body?.server_id ?? null,
+    commands: Array.isArray(req.body?.commands) ? req.body.commands : []
+  }));
+}));
+
+// What the composer offers in this channel: every command from bots that are
+// actually here, guild-scoped ones included.
+app.get('/api/channels/:channelId/commands', requireUser, asyncRoute(async (req, res) => {
+  res.json(await appService.commandsForChannel({ channelId: req.params.channelId, userId: req.userId }));
+}));
+
+// --- interactions ------------------------------------------------------------
+
+/** Hand an interaction to the application that owns it. */
+const dispatchInteraction = (interaction) => {
+  io.to(`application-${interaction.application_id}`).emit('interaction_created', interaction);
+};
+
+app.post('/api/messages/:messageId/interactions', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  const interaction = await appService.createComponentInteraction({
+    messageId: req.params.messageId, userId: req.userId,
+    customId: req.body?.custom_id, values: req.body?.values ?? []
+  });
+  dispatchInteraction(interaction);
+  // The presser gets an id back so the UI can show "thinking…" until the bot
+  // answers; the token stays server-side.
+  res.status(202).json({ id: interaction.id, deferred: true });
+}));
+
+app.post('/api/channels/:channelId/commands/:name', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  const interaction = await appService.createCommandInteraction({
+    channelId: req.params.channelId, userId: req.userId,
+    name: req.params.name, options: req.body?.options ?? {},
+    // Present only for a context-menu command: what the user right-clicked.
+    target: req.body?.target ?? null
+  });
+  dispatchInteraction(interaction);
+  res.status(202).json({ id: interaction.id, deferred: true });
+}));
+
+/**
+ * The bot answers. `type` mirrors Discord: `message` posts a reply (optionally
+ * ephemeral), `update` edits the message the component sits on, `ack` just
+ * closes the interaction.
+ */
+app.post('/api/interactions/:interactionId/callback', asyncRoute(async (req, res) => {
+  const applicationId = requireBot(req);
+  const interaction = await appService.claimInteraction({
+    interactionId: req.params.interactionId, token: req.body?.token, applicationId
+  });
+
+  const type = ['message', 'update', 'ack'].includes(req.body?.type) ? req.body.type : 'message';
+  let payload = null;
+
+  if (type === 'message') {
+    const message = await messageService.createMessage({
+      channelId: interaction.channel_id,
+      userId: req.userId,
+      content: req.body?.content ?? '',
+      embeds: req.body?.embeds ?? null,
+      components: req.body?.components ?? null,
+      applicationId,
+      ephemeralUserId: req.body?.ephemeral ? interaction.user_id : null,
+      replyToId: req.body?.reply ? interaction.message_id : null,
+      skipModeration: true
+    });
+    fanOutMessage(io, message);
+    payload = message;
+  } else if (type === 'update') {
+    if (!interaction.message_id) throw new ApiError('Nothing to update', { code: 'NO_MESSAGE' });
+    payload = await messageService.editMessage({
+      messageId: interaction.message_id, userId: req.userId,
+      content: req.body?.content, embeds: req.body?.embeds, components: req.body?.components
+    });
+    io.to(payload.channel_id).emit('message_updated', payload);
+  }
+
+  await appService.markResponded(interaction.id);
+  // Tell the person who pressed the button that their interaction resolved,
+  // so a spinner can stop even when the reply was an edit or a bare ack.
+  io.to(`user-${interaction.user_id}`).emit('interaction_resolved', {
+    interaction_id: interaction.id, type, message_id: payload?.id ?? null
+  });
+  res.json({ ok: true, message: payload });
+}));
+
 // --- server templates --------------------------------------------------------
 
 app.get('/api/servers/:serverId/template', requireUser, asyncRoute(async (req, res) => {
@@ -1111,6 +1355,105 @@ app.post('/api/templates/:code/servers', requireUser, writeRateLimit, asyncRoute
     code: req.params.code, userId: req.userId, name: req.body?.name, iconUrl: req.body?.icon_url ?? null
   });
   res.status(201).json(detail);
+}));
+
+// --- data rights -------------------------------------------------------------
+
+app.get('/api/users/@me/export', requireUser, asyncRoute(async (req, res) => {
+  const data = await dataRights.exportAccount(req.userId);
+  // Sent as a download rather than rendered, so the browser saves a file the
+  // person can keep instead of a wall of JSON they have to copy out of a tab.
+  res.setHeader('Content-Disposition', `attachment; filename="antigravity-export-${req.userId}.json"`);
+  res.type('application/json').send(JSON.stringify(data, null, 2));
+}));
+
+app.delete('/api/users/@me', requireUser, asyncRoute(async (req, res) => {
+  const result = await dataRights.deleteAccount({ userId: req.userId });
+  io.to(`user-${req.userId}`).emit('identify_error', { error: 'ACCOUNT_DELETED' });
+  res.json(result);
+}));
+
+// --- moderation tools --------------------------------------------------------
+
+app.get('/api/messages/:messageId/history', requireUser, asyncRoute(async (req, res) => {
+  res.json(await messageService.listEditHistory(req.params.messageId, req.userId));
+}));
+
+app.post('/api/channels/:channelId/messages/bulk-delete', requireUser, writeRateLimit,
+  asyncRoute(async (req, res) => {
+    const result = await messageService.bulkDeleteMessages({
+      channelId: req.params.channelId, messageIds: req.body?.message_ids, userId: req.userId
+    });
+    // One event, not one per message: a hundred `message_deleted` events would
+    // make the client repaint the whole history a hundred times.
+    io.to(req.params.channelId).emit('messages_bulk_deleted', result);
+    res.json(result);
+  }));
+
+app.patch('/api/servers/:serverId/channels/order', requireUser, asyncRoute(async (req, res) => {
+  const channels = await guildService.reorderChannels({
+    serverId: req.params.serverId, userId: req.userId, order: req.body?.order
+  });
+  io.to(req.params.serverId).emit('channels_reordered', { server_id: req.params.serverId, channels });
+  res.json(channels);
+}));
+
+app.post('/api/channels/:channelId/permissions/sync', requireUser, asyncRoute(async (req, res) => {
+  const result = await guildService.syncChannelPermissions({
+    channelId: req.params.channelId, userId: req.userId
+  });
+  io.to(req.params.channelId).emit('channel_permissions_synced', result);
+  res.json(result);
+}));
+
+// --- calls in DMs ------------------------------------------------------------
+//
+// The ring is HTTP; the media is the same socket mesh a guild voice channel
+// uses. `call_ring` goes to each recipient's own room so an incoming call
+// reaches them wherever they are in the app, while `call_updated` goes to the
+// conversation so everyone watching it sees who joined or hung up.
+
+const emitCall = (channelId, call) => {
+  io.to(channelId).emit('call_updated', { channel_id: channelId, call });
+};
+
+app.get('/api/channels/:channelId/call', requireUser, asyncRoute(async (req, res) => {
+  await assertChannelAccess({ channelId: req.params.channelId, userId: req.userId });
+  res.json({ call: await callService.getActiveCall(req.params.channelId) });
+}));
+
+app.post('/api/channels/:channelId/call', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  const { call, created } = await callService.startCall({
+    channelId: req.params.channelId, userId: req.userId, video: Boolean(req.body?.video)
+  });
+  if (created) {
+    for (const participant of call.participants ?? []) {
+      if (participant.user_id === req.userId) continue;
+      io.to(`user-${participant.user_id}`).emit('call_ring', { channel_id: req.params.channelId, call });
+    }
+  }
+  emitCall(req.params.channelId, call);
+  res.status(created ? 201 : 200).json({ call });
+}));
+
+app.post('/api/channels/:channelId/call/join', requireUser, asyncRoute(async (req, res) => {
+  const call = await callService.joinCall({ channelId: req.params.channelId, userId: req.userId });
+  emitCall(req.params.channelId, call);
+  res.json({ call });
+}));
+
+app.post('/api/channels/:channelId/call/decline', requireUser, asyncRoute(async (req, res) => {
+  const call = await callService.declineCall({ channelId: req.params.channelId, userId: req.userId });
+  emitCall(req.params.channelId, call?.ended_at ? null : call);
+  if (call?.message) fanOutMessage(io, call.message);
+  res.json({ call: call?.ended_at ? null : call });
+}));
+
+app.post('/api/channels/:channelId/call/leave', requireUser, asyncRoute(async (req, res) => {
+  const call = await callService.leaveCall({ channelId: req.params.channelId, userId: req.userId });
+  emitCall(req.params.channelId, call?.ended_at ? null : call);
+  if (call?.message) fanOutMessage(io, call.message);
+  res.json({ call: call?.ended_at ? null : call });
 }));
 
 // --- channel following -------------------------------------------------------

@@ -42,7 +42,9 @@ export function useVoicePeers({
   outputDeviceId = 'default',
   attenuation = 0,          // % to duck others by while someone shares or speaks
   attenuateWhileSpeaking = false,
-  selfSpeaking = false
+  selfSpeaking = false,
+  spatialAudio = false,     // place each speaker left/right by their tile
+  positions = {}            // userId -> -1 (hard left) … 1 (hard right)
 }) {
   // Playback settings are read through a ref so moving a volume slider does not
   // invalidate attachRemoteTrack → createPeer → the mesh effect, which would
@@ -50,7 +52,7 @@ export function useVoicePeers({
   const playbackRef = useRef({});
   playbackRef.current = {
     volumes, localMutes, isDeafened, outputVolume, outputDeviceId,
-    attenuation, attenuateWhileSpeaking, selfSpeaking
+    attenuation, attenuateWhileSpeaking, selfSpeaking, spatialAudio, positions
   };
 
   const peersRef = useRef(new Map());        // socketId -> { pc, userId, senders, polite, makingOffer, ignoreOffer }
@@ -75,6 +77,19 @@ export function useVoicePeers({
     const silenced = p.isDeafened || p.localMutes[userId];
     const percent = p.volumes[userId] ?? 100;
     node.gain.gain.value = silenced ? 0 : (percent / 100) * (p.outputVolume / 100) * ducked;
+
+    // Spatial audio: each speaker sits where their tile is, slightly in front
+    // of the listener. A PannerNode (not a StereoPanner) because it keeps the
+    // distance falloff and the HRTF cues that make "left of me" audible rather
+    // than just "quieter on the right".
+    if (node.panner) {
+      const x = p.spatialAudio ? Math.max(-1, Math.min(1, Number(p.positions[userId] ?? 0))) : 0;
+      const when = node.ctx.currentTime;
+      // setValueAtTime rather than assignment: a jump in position clicks.
+      node.panner.positionX?.setValueAtTime(x, when);
+      node.panner.positionY?.setValueAtTime(0, when);
+      node.panner.positionZ?.setValueAtTime(p.spatialAudio ? -0.4 : 0, when);
+    }
     // Route playback to the chosen speaker where the browser supports it.
     if (p.outputDeviceId && p.outputDeviceId !== 'default' && node.el.setSinkId) {
       node.el.setSinkId(p.outputDeviceId).catch(() => {});
@@ -99,9 +114,16 @@ export function useVoicePeers({
       const ctx = new AudioCtx();
       const source = ctx.createMediaStreamSource(stream);
       const gain = ctx.createGain();
-      source.connect(gain).connect(ctx.destination);
+      // The panner is always in the graph; with spatial audio off it simply
+      // sits at the origin, which is indistinguishable from not having one.
+      const panner = ctx.createPanner();
+      panner.panningModel = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = 1;
+      panner.maxDistance = 4;
+      source.connect(gain).connect(panner).connect(ctx.destination);
 
-      node = { el, ctx, gain, source, userId };
+      node = { el, ctx, gain, panner, source, userId };
       audioNodesRef.current.set(socketId, node);
     } else {
       node.el.srcObject = stream;

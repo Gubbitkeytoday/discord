@@ -2,13 +2,13 @@ import React, { useMemo, useState } from 'react';
 import {
   Hash, Volume2, Plus, ChevronDown, ChevronRight, Mic, MicOff, Headphones,
   Settings, PhoneOff, Megaphone, X, MessagesSquare, Bell, BellOff, Check,
-  Pencil, Trash2, Copy, UserPlus, Link2, Lock, Radio
+  Pencil, Trash2, Copy, UserPlus, Link2, Lock, Radio, Pin
 } from 'lucide-react';
 import ServerDropdown from './ServerDropdown';
 import ContextMenu from './ContextMenu';
 import UserStatusMenu from './UserStatusMenu';
 import { t } from '../i18n/index.jsx';
-import { getPreferences } from '../hooks/useUserSettings';
+import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
@@ -30,6 +30,8 @@ const CHANNEL_ICONS = {
 };
 
 export default function ChannelSidebar({
+  mobileOpen = false,
+  onCloseMobile,
   currentServer,
   channels,
   activeChannelId,
@@ -65,6 +67,7 @@ export default function ChannelSidebar({
   onToast
 }) {
   const [collapsed, setCollapsed] = useState({});
+  const { prefs, update } = useUserSettings();
   const [showServerMenu, setShowServerMenu] = useState(false);
   const [channelMenu, setChannelMenu] = useState(null);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -82,10 +85,27 @@ export default function ChannelSidebar({
     return map;
   }, [channels]);
 
+  // Pinned channels are hoisted into their own group above everything else —
+  // the point of pinning is not having to remember which category it lives in.
+  const pinnedIds = useMemo(
+    () => new Set(prefs.layout?.pinnedChannels ?? []),
+    [prefs.layout?.pinnedChannels]
+  );
+
+  const togglePinned = (channelId) => {
+    const current = prefs.layout?.pinnedChannels ?? [];
+    const next = current.includes(channelId)
+      ? current.filter((id) => id !== channelId)
+      : [...current, channelId];
+    update('layout', { ...(prefs.layout ?? {}), pinnedChannels: next });
+  };
+
   const grouped = useMemo(() => {
     const groups = new Map();
+    const pinned = [];
     for (const channel of channels) {
       if (channel.type === 'thread' || channel.type === 'category') continue;
+      if (pinnedIds.has(channel.id)) { pinned.push(channel); continue; }
       const key = channel.category || 'CHANNELS';
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(channel);
@@ -93,8 +113,13 @@ export default function ChannelSidebar({
     for (const list of groups.values()) {
       list.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
     }
-    return [...groups.entries()];
-  }, [channels]);
+    const entries = [...groups.entries()];
+    if (pinned.length) {
+      pinned.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+      entries.unshift([t('channel.pinned'), pinned]);
+    }
+    return entries;
+  }, [channels, pinnedIds]);
 
   if (!currentServer) return null;
 
@@ -109,6 +134,11 @@ export default function ChannelSidebar({
         label: t('notif.markRead'),
         disabled: !hasUnread,
         action: () => onMarkChannelRead?.(channel.id)
+      },
+      {
+        icon: Pin,
+        label: pinnedIds.has(channel.id) ? t('channel.unpin') : t('channel.pin'),
+        action: () => togglePinned(channel.id)
       },
       { separator: true },
       can('CREATE_INSTANT_INVITE') && {
@@ -153,7 +183,18 @@ export default function ChannelSidebar({
   };
 
   return (
-    <div className="w-60 bg-d-surface flex flex-col shrink-0 select-none z-10 border-r border-d-edge/40 max-md:absolute max-md:inset-y-0 max-md:left-[72px] max-md:shadow-2xl">
+    <>
+      {/* On a phone this column is a drawer: closed by default, dismissed by
+          tapping the backdrop or picking a channel. */}
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label={t('common.close')}
+          onClick={onCloseMobile}
+          className="md:hidden fixed inset-0 bg-black/50 z-10"
+        />
+      )}
+      <div className={`w-60 bg-d-surface flex flex-col shrink-0 select-none z-20 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:shadow-2xl max-md:transition-transform ${mobileOpen ? '' : 'max-md:-translate-x-[120%]'}`}>
       {/* Server header */}
       <div className="relative shrink-0">
         <button
@@ -421,6 +462,7 @@ export default function ChannelSidebar({
           onClose={() => setChannelMenu(null)}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }

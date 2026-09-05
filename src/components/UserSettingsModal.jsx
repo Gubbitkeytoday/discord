@@ -39,6 +39,7 @@ import AccessibilityTab from './settings/AccessibilityTab';
 import NotificationsTab from './settings/NotificationsTab';
 import KeybindsTab from './settings/KeybindsTab';
 import PrivacyTab from './settings/PrivacyTab';
+import ApplicationsTab from './settings/ApplicationsTab';
 import ChatTab from './settings/ChatTab';
 import StreamerModeTab from './settings/StreamerModeTab';
 import ActivityTab from './settings/ActivityTab';
@@ -46,7 +47,7 @@ import ProfileTab from './settings/ProfileTab';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import {
   X, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
-  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut
+  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot
 } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 
@@ -77,6 +78,12 @@ const tabGroups = () => [
       { key: 'chat',          icon: MessageSquare, label: t('settings.chatTab'),          keywords: t('settings.kwChat') },
       { key: 'streamer',      icon: Radio,         label: t('settings.streamerTab'),      keywords: t('settings.kwStreamer') }
     ]
+  },
+  {
+    title: t('settings.groupDeveloper'),
+    tabs: [
+      { key: 'developer', icon: Bot, label: t('settings.developerTab'), keywords: t('settings.kwDeveloper') }
+    ]
   }
 ];
 
@@ -87,7 +94,7 @@ const matches = (tab, query) => {
 };
 
 export default function UserSettingsModal({
-  currentUser, initialTab = 'profile', onClose, onSaveProfile, onSetStatus, onSignOut, onToast
+  currentUser, servers = [], initialTab = 'profile', onClose, onSaveProfile, onSetStatus, onSignOut, onToast
 }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [query, setQuery] = useState('');
@@ -224,6 +231,7 @@ export default function UserSettingsModal({
             <AccountSecurityTab currentUser={currentUser} onToast={onToast} onSignOut={onSignOut} />
           )}
           {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} />}
+          {activeTab === 'developer' && <ApplicationsTab servers={servers} onToast={onToast} />}
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
           {activeTab === 'appearance' && <AppearanceTab />}
           {activeTab === 'accessibility' && <AccessibilityTab onToast={onToast} />}

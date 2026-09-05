@@ -554,7 +554,7 @@ MP4/MOV จาก atom `mvhd` · WebM/MKV จาก Segment Info · MP3 จา�
 ## 16. การทดสอบ
 
 ```bash
-npm test     # 242 integration tests, 3 ไฟล์รันขนานกัน
+npm test     # 256 integration tests, 3 ไฟล์รันขนานกัน
 npm run a11y # ตรวจ accessibility แบบอัตโนมัติ
 ```
 
@@ -1296,3 +1296,207 @@ reports `code_schema_version` (what the running process was built against)
 next to `schema_version` (what the database is at), and the client compares it
 to its own `EXPECTED_SCHEMA_VERSION` on boot and shows an error toast telling
 you to restart. A test keeps that constant in step with `db.js`.
+
+## 41. Applications (bots), rich embeds and message components
+
+**A bot is a user.** Creating an application (`services/applications.js`,
+migration v15) also creates a `users` row with `is_bot = 1`; the token resolves
+to that user in `makeIdentify` when the request carries
+`Authorization: Bot <token>`. Everything after that is the ordinary path — the
+same permission gate, the same `createMessage`, the same realtime rooms — so
+there is no second, weaker API to keep in step. The token is stored only as a
+SHA-256 hash and shown once, at creation or reset.
+
+**Invitation.** `POST /api/applications/:id/invite` adds the bot with a
+*managed* role holding exactly the permissions requested. `ADMINISTRATOR` is
+never granted, and an inviter cannot hand over a permission they do not hold
+themselves — otherwise "invite a bot" would be a privilege ladder. Removing the
+bot removes the role.
+
+**Rich embeds** (`validateEmbeds`) and **components** (`validateComponents`)
+are bot-only fields on `POST /api/messages`; a person's client cannot set them.
+Both validators bound every field, and the renderer (`RichEmbed.jsx`) treats
+the content as untrusted: plain text (no markdown, so a bot cannot forge a
+mention), http(s)-only links and images in a fixed box. Components are rows of
+up to five buttons, or one select menu alone in its row; `custom_id` must be
+unique within a message.
+
+**Interactions.** Pressing a button or running a bot's slash command writes an
+`interactions` row and emits `interaction_created` into the application's
+socket room (`application-<id>`, joined when a bot identifies with
+`botToken`). The bot answers `POST /api/interactions/:id/callback` with the
+interaction's token: `message` (optionally `ephemeral`), `update` (edits the
+message the component sits on) or `ack`. Tokens expire after 15 minutes, and
+belong to exactly one application. The presser gets `interaction_resolved`.
+
+**Ephemeral messages** are real rows carrying `ephemeral_user_id`: history
+filters them to their recipient and `fanOutMessage` delivers them to that
+user's sockets only, so moderation can still see them but nobody else can.
+
+**Slash commands** are registered per guild or globally
+(`PUT /api/applications/:id/commands`, whole-set replacement) and merged into
+the composer's autocomplete next to the built-ins; options are validated
+against the declaration, and anything undeclared is dropped rather than
+forwarded.
+
+`scripts/example-bot.mjs` is a complete working bot — register commands,
+receive interactions, answer with an embed, disable a button on press, reply
+ephemerally — run it with `BOT_TOKEN=... node scripts/example-bot.mjs`.
+Tests: 8 in `test-part3.mjs` plus a full gateway round trip over a real socket
+in `test-part2.mjs`.
+
+## 42. Insights, the public widget, raid protection, per-server profiles
+
+**Insights** (`services/insights.js`, `MANAGE_GUILD`) are counted at request
+time from `messages`, `server_members` and `voice_states` — there is no
+analytics store, so a number here is the number you would get by counting, and
+a test asserts exactly that. The daily series is zero-filled so a quiet day is
+a dip rather than a closed gap. Voice is reported as *currently connected*
+because no voice history is kept, and saying so is better than inventing a
+figure.
+
+**The widget** (`GET /api/servers/:id/widget.json`) is unauthenticated by
+design, so it carries only what an invite already reveals: name, icon,
+presence count, voice channel occupancy and an optional instant invite —
+never a member list or any message. It is off until staff enable it.
+
+**Raid protection** hooks `joinServer` *before* any row is written
+(`guardJoin`): if a lockdown is active the join is refused; otherwise the join
+rate over `raid_join_window_secs` is measured and crossing
+`raid_join_threshold` either locks the server down or turns on membership
+screening (§34), so a flood lands in the pending state instead of the
+channels. Lockdowns are rows in `guild_lockdowns` — staff lift them, and can
+start one by hand.
+
+**Per-server profiles**: `server_members` gained `banner_url`, `bio` and
+`pronouns` next to the existing `nickname` and `avatar_url`. You may only edit
+your own (nobody should be able to write words into another person's profile),
+and `getGuildProfile` returns both the overrides and the `effective` values
+with the account profile filled in behind them. The member list already
+prefers the per-guild avatar and nickname.
+
+Migration v16 is column-additive plus one table. Tests: 5 in `test-part3.mjs`.
+
+## 43. The last parity pass: formatting bar, Super Reactions, spatial audio, mobile
+
+**Formatting toolbar.** Discord's Aug 2026 bar still writes Markdown; it just
+spares you the characters. `applyFormat(before, after)` wraps the selection,
+or inserts the pair and places the caret between them when nothing is
+selected, and *unwraps* when the selection is already wrapped — so a button is
+a toggle rather than a way to nest `****`.
+
+**Super Reactions.** Shift-clicking a quick reaction adds the reaction (the
+ordinary REST path) and emits `super_reaction` over the socket. Nothing is
+stored: the burst is a flourish, and a flourish is not data. Everyone in the
+channel plays the same one-second CSS animation, and the whole effect is
+skipped for viewers who asked for reduced motion or turned animated emoji off.
+The gateway checks `ADD_REACTIONS` before relaying, so the burst cannot be
+used as an unpermissioned broadcast.
+
+**Spatial audio.** Each remote stream already ran through a `GainNode`; it now
+continues into a `PannerNode` (HRTF, inverse distance) positioned from the
+speaker's place in the tile row, so the person on the left sounds left. With
+the setting off every panner sits at the origin, which is indistinguishable
+from not having one — one graph, no branching.
+
+**Mobile.** Below `md` the channel list is a drawer (translated off-canvas,
+opened from a header hamburger, dismissed by the backdrop or by picking a
+channel); below `lg` the member list is a sheet over the chat instead of a
+third column. The settings surfaces already stacked.
+
+**Slash commands** grew from 10 to 26, matching Discord's built-in set:
+transforms (`/code`, `/quote`, `/bold`, `/italic`, `/shout`, `/lenny`,
+`/flip`, `/roll`) and actions that open something the UI already has
+(`/invite`, `/leave`, `/mute`, `/unmute`, `/pins`, `/events`, `/settings`,
+`/status`) — each a shortcut to an existing path, never a second
+implementation.
+
+### A React bug this pass produced, and the check that now catches it
+
+Adding the Super Reaction hooks put a `useCallback` *after* ChatArea's
+"no channel selected" early return. React then rendered a different number of
+hooks depending on that branch — "Rendered more hooks than during the previous
+render", a blank chat pane. `parse-check.mjs` now walks every component and
+hook and fails when a `useX()` call appears after a top-level return,
+naming both lines. Verified by reintroducing the bug.
+
+**Keyboard shortcuts** grew from 9 to 20, covering Discord's set: server and
+channel navigation, mark-read, search, pins, member list, emoji picker,
+formatting bar, settings and events. Every one drives the same state a click
+does, so a shortcut and its button can never disagree.
+
+## 44. Calls, search operators, moderation tools and data rights (schema v17)
+
+The batch that closed the biggest remaining gaps against Discord. Four ideas
+carry most of it.
+
+### Calls are the voice mesh plus a ring
+
+`services/calls.js` owns nothing to do with media. Answering a call puts the
+person into `voice_states` keyed by the DM channel, which is exactly what
+joining a guild voice channel does — same mesh, same mute and deafen flags,
+same screen share, same spatial audio. What the service adds is the part a
+voice channel does not need: who started it, who is still being rung, who
+declined, and when it ended.
+
+Two tables: `calls` (one open row per channel, enforced by a partial unique
+index) and `call_participants` (one row per recipient, so "declined" and "never
+answered" stay distinguishable). The call is settled on read as well as on
+write — a server that restarts mid-call does not leave anyone ringing forever.
+When it ends, the row becomes the `call` system message the conversation keeps.
+That message stores `missed` or a duration in seconds rather than a sentence,
+so it renders in the reader's language rather than the sender's.
+
+### Search operators are parsed, then resolved
+
+`lib/searchQuery.js` is pure: a string in, `{ term, filters, unknown }` out. No
+database, no permissions, no async — which is what makes the awkward cases
+(`from:"Mai Suwan"`, a `:)` that is not an operator, `before:yesterday`)
+testable without a server. Names become ids in `searchMessages`, because that
+needs the database and an id must never be guessed from user text. An
+unresolvable name narrows to nothing rather than widening to everything, and an
+unusable operator value is left in the search text instead of being dropped
+silently.
+
+A query that is nothing but operators is still a query: "everything user-2 ever
+posted in here" is an ordinary thing to want.
+
+### Moderation acts in batches, and says so once
+
+`bulkDeleteMessages` takes Discord's limits — 2 to 100 messages, nothing older
+than fourteen days — and refuses an over-age batch rather than skipping it,
+because a partial delete that reports success is worse than a refusal. The
+whole batch emits one `messages_bulk_deleted`, so the client repaints its
+history once instead of a hundred times.
+
+`reorderChannels` takes the resulting order, not a delta: a delta computed on a
+stale sidebar reorders the wrong things. `syncChannelPermissions` replaces the
+child's overwrites rather than merging them, because a sync that leaves
+leftovers is not a sync.
+
+### Data rights: export what you made, delete what identifies you
+
+`services/dataRights.js`. The export is what this account *produced* — profile,
+servers, own messages, friends, settings — and deliberately not everything the
+account can see; handing one person a copy of a private channel because they
+read it would be the opposite of a privacy feature.
+
+Deletion is soft and anonymising, which is Discord's model and the right one:
+messages stay so other people's conversations do not develop holes, attributed
+to a tombstoned user, while email, password, avatar, bio, sessions and
+friendships are removed outright. An account that owns a server is refused with
+the servers named — deleting it would either destroy a community or leave it
+ownerless, and neither is a decision to make on someone's behalf.
+
+### Also in this batch
+
+* Text chat inside voice channels: selecting a voice channel now joins the room
+  *and* loads its history, rather than replacing the conversation with it.
+* NSFW and spoiler channels (`ChannelGate`): one interstitial, remembered per
+  channel in `localStorage` — a courtesy, not an access control.
+* Edit history: the rows always existed in `message_edits`; the "(edited)"
+  marker is now the button that reads them back.
+* Context-menu bot commands (`type` on `application_commands`): a message or
+  user command carries what was right-clicked, verified server-side rather than
+  trusted, instead of typed options.
+* Pinned channels, Tap to React, and role gradients (`roles.color_secondary`).

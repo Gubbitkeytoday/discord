@@ -82,6 +82,111 @@ export const SLASH_COMMANDS = () => [
     description: t('slash.thread'),
     usage: '/thread <name>',
     run: (rest) => (rest ? { action: 'thread', value: rest } : null)
+  },
+
+  // --- text transforms (no server involvement) ------------------------------
+  {
+    name: 'code',
+    description: t('slash.code'),
+    usage: '/code <text>',
+    run: (rest) => (rest ? { content: rest.includes('\n') ? `\`\`\`\n${rest}\n\`\`\`` : `\`${rest}\`` } : null)
+  },
+  {
+    name: 'quote',
+    description: t('slash.quote'),
+    usage: '/quote <text>',
+    run: (rest) => (rest ? { content: rest.split('\n').map((line) => `> ${line}`).join('\n') } : null)
+  },
+  {
+    name: 'bold',
+    description: t('slash.bold'),
+    usage: '/bold <text>',
+    run: (rest) => (rest ? { content: `**${rest}**` } : null)
+  },
+  {
+    name: 'italic',
+    description: t('slash.italic'),
+    usage: '/italic <text>',
+    run: (rest) => (rest ? { content: `*${rest}*` } : null)
+  },
+  {
+    name: 'lenny',
+    description: t('slash.lenny'),
+    usage: '/lenny [message]',
+    run: (rest) => ({ content: `${rest} ( ͡° ͜ʖ ͡°)`.trim() })
+  },
+  {
+    name: 'flip',
+    description: t('slash.flip'),
+    usage: '/flip',
+    // A coin flip is a transform: the result is text, and everyone can see it
+    // was the sender's client that flipped it — same as typing the answer.
+    run: () => ({ content: Math.random() < 0.5 ? t('slash.heads') : t('slash.tails') })
+  },
+  {
+    name: 'roll',
+    description: t('slash.roll'),
+    usage: '/roll [sides]',
+    run: (rest) => {
+      const sides = Math.min(1000, Math.max(2, Number(rest) || 6));
+      return { content: t('slash.rolled', { n: 1 + Math.floor(Math.random() * sides), sides }) };
+    }
+  },
+
+  // --- actions --------------------------------------------------------------
+  {
+    name: 'shout',
+    description: t('slash.shout'),
+    usage: '/shout <message>',
+    run: (rest) => (rest ? { content: rest.toUpperCase() } : null)
+  },
+  {
+    name: 'invite',
+    description: t('slash.invite'),
+    usage: '/invite',
+    run: () => ({ action: 'invite' })
+  },
+  {
+    name: 'leave',
+    description: t('slash.leave'),
+    usage: '/leave',
+    run: () => ({ action: 'leave' })
+  },
+  {
+    name: 'mute',
+    description: t('slash.mute'),
+    usage: '/mute',
+    run: () => ({ action: 'mute-channel' })
+  },
+  {
+    name: 'unmute',
+    description: t('slash.unmute'),
+    usage: '/unmute',
+    run: () => ({ action: 'unmute-channel' })
+  },
+  {
+    name: 'pins',
+    description: t('slash.pins'),
+    usage: '/pins',
+    run: () => ({ action: 'pins' })
+  },
+  {
+    name: 'events',
+    description: t('slash.events'),
+    usage: '/events',
+    run: () => ({ action: 'events' })
+  },
+  {
+    name: 'settings',
+    description: t('slash.settings'),
+    usage: '/settings',
+    run: () => ({ action: 'settings' })
+  },
+  {
+    name: 'status',
+    description: t('slash.status'),
+    usage: '/status <text>',
+    run: (rest) => ({ action: 'status', value: rest })
   }
 ];
 

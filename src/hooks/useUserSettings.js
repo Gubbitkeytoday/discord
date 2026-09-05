@@ -62,6 +62,10 @@ export const PREFERENCE_DEFAULTS = {
     use24HourClock: true,
     convertEmoticons: true,
     showTypingIndicator: true,
+    // Tap to React: double-clicking a message applies this emoji. Set it to
+    // null to turn the gesture off entirely — some people double-click to
+    // select text and would rather not leave a heart behind every time.
+    tapToReactEmoji: '❤️',
     developerMode: false
   },
   privacy: {
@@ -90,7 +94,18 @@ export const PREFERENCE_DEFAULTS = {
     navigateChannelUp: 'Alt+ArrowUp',
     navigateChannelDown: 'Alt+ArrowDown',
     toggleStreamerMode: 'Ctrl+Shift+S',
-    disconnectVoice: 'Ctrl+Shift+H'
+    disconnectVoice: 'Ctrl+Shift+H',
+    navigateServerUp: 'Ctrl+Alt+ArrowUp',
+    navigateServerDown: 'Ctrl+Alt+ArrowDown',
+    markChannelRead: 'Escape',
+    toggleMemberList: 'Ctrl+U',
+    togglePins: 'Ctrl+P',
+    search: 'Ctrl+F',
+    openSettings: 'Ctrl+Comma',
+    toggleEmojiPicker: 'Ctrl+E',
+    openEvents: 'Ctrl+Shift+E',
+    toggleFormatting: 'Ctrl+Shift+F',
+    jumpToHome: 'Ctrl+Shift+Home'
   },
   voice: {
     inputMode: 'voice',
@@ -112,11 +127,17 @@ export const PREFERENCE_DEFAULTS = {
     blurStrength: 12,
     showSpeakingIndicator: true,
     silenceWarning: true,
-    voiceJoinSound: true
+    voiceJoinSound: true,
+    spatialAudio: false
   },
   layout: {
     serverFolders: [],
-    serverOrder: []
+    serverOrder: [],
+    // Channels and conversations the user has pinned to the top of their list.
+    // Per-account rather than per-server, because that is how the sidebar reads
+    // them back: one lookup, whichever server is open.
+    pinnedChannels: [],
+    pinnedDms: []
   }
 };
 

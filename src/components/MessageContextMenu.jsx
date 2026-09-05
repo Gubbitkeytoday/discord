@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Reply, Pencil, Trash2, Pin, PinOff, Copy, Link2, SmilePlus, Hash,
-  MessagesSquare, Forward, MailOpen, Flag, Megaphone
+  MessagesSquare, Forward, MailOpen, Flag, Megaphone, Bot
 } from 'lucide-react';
 import ContextMenu from './ContextMenu';
 import { getPreferences } from '../hooks/useUserSettings';
@@ -15,7 +15,8 @@ import { t } from '../i18n/index.jsx';
 export default function MessageContextMenu({
   message, x, y, isOwn, canManage, canPin, onClose,
   onReply, onEdit, onDelete, onTogglePin, onAddReaction, onCreateThread,
-  onForward, onMarkUnread, onReport, onPublish, onToast
+  onForward, onMarkUnread, onReport, onPublish, onToast,
+  botCommands = [], onRunBotCommand
 }) {
   const copy = (value) => {
     navigator.clipboard?.writeText(value);
@@ -36,6 +37,17 @@ export default function MessageContextMenu({
       action: () => onTogglePin?.(message, !message.pinned)
     },
     onMarkUnread && { icon: MailOpen, label: t('chat.markUnread'), action: () => onMarkUnread(message) },
+    // Apps: a bot's message commands appear here, as Discord's do, rather than
+    // needing the person to remember a slash command and paste an id.
+    ...(onRunBotCommand
+      ? botCommands
+        .filter((c) => c.type === 'message')
+        .map((command) => ({
+          icon: Bot,
+          label: command.name,
+          action: () => onRunBotCommand(command, { message_id: message.id })
+        }))
+      : []),
     { separator: true },
     { icon: Copy, label: t('chat.copyText'), action: () => copy(message.content ?? '') },
     {

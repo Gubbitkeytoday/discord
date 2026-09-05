@@ -71,7 +71,7 @@ const kindMeta = () => ({
 });
 
 /** Build the ranked option list for a trigger. */
-export function buildOptions(trigger, { members = [], channels = [], customEmojis = [] }) {
+export function buildOptions(trigger, { members = [], channels = [], customEmojis = [], botCommands = [] }) {
   if (!trigger) return [];
   const q = trigger.query.toLowerCase();
 
@@ -131,16 +131,32 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
     return [...custom, ...unicode].slice(0, 10);
   }
 
-  return matchCommands(q)
+  // Built-ins first, then whatever the bots in this channel registered. A bot
+  // command is marked so the composer knows to POST it instead of running it
+  // locally.
+  const builtIn = matchCommands(q).map((c) => ({
+    id: c.name,
+    primary: `/${c.name}`,
+    secondary: c.description,
+    command: c,
+    // Completing inserts the name and a space; the command only *runs* when
+    // the message is sent, so you can still type its argument.
+    insert: `/${c.name} `
+  }));
+  const taken = new Set(builtIn.map((o) => o.id));
+  const fromBots = botCommands
+    // Context-menu commands are not typed — they live in a right-click menu,
+    // and offering them here would suggest a slash that does not exist.
+    .filter((c) => (c.type ?? 'slash') === 'slash')
+    .filter((c) => c.name.startsWith(q) && !taken.has(c.name))
     .map((c) => ({
-      id: c.name,
+      id: `bot:${c.application_id}:${c.name}`,
       primary: `/${c.name}`,
-      secondary: c.description,
-      command: c,
-      // Completing inserts the name and a space; the command only *runs* when
-      // the message is sent, so you can still type its argument.
+      secondary: `${c.description} · ${c.application_name}`,
+      botCommand: c,
       insert: `/${c.name} `
     }));
+  return [...builtIn, ...fromBots].slice(0, 12);
 }
 
 /**

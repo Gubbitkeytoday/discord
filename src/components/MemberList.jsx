@@ -62,7 +62,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
   return (
     <aside
       aria-label={t('members.count', { count: members.length })}
-      className="w-60 bg-d-surface flex flex-col shrink-0 select-none overflow-y-auto px-3 py-4 space-y-4 border-l border-d-edge/40 hidden lg:block"
+      className="w-60 bg-d-surface flex flex-col shrink-0 select-none overflow-y-auto px-3 py-4 space-y-4 border-l border-d-edge/40 max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-30 max-lg:shadow-2xl"
     >
       {sections.map((section) => (
         <div key={`${section.name}-${section.position}`}>
@@ -110,11 +110,23 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       )}
                       <span
                         className="text-sm font-medium truncate group-hover:brightness-125"
-                        style={{
-                          color: roleColorMode === 'names' && member.role_color
-                            ? member.role_color
-                            : 'var(--color-d-text)'
-                        }}
+                        style={
+                          // A role with two colours paints the name as a
+                          // gradient; the text itself is clipped to the fill,
+                          // so the colour has to be transparent for it to show.
+                          roleColorMode === 'names' && member.role_color && member.role_color_secondary
+                            ? {
+                              backgroundImage: `linear-gradient(90deg, ${member.role_color}, ${member.role_color_secondary})`,
+                              WebkitBackgroundClip: 'text',
+                              backgroundClip: 'text',
+                              color: 'transparent'
+                            }
+                            : {
+                              color: roleColorMode === 'names' && member.role_color
+                                ? member.role_color
+                                : 'var(--color-d-text)'
+                            }
+                        }
                       >
                         {member.display_name || member.username}
                       </span>

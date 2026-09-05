@@ -394,3 +394,21 @@ input[type="range"] { height: 1.25rem; }
     var(--color-d-canvas) var(--settings-split) 100%
   );
 }
+
+/* ---------------------------------------------------------------------------
+   Super Reactions — the burst that plays over a message when someone reacts
+   with the "super" gesture (shift-click a quick reaction). One keyframe, no
+   library; the component removes itself when it finishes.
+   --------------------------------------------------------------------------- */
+@keyframes superReactionRise {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.6) rotate(0deg); }
+  15%  { opacity: 1; transform: translate(calc(var(--sr-drift) * 0.2), calc(var(--sr-rise) * 0.15)) scale(1.15) rotate(calc(var(--sr-spin) * 0.2)); }
+  100% { opacity: 0; transform: translate(var(--sr-drift), var(--sr-rise)) scale(0.9) rotate(var(--sr-spin)); }
+}
+
+.super-reaction-particle {
+  animation-name: superReactionRise;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  animation-fill-mode: both;
+  will-change: transform, opacity;
+}
