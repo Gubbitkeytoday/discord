@@ -13,9 +13,11 @@ import { DISCORD_EPOCH } from './lib/snowflake.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-try {
-  process.loadEnvFile?.();
-} catch {}
+if (!process.env.NODE_TEST_CONTEXT && process.env.NODE_ENV !== 'test') {
+  try {
+    process.loadEnvFile?.();
+  } catch {}
+}
 
 export const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'discord.db');
 const SCHEMA_PATH = path.join(__dirname, 'db', 'schema.sql');
@@ -305,6 +307,29 @@ const MIGRATIONS = [
     up: async () => {
       const table = await getQuery(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'server_templates'`);
       if (!table) throw new Error('server_templates missing — schema.sql did not apply');
+    }
+  }
+  ,{
+    version: 15,
+    name: 'applications, bot commands, interactions',
+    up: async () => {
+      for (const name of ['applications', 'application_commands', 'interactions']) {
+        const table = await getQuery(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, [name]
+        );
+        if (!table) throw new Error(`${name} missing — schema.sql did not apply`);
+      }
+      const addColumn = async (table, column, ddl) => {
+        const cols = await allQuery(`PRAGMA table_info(${table})`);
+        if (!cols.some((c) => c.name === column)) {
+          await runQuery(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+        }
+      };
+      // An ephemeral reply exists as a real row (so history and moderation
+      // still work) but is only ever delivered to one person.
+      await addColumn('messages', 'ephemeral_user_id', 'TEXT');
+      // Which application produced a bot message, for attribution.
+      await addColumn('messages', 'application_id', 'TEXT');
     }
   }
 ];

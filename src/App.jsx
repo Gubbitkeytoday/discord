@@ -1555,7 +1555,6 @@ export default function App() {
       onFollowChannel={(channel) => setFollowSource(channel)}
       onMarkUnread={handleMarkUnread}
       onReport={handleReportMessage}
-      onToast={pushToast}
       onOpenNotificationSettings={(x, y) => activeChannel && setNotifPopover({ kind: 'channel', id: activeChannel.id, x, y })}
       isUnknownSender={(userId) => !friends.some((f) => f.id === userId && f.friend_status === 'accepted')}
       channelSettings={channelSettings[activeChannelId]}

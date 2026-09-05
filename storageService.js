@@ -657,8 +657,8 @@ export async function collectGarbage({
   const candidates = await allQuery(
     `SELECT * FROM files
       WHERE deleted_at IS NOT NULL
-         OR (expires_at IS NOT NULL AND expires_at < ?)
-         OR (ref_count = 0 AND created_at < ?)
+         OR (expires_at IS NOT NULL AND expires_at <= ?)
+         OR (ref_count = 0 AND created_at <= ?)
       ORDER BY created_at ASC
       LIMIT ?`,
     [nowIso, graceCutoff, limit]

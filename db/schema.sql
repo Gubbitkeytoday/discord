@@ -366,6 +366,8 @@ CREATE TABLE IF NOT EXISTS messages (
   nonce             TEXT,                 -- client dedupe key for optimistic sends
   embeds            TEXT NOT NULL DEFAULT '[]',
   components        TEXT NOT NULL DEFAULT '[]',
+  ephemeral_user_id TEXT,                     -- visible only to this user
+  application_id    TEXT,                     -- the bot application that sent it
   edited_at         TEXT,
   created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   deleted_at        TEXT
@@ -867,3 +869,61 @@ CREATE TABLE IF NOT EXISTS server_templates (
   created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+
+-- ============================================================================
+--  Applications (bots).
+--
+--  An application owns exactly one bot *user* — a normal row in `users` with
+--  is_bot = 1 — so every existing code path (messages, permissions, mentions,
+--  the member list) treats a bot like any other member. The token is stored
+--  hashed and presented as `Authorization: Bot <token>`; identity resolution
+--  maps it back to the bot user, after which the ordinary permission gate
+--  applies. There is no second, weaker API surface.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS applications (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  description   TEXT,
+  icon_url      TEXT,
+  owner_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+  bot_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL UNIQUE,
+  public        INTEGER NOT NULL DEFAULT 1,   -- may anyone invite it?
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  deleted_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_applications_owner ON applications(owner_id) WHERE deleted_at IS NULL;
+
+-- Slash commands a bot registers, globally or per guild.
+CREATE TABLE IF NOT EXISTS application_commands (
+  id             TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  server_id      TEXT REFERENCES servers(id) ON DELETE CASCADE,  -- NULL = global
+  name           TEXT NOT NULL,
+  description    TEXT NOT NULL,
+  options        TEXT NOT NULL DEFAULT '[]',   -- JSON [{name,description,type,required,choices}]
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE (application_id, server_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_app_commands_server ON application_commands(server_id);
+
+-- One press of a button / one select-menu choice / one slash-command run.
+-- Rows are kept so a late callback can be rejected and so "this interaction
+-- failed" is answerable after the fact.
+CREATE TABLE IF NOT EXISTS interactions (
+  id             TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  type           TEXT NOT NULL CHECK (type IN ('component','command')),
+  user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel_id     TEXT REFERENCES channels(id) ON DELETE CASCADE,
+  server_id      TEXT REFERENCES servers(id) ON DELETE CASCADE,
+  message_id     TEXT REFERENCES messages(id) ON DELETE CASCADE,
+  custom_id      TEXT,
+  command_name   TEXT,
+  data           TEXT NOT NULL DEFAULT '{}',   -- JSON: values / options
+  token          TEXT NOT NULL UNIQUE,         -- what the bot answers with
+  responded_at   TEXT,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_interactions_app ON interactions(application_id, created_at);

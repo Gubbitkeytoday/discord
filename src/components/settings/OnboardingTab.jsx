@@ -15,12 +15,13 @@ import { t } from '../../i18n/index.jsx';
 const input = 'w-full bg-d-input text-d-strong rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-d-brand';
 const label = 'block text-[11px] font-bold uppercase tracking-wide text-d-text3 mb-1.5';
 
-function SectionCard({ icon: SectionIcon, title, hint, children, action }) {
+function SectionCard({ icon, title, hint, children, action }) {
+  const Icon = icon;
   return (
     <section className="bg-d-surface/50 border border-d-edge rounded-lg p-4 mb-4">
       <header className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-start gap-2 min-w-0">
-          <SectionIcon className="w-5 h-5 text-d-text4 shrink-0 mt-0.5" aria-hidden="true" />
+          {Icon && <Icon className="w-5 h-5 text-d-text4 shrink-0 mt-0.5" aria-hidden="true" />}
           <div className="min-w-0">
             <h3 className="font-bold text-d-strong">{title}</h3>
             {hint && <p className="text-xs text-d-text3 mt-0.5">{hint}</p>}
