@@ -121,6 +121,61 @@ export async function setRegistrationMode({ actorId, mode }) {
   return after;
 }
 
+// --- seasonal theme windows (Appearance › Seasonal themes) ------------------------
+//
+// Mirrors src/theme/seasonal.js normalizeSeasonConfig (the server does not ship
+// src/). Dates are 'MM-DD' (yearly) or 'YYYY-MM-DD' (one year); the two
+// moon-dated festivals may be null to follow the client's lunar table.
+
+export const SEASON_IDS = ['songkran', 'loykrathong', 'lunarnewyear', 'halloween', 'winter'];
+const MOON_SEASONS = ['loykrathong', 'lunarnewyear'];
+const MMDD = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const YMD = /^(20\d\d)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+export function normalizeSeasonalWindows(input) {
+  const fail = (why) => new ApiError(`Invalid seasonal windows: ${why}`, { code: 'INVALID_SEASONS' });
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('not an object');
+  const out = {};
+  for (const [id, w] of Object.entries(input)) {
+    if (!SEASON_IDS.includes(id)) throw fail(`unknown season ${id}`);
+    if (!w || typeof w !== 'object' || Array.isArray(w)) throw fail(id);
+    for (const key of Object.keys(w)) if (!['enabled', 'start', 'end'].includes(key)) throw fail(`${id}.${key}`);
+    const start = w.start ?? null;
+    const end = w.end ?? null;
+    const ok = (start === null && end === null && MOON_SEASONS.includes(id))
+      || (MMDD.test(String(start)) && MMDD.test(String(end)))
+      || (YMD.test(String(start)) && YMD.test(String(end)) && start <= end);
+    if (!ok) throw fail(`${id} dates`);
+    out[id] = { enabled: w.enabled !== false, start, end };
+  }
+  return out;
+}
+
+/** The admin's windows ({} = the built-in defaults). Public: the client needs them. */
+export async function getSeasonalWindows() {
+  const row = await getQuery(`SELECT value FROM instance_settings WHERE key = 'seasonal_windows'`);
+  if (!row?.value) return { windows: {}, source: 'default' };
+  try { return { windows: normalizeSeasonalWindows(JSON.parse(row.value)), source: 'admin' }; }
+  catch { return { windows: {}, source: 'default' }; }
+}
+
+export async function setSeasonalWindows({ actorId, windows }) {
+  if (windows === null) {
+    await runQuery(`DELETE FROM instance_settings WHERE key = 'seasonal_windows'`);
+  } else {
+    const clean = normalizeSeasonalWindows(windows);
+    await runQuery(
+      `INSERT INTO instance_settings (key, value, updated_by, updated_at) VALUES ('seasonal_windows', ?, ?, ${sql.now})
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by,
+                                      updated_at = excluded.updated_at`,
+      [JSON.stringify(clean), actorId]
+    );
+  }
+  const after = await getSeasonalWindows();
+  await audit({ actorId, action: 'seasonal_windows', details: { source: after.source } });
+  return after;
+}
+
 // --- overview ------------------------------------------------------------------
 
 export async function overview() {

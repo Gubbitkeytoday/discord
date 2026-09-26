@@ -20,11 +20,22 @@ import { ApiError } from '../lib/httpUtils.js';
 export const SETTING_DEFAULTS = {
   appearance: {
     theme: 'dark',                 // light | dark | ash | onyx | system
+    systemLightTheme: 'light',     // light | ash      (theme = system, OS light)
+    systemDarkTheme: 'dark',       // ash | dark | onyx (theme = system, OS dark)
     uiDensity: 'default',          // compact | default | spacious
+    radius: 'default',             // sharp | default | round
     messageDisplay: 'cozy',        // cozy | compact
     zoom: 100,                     // 50-200 %
-    chatFontScale: 100,            // 80-160 %
+    chatFontScale: 100,            // 75-150 % of 16 px = 12-24 px
     messageGroupSpacing: 16,       // px between message groups
+    uiFont: 'inter',               // inter | system | atkinson | opendyslexic
+    chatLineHeight: 1.375,         // 1.2-2.2
+    letterSpacing: 0,              // 0-0.2 em
+    wordSpacing: 0,                // 0-0.3 em
+    gradient: 'none',              // none | <preset id> | custom:<id>
+    customThemes: [],              // see validateCustomThemes
+    seasonal: 'auto',              // auto | off
+    soundPack: 'classic',          // classic | soft | retro | glass
     showSendButton: true,
     syncAcrossDevices: true
   },
@@ -319,7 +330,13 @@ export async function resetCategory(userId, category) {
 
 const ENUMS = {
   'appearance.theme': ['light', 'dark', 'ash', 'onyx', 'system'],
+  'appearance.systemLightTheme': ['light', 'ash'],
+  'appearance.systemDarkTheme': ['ash', 'dark', 'onyx'],
   'appearance.uiDensity': ['compact', 'default', 'spacious'],
+  'appearance.radius': ['sharp', 'default', 'round'],
+  'appearance.uiFont': ['inter', 'system', 'atkinson', 'opendyslexic'],
+  'appearance.seasonal': ['auto', 'off'],
+  'appearance.soundPack': ['classic', 'soft', 'retro', 'glass'],
   'appearance.messageDisplay': ['cozy', 'compact'],
   'accessibility.roleColors': ['names', 'dots', 'off'],
   'accessibility.stickerAnimation': ['always', 'interaction', 'never'],
@@ -333,7 +350,10 @@ const ENUMS = {
 
 const RANGES = {
   'appearance.zoom': [50, 200],
-  'appearance.chatFontScale': [80, 160],
+  'appearance.chatFontScale': [75, 150],
+  'appearance.chatLineHeight': [1.2, 2.2],
+  'appearance.letterSpacing': [0, 0.2],
+  'appearance.wordSpacing': [0, 0.3],
   'appearance.messageGroupSpacing': [0, 48],
   'accessibility.saturation': [0, 100],
   'accessibility.ttsRate': [0.1, 4],
@@ -370,7 +390,67 @@ function validate(category, value) {
     if (typeof raw === 'string' && raw.length > 200) out[key] = raw.slice(0, 200);
   }
   if (category === 'layout') validateLayout(out);
+  if (category === 'appearance') validateAppearanceThemes(out);
   return out;
+}
+
+// --- gradient and custom themes ----------------------------------------------
+//
+// Mirrors src/theme/schema.js and src/theme/presets.js (the server does not
+// ship src/; scripts/test-themes-71.mjs checks the two agree). A theme is
+// data — base, #rrggbb stops, angle, intensity — never CSS, and anything
+// else is rejected outright rather than cleaned up, so a malformed import
+// fails loudly instead of being stored half-understood.
+
+export const GRADIENT_PRESET_IDS = [
+  'tidepool', 'ember-dusk', 'deep-orchard', 'ultraviolet', 'night-market', 'graphite-rose',
+  'monsoon', 'peach-soda', 'matcha-milk', 'paper-lantern', 'glacier', 'lilac-hour'
+];
+export const MAX_CUSTOM_THEMES = 10;
+const THEME_KEYS = ['id', 'name', 'base', 'stops', 'angle', 'intensity'];
+const HEX6 = /^#[0-9a-fA-F]{6}$/;
+const BAD_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+
+function invalidTheme(why) {
+  return new ApiError(`appearance.customThemes: ${why}`, { code: 'INVALID_SETTING' });
+}
+
+/** Throws INVALID_SETTING for anything that is not a well-formed theme list. */
+export function validateCustomThemes(list) {
+  if (!Array.isArray(list)) throw invalidTheme('must be an array');
+  if (list.length > MAX_CUSTOM_THEMES) throw invalidTheme(`at most ${MAX_CUSTOM_THEMES} themes`);
+  const seen = new Set();
+  return list.map((theme, index) => {
+    if (!isPlainObject(theme) || Object.getPrototypeOf(theme) !== Object.prototype) throw invalidTheme(`[${index}] must be an object`);
+    for (const key of Object.keys(theme)) {
+      if (!THEME_KEYS.includes(key)) throw invalidTheme(`[${index}] unknown key ${key}`);
+    }
+    const { id, name, base, stops, angle, intensity } = theme;
+    if (typeof id !== 'string' || !/^[a-z0-9]{4,16}$/.test(id) || seen.has(id)) throw invalidTheme(`[${index}].id`);
+    seen.add(id);
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed || trimmed.length > 32 || BAD_NAME_CHARS.test(trimmed)) throw invalidTheme(`[${index}].name`);
+    if (base !== 'light' && base !== 'dark') throw invalidTheme(`[${index}].base`);
+    if (!Array.isArray(stops) || stops.length < 1 || stops.length > 5 || !stops.every((c) => typeof c === 'string' && HEX6.test(c))) {
+      throw invalidTheme(`[${index}].stops`);
+    }
+    if (!Number.isInteger(angle) || angle < 0 || angle > 360) throw invalidTheme(`[${index}].angle`);
+    if (!Number.isInteger(intensity) || intensity < 0 || intensity > 100) throw invalidTheme(`[${index}].intensity`);
+    return { id, name: trimmed, base, stops: stops.map((c) => c.toLowerCase()), angle, intensity };
+  });
+}
+
+function validateAppearanceThemes(out) {
+  if ('customThemes' in out) out.customThemes = validateCustomThemes(out.customThemes);
+  if ('gradient' in out) {
+    const choice = out.gradient;
+    const custom = typeof choice === 'string' && /^custom:([a-z0-9]{4,16})$/.exec(choice);
+    const ok = choice === 'none' || GRADIENT_PRESET_IDS.includes(choice)
+      || (custom && (out.customThemes ?? []).some((t) => t.id === custom[1]));
+    if (!ok) {
+      throw new ApiError('appearance.gradient must be none, a preset or one of your custom themes', { code: 'INVALID_SETTING' });
+    }
+  }
 }
 
 /** Folders and order are arrays of ids; bound them so one row cannot bloat. */

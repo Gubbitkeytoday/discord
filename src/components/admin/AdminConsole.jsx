@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, Flag, Users, Server, DoorOpen, ScrollText, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2
+  X, Flag, Users, Server, DoorOpen, ScrollText, Sparkles, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2
 } from 'lucide-react';
 import { get, patch, post, put, del } from '../../api';
 import { localeTag, t } from '../../i18n/index.jsx';
 import { useDialog } from '../settings/primitives';
 import { reasonLabel, useStreamerMask, maskEmail } from './safety';
+import SeasonalAdminPanel from '../theme/SeasonalAdminPanel.jsx';
 
 /**
  * Instance administration: the people who run this deployment. Reached from
@@ -19,6 +20,7 @@ const TABS = [
   { key: 'users', icon: Users },
   { key: 'servers', icon: Server },
   { key: 'registration', icon: DoorOpen },
+  { key: 'seasonal', icon: Sparkles },
   { key: 'audit', icon: ScrollText }
 ];
 
@@ -111,6 +113,7 @@ export default function AdminConsole({ currentUser, onClose, onToast }) {
           {tab === 'users' && <UsersPanel currentUser={currentUser} onChanged={loadOverview} onError={toastError} onToast={onToast} />}
           {tab === 'servers' && <ServersPanel onError={toastError} />}
           {tab === 'registration' && <RegistrationPanel onChanged={loadOverview} onError={toastError} onToast={onToast} />}
+          {tab === 'seasonal' && <SeasonalAdminPanel onError={toastError} onToast={onToast} />}
           {tab === 'audit' && <AuditPanel onError={toastError} />}
         </div>
       </div>

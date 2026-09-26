@@ -26,6 +26,12 @@ const requireAdmin = asyncRoute(async (req, _res, next) => {
   next();
 });
 
+// Public: every client needs the seasonal windows (no personal data).
+router.get('/instance/seasonal', asyncRoute(async (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json(await admin.getSeasonalWindows());
+}));
+
 router.use('/admin', requireAdmin);
 router.use('/admin', (req, res, next) => {
   // Nothing here is cacheable, by a browser or anything in between.
@@ -98,6 +104,18 @@ router.put('/admin/registration', asyncRoute(async (req, res) => {
   const mode = req.body?.mode === 'default' ? null : req.body?.mode;
   if (mode === undefined) throw new ApiError('mode is required', { code: 'INVALID_MODE' });
   res.json(await admin.setRegistrationMode({ actorId: req.userId, mode }));
+}));
+
+// --- seasonal theme windows ------------------------------------------------------
+
+router.get('/admin/seasonal', asyncRoute(async (_req, res) => {
+  res.json(await admin.getSeasonalWindows());
+}));
+
+router.put('/admin/seasonal', asyncRoute(async (req, res) => {
+  const windows = req.body?.windows;
+  if (windows === undefined) throw new ApiError('windows is required', { code: 'INVALID_SEASONS' });
+  res.json(await admin.setSeasonalWindows({ actorId: req.userId, windows }));
 }));
 
 // --- audit -----------------------------------------------------------------------

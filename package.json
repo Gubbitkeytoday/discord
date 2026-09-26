@@ -18,8 +18,8 @@
     "storage:verify": "node scripts/storage.js verify",
     "search:reindex": "node scripts/storage.js reindex",
     "db:migrate-to-pg": "node scripts/migrate-sqlite-to-postgres.mjs",
-    "test": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs scripts/test-notifications-v32.mjs scripts/test-livekit.mjs scripts/test-media37.mjs scripts/test-media38.mjs scripts/test-observability.mjs scripts/test-voice-46.mjs scripts/test-voice-47.mjs scripts/test-ops-61.mjs scripts/test-ops-62.mjs scripts/test-ops-63.mjs scripts/test-safety-39.mjs scripts/test-admin41.mjs scripts/test-chat-01.mjs scripts/test-design-01.mjs scripts/test-integration-43.mjs scripts/test-servers-91.mjs",
-    "test:pg": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs scripts/test-notifications-v32.mjs scripts/test-livekit.mjs scripts/test-media37.mjs scripts/test-media38.mjs scripts/test-observability.mjs scripts/test-voice-46.mjs scripts/test-voice-47.mjs scripts/test-ops-61.mjs scripts/test-ops-62.mjs scripts/test-ops-63.mjs scripts/test-safety-39.mjs scripts/test-admin41.mjs scripts/test-chat-01.mjs scripts/test-design-01.mjs scripts/test-integration-43.mjs scripts/test-servers-91.mjs",
+    "test": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs scripts/test-notifications-v32.mjs scripts/test-livekit.mjs scripts/test-media37.mjs scripts/test-media38.mjs scripts/test-observability.mjs scripts/test-voice-46.mjs scripts/test-voice-47.mjs scripts/test-ops-61.mjs scripts/test-ops-62.mjs scripts/test-ops-63.mjs scripts/test-safety-39.mjs scripts/test-admin41.mjs scripts/test-chat-01.mjs scripts/test-design-01.mjs scripts/test-integration-43.mjs scripts/test-servers-91.mjs scripts/test-themes-71.mjs",
+    "test:pg": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs scripts/test-notifications-v32.mjs scripts/test-livekit.mjs scripts/test-media37.mjs scripts/test-media38.mjs scripts/test-observability.mjs scripts/test-voice-46.mjs scripts/test-voice-47.mjs scripts/test-ops-61.mjs scripts/test-ops-62.mjs scripts/test-ops-63.mjs scripts/test-safety-39.mjs scripts/test-admin41.mjs scripts/test-chat-01.mjs scripts/test-design-01.mjs scripts/test-integration-43.mjs scripts/test-servers-91.mjs scripts/test-themes-71.mjs",
     "test:watch": "node --test --watch scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-realtime-v34.mjs",
     "a11y": "node scripts/a11y-audit.mjs",
     "i18n:audit": "node scripts/i18n-audit.mjs",
@@ -85,8 +85,10 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@fontsource/atkinson-hyperlegible": "^5.3.0",
     "@fontsource/inter": "^5.3.0",
     "@fontsource/kanit": "^5.3.0",
+    "@fontsource/opendyslexic": "^5.3.0",
     "@sentry/browser": "^10.75.3",
     "@simplewebauthn/browser": "^14.0.0",
     "@tailwindcss/vite": "^4.3.3",

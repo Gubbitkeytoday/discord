@@ -295,7 +295,7 @@ export default function UserSettingsModal({
           {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} onToast={onToast} />}
           {activeTab === 'developer' && <ApplicationsTab servers={servers} onToast={onToast} />}
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
-          {activeTab === 'appearance' && <AppearanceTab />}
+          {activeTab === 'appearance' && <AppearanceTab onToast={onToast} />}
           {activeTab === 'accessibility' && <AccessibilityTab onToast={onToast} />}
           {activeTab === 'language' && <LanguageTab />}
           {activeTab === 'voice' && <VoiceSettings onToast={onToast} />}

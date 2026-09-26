@@ -8,6 +8,7 @@ import {
   PageHeader, Section, SettingToggle, Slider, RadioList, Segmented,
   ResetButton, Divider, StackedRow, Button
 } from './primitives';
+import TypographyControls from '../theme/TypographyControls.jsx';
 
 const STICKER_MODES = () => [
   { key: 'always',      label: t('a11y.stickerAlways') },
@@ -71,17 +72,11 @@ export default function AccessibilityTab({ onToast }) {
     <div>
       <PageHeader title={t('settings.accessibilityTitle')} description={t('settings.accessibilityLead')} />
 
-      {/* Text size first: it is what people come here for, and it used to be
-          three screens down in Appearance. Same settings, same storage. */}
-      <Section title={t('a11y.textSizeTitle')}>
-        <Slider
-          label={t('appearance.chatFontScale')}
-          hint={t('appearance.chatFontScaleHint')}
-          value={prefs.appearance.chatFontScale}
-          min={80} max={160} step={5}
-          format={(v) => `${v}%`}
-          onChange={(value) => setAppearance({ chatFontScale: value })}
-        />
+      {/* Text first: it is what people come here for. The same controls (and
+          the same appearance.* storage) as Appearance › Text, including the
+          readable fonts and WCAG 1.4.12 text spacing. */}
+      <Section title={t('a11y.textSizeTitle')} description={t('theme.textHint')}>
+        <TypographyControls appearance={prefs.appearance} update={setAppearance} />
         <Slider
           label={t('appearance.zoom')}
           hint={t('a11y.zoomHint')}
