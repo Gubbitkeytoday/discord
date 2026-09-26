@@ -1,9 +1,9 @@
 import React from 'react';
 import { Monitor, Sun, Moon, Circle, Check } from 'lucide-react';
 import { useUserSettings } from '../../hooks/useUserSettings';
-import { t } from '../../i18n/index.jsx';
-import { LanguageList } from '../../i18n/LanguagePicker.jsx';
-import { DEFAULT_AVATAR } from '../../utils/avatar';
+import { t, localeTag } from '../../i18n/index.jsx';
+import { defaultAvatar } from '../../utils/avatar';
+import { readableRoleColor } from '../../utils/color';
 import {
   PageHeader, Section, SettingToggle, RadioList, Slider, ResetButton, Divider, Segmented
 } from './primitives';
@@ -110,12 +110,12 @@ export default function AppearanceTab() {
               style={{ paddingTop: 'var(--message-padding-y)', paddingBottom: 'var(--message-padding-y)' }}
             >
               {appearance.messageDisplay === 'cozy' && (
-                <img src={DEFAULT_AVATAR} alt="" className="h-10 w-10 shrink-0 rounded-full" />
+                <img src={defaultAvatar(row.name)} alt="" width={40} height={40} className="h-10 w-10 shrink-0 rounded-full" />
               )}
               <div className="min-w-0">
-                <span className="mr-2 text-sm font-semibold" style={{ color: row.colour }}>{row.name}</span>
-                <span className="text-[11px] text-d-text3">
-                  {new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                <span className="role-colored mr-2 text-sm font-semibold" style={{ color: readableRoleColor(row.colour) ?? undefined }}>{row.name}</span>
+                <span className="text-xs text-d-text3">
+                  {new Date().toLocaleTimeString(localeTag(), { hour: 'numeric', minute: '2-digit', hour12: !prefs.chat.use24HourClock })}
                 </span>
                 <p className="message-body text-d-text">{row.text}</p>
               </div>
@@ -170,13 +170,6 @@ export default function AppearanceTab() {
           onChange={(value) => set({ syncAcrossDevices: value })}
           last
         />
-      </Section>
-
-      <Divider />
-
-      {/* Language lives here, as it does in Discord's redesigned settings. */}
-      <Section title={t('appearance.language')} description={t('appearance.languageHint')}>
-        <LanguageList />
       </Section>
 
       <ResetButton onClick={() => reset('appearance')}>{t('appearance.resetDefaults')}</ResetButton>

@@ -13,6 +13,19 @@
    what Discord does, and it keeps the accent recognisable.
    ========================================================================= */
 @theme {
+  /* Typography. Tailwind's `font-sans` (on the app root) resolves through this
+     token, so it is the one place the UI typeface is chosen. Inter first for
+     Latin/Cyrillic/Greek, Kanit for Thai (it only downloads when Thai text is
+     on screen — the @font-face rules carry a unicode-range), then the OS UI
+     font. CJK faces are deliberately NOT in the generic stack: Han characters
+     must be drawn with the Japanese, Korean, Simplified or Traditional forms
+     of the text's own language, which the :lang() rules below select. */
+  --font-sans: 'Inter', 'Kanit', system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Noto Sans', 'Noto Sans Thai', 'Helvetica Neue', Arial, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
+    'Noto Sans Mono', monospace;
+
   /* surfaces */
   --color-d-base:      #1e1f22;
   --color-d-base2:     #1a1b1e;
@@ -32,15 +45,16 @@
   --color-d-control2:  #3b3e45;
   --color-d-invert:    #f2f3f5;
 
-  /* text */
+  /* text — every step reaches 4.5:1 on the surfaces it is used on
+     (text4 was #80848e: 3.68:1 on surface, 3.38:1 on canvas). */
   --color-d-text:      #dbdee1;
   --color-d-text2:     #b5bac1;
-  --color-d-text3:     #949ba4;
-  --color-d-text4:     #80848e;
+  --color-d-text3:     #a4a9b1;
+  --color-d-text4:     #9ba1a9;
   --color-d-mention:   #c9cdfb;
   --color-d-strong:    #ffffff;
 
-  /* brand + status (theme-invariant) */
+  /* brand + status fills (theme-invariant, like Discord's) */
   --color-d-brand:       #5865f2;
   --color-d-brandhover:  #4752c4;
   --color-d-brandactive: #3c45a5;
@@ -52,6 +66,36 @@
   --color-d-successhover:#1a6334;
   --color-d-dangerhover: #da373c;
   --color-d-mint:        #4fddab;
+  --color-d-streaming:   #593695;
+
+  /* Accent colours used AS TEXT. A fill colour that looks right behind white
+     text is too dark to be text on a dark surface (#f23f43 is 3.35:1 on the
+     canvas, #5865f2 2.74:1) and far too light on white (#f0b232 is 1.89:1).
+     Tailwind v4 resolves `text-*` through `--text-color-*` before `--color-*`,
+     so these re-point `text-d-danger`, `text-d-online`, … everywhere without
+     touching a component, while `bg-d-danger` keeps the true brand fill. */
+  --color-d-dangertext:  #ff7a7d;
+  --color-d-onlinetext:  #2dc770;
+  --color-d-brandtext:   #949cf7;
+  --color-d-idletext:    #f0b232;
+  --color-d-minttext:    #4fddab;
+  --text-color-d-danger: var(--color-d-dangertext);
+  --text-color-d-online: var(--color-d-onlinetext);
+  --text-color-d-brand:  var(--color-d-brandtext);
+  --text-color-d-idle:   var(--color-d-idletext);
+  --text-color-d-mint:   var(--color-d-minttext);
+  --text-color-d-success: var(--color-d-onlinetext);
+
+  /* Keyboard focus indicator: ≥3:1 against every surface (2.4.11/1.4.11).
+     Brand blurple itself is only 2.74:1 on the dark canvas. */
+  --color-d-focus:       #949cf7;
+
+  /* Shape and depth scale, shared by the ui/ primitives. */
+  --radius-d-sm: 4px;
+  --radius-d-md: 8px;
+  --radius-d-lg: 12px;
+  --shadow-d-pop: 0 8px 16px rgb(0 0 0 / 0.24), 0 0 0 1px rgb(0 0 0 / 0.08);
+  --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.36), 0 0 0 1px rgb(0 0 0 / 0.12);
 }
 
 /* Light theme: surfaces invert, text darkens, accents stay put. */
@@ -76,12 +120,21 @@
 
   --color-d-text:      #2e3338;
   --color-d-text2:     #4e5058;
-  --color-d-text3:     #5c5e66;
-  --color-d-text4:     #80848e;
+  --color-d-text3:     #54565e;
+  --color-d-text4:     #5f626b;
   --color-d-mention:   #3c45a5;
   --color-d-strong:    #060607;
   /* #00a8fc reaches only 2.62:1 on white; darken it for the light theme. */
   --color-d-link:      #0068a8;
+
+  --color-d-dangertext: #b8232a;
+  --color-d-onlinetext: #17733f;
+  --color-d-brandtext:  #3f49b8;
+  --color-d-idletext:   #835500;
+  --color-d-minttext:   #0c6e56;
+  --color-d-focus:      #3f49b8;
+  --shadow-d-pop: 0 8px 16px rgb(0 0 0 / 0.12), 0 0 0 1px rgb(0 0 0 / 0.06);
+  --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.08);
 }
 
 /* Ash: a mid-grey theme that sits between Dark and Light. */
@@ -102,6 +155,14 @@
   --color-d-edge:      #2b2d31;
   --color-d-control:   #5c5e66;
   --color-d-control2:  #494c53;
+
+  /* Lighter surfaces need lighter muted text to stay at 4.5:1. */
+  --color-d-text3:     #b3b8bf;
+  --color-d-text4:     #aab0b7;
+  --color-d-dangertext: #ff9294;
+  --color-d-onlinetext: #3dd67f;
+  --color-d-brandtext:  #a5acf9;
+  --color-d-focus:      #a5acf9;
 }
 
 /* Onyx: darker than Dark, near-black surfaces. */
@@ -133,6 +194,10 @@
   --color-d-divider: #ffffff;
   --color-d-edge:    #ffffff;
   --color-d-link:    #7ec8ff;
+  --color-d-dangertext: #ffa3a5;
+  --color-d-onlinetext: #5ee79a;
+  --color-d-brandtext:  #c9cdfb;
+  --color-d-focus:      #ffffff;
 }
 :root[data-contrast="high"][data-theme="light"] {
   --color-d-text:    #000000;
@@ -142,6 +207,10 @@
   --color-d-divider: #000000;
   --color-d-edge:    #000000;
   --color-d-link:    #004a7c;
+  --color-d-dangertext: #8f1418;
+  --color-d-onlinetext: #0d5a2e;
+  --color-d-brandtext:  #2c3494;
+  --color-d-focus:      #000000;
 }
 :root[data-contrast="high"] :focus-visible {
   outline-width: 3px;
@@ -199,29 +268,163 @@
     scroll-behavior: auto !important;
   }
 
+  html, body {
+    /* A sideways swipe must not become the browser's Back gesture and drop
+       the user out of the app (it went to about:blank on Android). */
+    overscroll-behavior-x: none;
+  }
+
   body {
-    font-family: 'Inter', 'Kanit', sans-serif;
+    font-family: var(--font-sans);
     margin: 0;
     padding: 0;
     background-color: var(--color-d-base);
     color: var(--color-d-text);
   }
 
-  /* Visible keyboard focus, without adding a ring on mouse clicks. */
+  /* An element that declares its own language (a message body, a name) gets
+     that language's font stack instead of inheriting the UI's. */
+  [lang] { font-family: var(--font-sans); }
+
+  /* Han unification: the same code point is drawn differently in Japanese,
+     Korean, Simplified and Traditional Chinese. Pick a face per language so
+     Japanese is never shown with Chinese glyph forms (and vice versa). Inter
+     stays first for any Latin mixed into the text. */
+  :lang(ja) {
+    --font-sans: 'Inter', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI',
+      'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', 'Source Han Sans JP',
+      'IPAGothic', 'IPAPGothic', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(ko) {
+    --font-sans: 'Inter', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR',
+      'Noto Sans CJK KR', 'Source Han Sans KR', 'NanumGothic', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(zh), :lang(zh-CN), :lang(zh-SG), :lang(zh-Hans) {
+    --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC',
+      'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(zh-TW), :lang(zh-HK), :lang(zh-MO), :lang(zh-Hant) {
+    --font-sans: 'Inter', 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC',
+      'Noto Sans CJK TC', 'Source Han Sans TC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(th) {
+    --font-sans: 'Inter', 'Kanit', 'Noto Sans Thai', 'Leelawadee UI', 'Thonburi',
+      system-ui, sans-serif;
+  }
+
+  /* CJK line breaking: no break inside a Korean word in short UI labels, and
+     the strict Japanese/Chinese rules for small kana and closing punctuation. */
+  :lang(ja), :lang(zh) { line-break: strict; }
+  :lang(ko) :is(h1, h2, h3, h4, label, button, th) { word-break: keep-all; overflow-wrap: anywhere; }
+
+  /* Visible keyboard focus, without adding a ring on mouse clicks. The colour
+     is a token that reaches 3:1 on every surface in every theme. */
   :focus-visible {
-    outline: 2px solid var(--color-d-brand);
+    outline: 2px solid var(--color-d-focus);
     outline-offset: 2px;
     border-radius: 3px;
   }
 
-  /* Respect the OS "reduce motion" preference. */
+  /* Text fields: most use `focus:outline-none` and signal focus with a 1px
+     border tint (about 2:1). Focus on a field must be unmistakable, so this
+     wins over that utility. A field inside a `.focus-ring` wrapper (the
+     composer, a search box with an icon) lets the wrapper draw it instead. */
+  :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"]),
+      textarea, select, [contenteditable="true"]):focus-visible {
+    outline: 2px solid var(--color-d-focus) !important;
+    outline-offset: 0 !important;
+  }
+  .focus-ring :is(input, textarea, select, [contenteditable="true"]):focus-visible {
+    outline: none !important;
+  }
+
+  /* Follow the OS "reduce motion" preference unless the user turned
+     Accessibility › "Sync with computer" off (data-reduced-motion="false"). */
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
+    :root:not([data-reduced-motion="false"]) *,
+    :root:not([data-reduced-motion="false"]) *::before,
+    :root:not([data-reduced-motion="false"]) *::after {
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive breakpoints that understand the app's own zoom.
+
+   Appearance › Zoom scales rem (html font-size), but media queries measure
+   the window, so 200% zoom on a 1366px laptop kept the desktop layout and
+   clipped the header. useUserSettings writes `data-below="sm md …"` on <html>
+   listing every breakpoint the *effective* width (window ÷ zoom) is under.
+   These overrides make every `max-*:` variant apply when the window OR the
+   effective width is narrow, and every min-width variant require both.
+   Selectors are wrapped in :where() so specificity is unchanged.
+   --------------------------------------------------------------------------- */
+@custom-variant max-2xl {
+  @media (width < 96rem) { @slot; }
+  &:where([data-below~="2xl"] *) { @slot; }
+}
+@custom-variant max-xl {
+  @media (width < 80rem) { @slot; }
+  &:where([data-below~="xl"] *) { @slot; }
+}
+@custom-variant max-lg {
+  @media (width < 64rem) { @slot; }
+  &:where([data-below~="lg"] *) { @slot; }
+}
+@custom-variant max-md {
+  @media (width < 48rem) { @slot; }
+  &:where([data-below~="md"] *) { @slot; }
+}
+@custom-variant max-sm {
+  @media (width < 40rem) { @slot; }
+  &:where([data-below~="sm"] *) { @slot; }
+}
+@custom-variant sm {
+  @media (width >= 40rem) { &:where(:root:not([data-below~="sm"]) *) { @slot; } }
+}
+@custom-variant md {
+  @media (width >= 48rem) { &:where(:root:not([data-below~="md"]) *) { @slot; } }
+}
+@custom-variant lg {
+  @media (width >= 64rem) { &:where(:root:not([data-below~="lg"]) *) { @slot; } }
+}
+@custom-variant xl {
+  @media (width >= 80rem) { &:where(:root:not([data-below~="xl"]) *) { @slot; } }
+}
+@custom-variant 2xl {
+  @media (width >= 96rem) { &:where(:root:not([data-below~="2xl"]) *) { @slot; } }
+}
+
+/* ---------------------------------------------------------------------------
+   Layout utilities for phones: dynamic viewport height (the URL bar and the
+   soft keyboard change it) and the notch / home-indicator safe areas.
+   `h-dvh`, `min-h-dvh` and friends ship with Tailwind v4.
+   --------------------------------------------------------------------------- */
+@utility pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+@utility pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+@utility pl-safe { padding-left: env(safe-area-inset-left, 0px); }
+@utility pr-safe { padding-right: env(safe-area-inset-right, 0px); }
+@utility px-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+@utility mb-safe { margin-bottom: env(safe-area-inset-bottom, 0px); }
+@utility bottom-safe { bottom: env(safe-area-inset-bottom, 0px); }
+@utility h-screen-safe {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* A wrapper that draws the focus indicator for the field inside it (composer,
+   search with an icon). Pairs with the base rule that yields to it. */
+@utility focus-ring {
+  &:has(:focus-visible) {
+    outline: 2px solid var(--color-d-focus);
+    outline-offset: 0;
   }
 }
 
@@ -304,6 +507,52 @@
 :root[data-role-colors="off"] .role-colored { color: var(--color-d-strong) !important; }
 :root[data-role-colors="off"] .role-dot { display: none; }
 :root:not([data-role-colors="dots"]) .role-dot { display: none; }
+
+/* Accessibility › "Always underline links" (WCAG 1.4.1: a link must not be
+   told apart from text by colour alone). On by default. */
+:root:not([data-underline-links="false"]) :is(.message-body a[href], a.text-d-link, .text-d-link a[href], a[href].inline-link) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* Accessibility › "Apply saturation to custom colours" off: role colours,
+   role dots and anything marked [data-custom-color] are counter-saturated so
+   they keep their real hue while the rest of the app is desaturated. The
+   saturate() matrices compose multiplicatively, so s × 1/s is identity (the
+   factor is clamped at 0.1 to avoid dividing by zero). */
+:root[data-saturate-custom="false"]:not([data-saturation="100"]) :is(.role-colored, .role-dot, [data-custom-color]) {
+  filter: saturate(var(--app-saturation-inverse, 1));
+}
+
+/* Accessibility › "Larger click targets": every control is at least 44×44
+   CSS px (WCAG 2.5.5 AAA), for tremor and switch users. */
+:root { --hit-min: 24px; }
+:root[data-large-targets="true"] { --hit-min: 44px; }
+:root[data-large-targets="true"] :is(
+  button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"],
+  [role="option"], [role="tab"], [role="switch"], [role="radio"], [role="checkbox"], select, summary
+):not(.message-body *) {
+  min-height: var(--hit-min);
+  min-width: var(--hit-min);
+}
+:root[data-large-targets="true"] :is(input[type="checkbox"], input[type="radio"]) {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* Accessibility › "Always show message actions": the Reply/React/More bar is
+   part of every message instead of appearing on hover, so a switch or
+   keyboard user can reach it with Tab alone. It sits in the row's flow at the
+   right instead of floating over the previous message. */
+:root[data-message-actions="always"] .message-row .message-actions {
+  display: flex;
+  position: static;
+  align-self: flex-start;
+  flex-shrink: 0;
+  margin-left: auto;
+  box-shadow: none;
+}
 
 /* Accessibility › animated emoji and GIF autoplay. */
 :root[data-animate-emoji="false"] .animated-emoji { animation-play-state: paused; }
@@ -447,9 +696,17 @@ input[type="range"] { height: 1.25rem; }
 }
 .message-flash { animation: messageFlash 1.6s ease-out; }
 
-/* Loading skeleton for a channel's first page. */
+/* Loading skeletons. `.skeleton` pulses whatever it is on; `.skeleton-block`
+   is a ready-made placeholder bar/circle using the skeleton token, so every
+   loading state (channel list, members, messages) looks the same. */
+:root { --color-d-skeleton: color-mix(in srgb, var(--color-d-text) 12%, transparent); }
 @keyframes skeletonPulse { 50% { opacity: 0.45; } }
 .skeleton { animation: skeletonPulse 1.4s ease-in-out infinite; }
+.skeleton-block {
+  background-color: var(--color-d-skeleton);
+  border-radius: var(--radius-d-sm);
+  animation: skeletonPulse 1.4s ease-in-out infinite;
+}
 
 /* Thai has no letter case, and letter-spacing pulls apart clusters with
    stacked vowels and tone marks. Small uppercase labels keep their size but

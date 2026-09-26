@@ -5,10 +5,23 @@ import { useI18n } from './index.jsx';
 /** Accent- and case-insensitive text for matching "espanol" to "Español". */
 const fold = (text) => String(text).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
-function filterLocales(locales, query) {
+/**
+ * A language's name in the UI language ("Danish" → "เดนมาร์ก" in a Thai UI),
+ * falling back to its English name. People scan for their own language in its
+ * own script; the second line should be readable to the current reader.
+ */
+function localName(entry, intlLocale) {
+  try {
+    const name = new Intl.DisplayNames([intlLocale], { type: 'language' }).of(entry.intl ?? entry.code);
+    if (name && name !== (entry.intl ?? entry.code)) return name;
+  } catch { /* Intl.DisplayNames unsupported */ }
+  return entry.englishName;
+}
+
+function filterLocales(locales, query, intlLocale) {
   const q = fold(query.trim());
   if (!q) return locales;
-  return locales.filter((l) => [l.nativeName, l.englishName, l.code].some((s) => fold(s).includes(q)));
+  return locales.filter((l) => [l.nativeName, l.englishName, l.code, localName(l, intlLocale)].some((s) => fold(s).includes(q)));
 }
 
 function CompletenessBadge({ value, intlLocale }) {
@@ -18,19 +31,19 @@ function CompletenessBadge({ value, intlLocale }) {
     : value >= 60 ? 'text-d-idle border-d-idle/40'
     : 'text-d-text3 border-d-divider';
   return (
-    <span className={`shrink-0 rounded border px-1.5 py-px text-[11px] tabular-nums ${tone}`}>{label}</span>
+    <span className={`shrink-0 rounded border px-1.5 py-px text-xs tabular-nums ${tone}`}>{label}</span>
   );
 }
 
 /**
- * Settings → Appearance → Language. Searchable, native name first (people look
+ * Settings → Language. Searchable, native name first (people look
  * for their own language in its own script), English name second, and a
  * completeness badge so a half-translated locale is not a surprise.
  */
 export function LanguageList() {
   const { locale, setLocale, availableLocales, switchingTo, intlLocale, t } = useI18n();
   const [query, setQuery] = useState('');
-  const visible = useMemo(() => filterLocales(availableLocales, query), [availableLocales, query]);
+  const visible = useMemo(() => filterLocales(availableLocales, query, intlLocale), [availableLocales, query, intlLocale]);
 
   return (
     <div>
@@ -72,7 +85,7 @@ export function LanguageList() {
             >
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">{entry.nativeName}</span>
-                <span className="block truncate text-xs text-d-text3" lang="en">{entry.englishName}</span>
+                <span className="block truncate text-xs text-d-text3" lang={intlLocale}>{localName(entry, intlLocale)}</span>
               </span>
               <CompletenessBadge value={entry.completeness} intlLocale={intlLocale} />
               {switchingTo === entry.code
@@ -91,13 +104,13 @@ export function LanguageList() {
 
 /** Compact globe dropdown for screens without settings, e.g. sign-in. */
 export function LanguageMenu({ className = '' }) {
-  const { locale, setLocale, availableLocales, switchingTo, t } = useI18n();
+  const { locale, setLocale, availableLocales, switchingTo, intlLocale, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const rootRef = useRef(null);
   const listId = useId();
   const current = availableLocales.find((l) => l.code === locale);
-  const visible = useMemo(() => filterLocales(availableLocales, query), [availableLocales, query]);
+  const visible = useMemo(() => filterLocales(availableLocales, query, intlLocale), [availableLocales, query, intlLocale]);
 
   useEffect(() => {
     if (!open) return undefined;

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { get, patch, del } from '../api';
 import { setSoundVolumeSource } from '../utils/soundEffects';
+import { localeTag, useLocaleCode } from '../i18n/index.jsx';
 
 /**
  * Account-wide client preferences.
@@ -39,7 +40,17 @@ export const PREFERENCE_DEFAULTS = {
     stickerAnimation: 'always',
     ttsRate: 1,
     ttsEnabled: false,
-    forceColors: false
+    forceColors: false,
+    // Follow the OS "reduce motion" setting; off = the toggle above decides.
+    syncReducedMotion: true,
+    // WCAG 1.4.1: links are told apart from text by more than colour.
+    underlineLinks: true,
+    // Off = role colours keep their hue when Saturation is turned down.
+    saturateCustomColors: true,
+    // Every control at least 44×44 px.
+    largeTargets: false,
+    // The message action bar is always visible instead of on hover.
+    alwaysShowMessageActions: false
   },
   notifications: {
     desktopEnabled: true,
@@ -59,6 +70,11 @@ export const PREFERENCE_DEFAULTS = {
     inlineAttachmentMedia: true,
     renderSpoilers: 'click',
     showTimestamps: true,
+    // 'auto' follows the language's convention (13:30 in de/ja/th, 1:30 PM
+    // in en-US, 下午1:30 in zh-TW); '12h' / '24h' are explicit choices.
+    // `use24HourClock` is derived from it (see withDerived) and kept for the
+    // components that read it.
+    clockFormat: 'auto',
     use24HourClock: true,
     convertEmoticons: true,
     showTypingIndicator: true,
@@ -196,8 +212,54 @@ export function onPreferenceSaveError(fn) {
   return () => errorListeners.delete(fn);
 }
 
+/** Current preferences, with derived values (the 12/24-hour clock) resolved. */
 export function getPreferences() {
-  return current;
+  return withDerived(current);
+}
+
+/** Does this locale write times on a 24-hour clock? (en-US no; de, ja, th yes.) */
+export function localeUses24Hour(locale = localeTag()) {
+  try {
+    const cycle = new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hourCycle;
+    return cycle === 'h23' || cycle === 'h24';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 24-hour clock or not, from the chat preferences. Before `clockFormat`
+ * existed the only stored value was `use24HourClock`, whose default was true;
+ * a stored `false` was therefore an explicit choice and is honoured.
+ */
+export function resolveUse24Hour(chat, locale = localeTag()) {
+  const format = chat?.clockFormat;
+  if (format === '24h') return true;
+  if (format === '12h') return false;
+  if (format === undefined && chat?.use24HourClock === false) return false;
+  return localeUses24Hour(locale);
+}
+
+const derivedCache = new WeakMap();
+function withDerived(prefs, locale = localeTag()) {
+  const key = `${locale}`;
+  const cached = derivedCache.get(prefs);
+  if (cached && cached.key === key) return cached.value;
+  const use24HourClock = resolveUse24Hour(prefs.chat, locale);
+  const value = prefs.chat?.use24HourClock === use24HourClock
+    ? prefs
+    : { ...prefs, chat: { ...prefs.chat, use24HourClock } };
+  derivedCache.set(prefs, { key, value });
+  return value;
+}
+
+/** True when animations should be reduced right now (setting + OS). */
+export function prefersReducedMotion(prefs = current) {
+  const a11y = prefs.accessibility ?? {};
+  if (a11y.syncReducedMotion !== false) {
+    try { return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches); } catch { return false; }
+  }
+  return Boolean(a11y.reducedMotion);
 }
 
 function publish(next) {
@@ -272,6 +334,24 @@ export function applyCategoryFromServer(category, value) {
 // --- applying to the document ------------------------------------------------
 
 let mediaQuery = null;
+let motionQuery = null;
+let resizeBound = false;
+
+// Tailwind's breakpoints (index.css re-declares the variants to read these).
+const BREAKPOINTS = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280], ['2xl', 1536]];
+
+/**
+ * App zoom scales rem but not the media queries, so tell the CSS which
+ * breakpoints the *effective* width (window ÷ zoom) is under. 200% zoom on a
+ * 1366px window then gets the 683px layout: drawers instead of columns.
+ */
+function applyEffectiveWidth(root = document.documentElement, zoomPercent = current.appearance?.zoom ?? 100) {
+  const zoom = Math.max(0.5, (zoomPercent || 100) / 100);
+  const width = (window.innerWidth || 0) / zoom;
+  const below = BREAKPOINTS.filter(([, px]) => width < px).map(([name]) => name).join(' ');
+  if (root.dataset.below !== below) root.dataset.below = below;
+  root.style.setProperty('--app-effective-width', `${Math.round(width)}px`);
+}
 
 /**
  * Push every visual preference onto <html>. CSS in index.css does the rest, so
@@ -301,14 +381,31 @@ export function applyPreferences(prefs = current) {
   root.dataset.uiDensity = appearance.uiDensity;
   root.dataset.contrast = accessibility.highContrast ? 'high' : 'normal';
   root.dataset.saturation = String(accessibility.saturation);
-  root.dataset.reducedMotion = String(Boolean(accessibility.reducedMotion));
+  root.dataset.reducedMotion = String(prefersReducedMotion(prefs));
+  root.dataset.underlineLinks = String(accessibility.underlineLinks !== false);
+  root.dataset.saturateCustom = String(accessibility.saturateCustomColors !== false);
+  root.dataset.largeTargets = String(Boolean(accessibility.largeTargets));
+  root.dataset.messageActions = accessibility.alwaysShowMessageActions ? 'always' : 'hover';
   root.dataset.roleColors = accessibility.roleColors;
   root.dataset.animateEmoji = String(Boolean(accessibility.playAnimatedEmoji));
   root.dataset.streamerMode = String(Boolean(streamerMode.enabled));
   root.dataset.developerMode = String(Boolean(chat.developerMode));
 
   root.style.setProperty('--app-zoom', String((appearance.zoom ?? 100) / 100));
-  root.style.setProperty('--app-saturation', String((accessibility.saturation ?? 100) / 100));
+  const saturation = (accessibility.saturation ?? 100) / 100;
+  root.style.setProperty('--app-saturation', String(saturation));
+  root.style.setProperty('--app-saturation-inverse', String(1 / Math.max(0.1, saturation)));
+  applyEffectiveWidth(root, appearance.zoom);
+  if (!resizeBound && typeof window !== 'undefined') {
+    resizeBound = true;
+    window.addEventListener('resize', () => applyEffectiveWidth(), { passive: true });
+  }
+  if (!motionQuery && typeof window !== 'undefined') {
+    try {
+      motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
+      motionQuery?.addEventListener?.('change', () => applyPreferences());
+    } catch { /* matchMedia unavailable */ }
+  }
   root.style.setProperty('--message-font-size', `${Math.round(16 * ((appearance.chatFontScale ?? 100) / 100))}px`);
   root.style.setProperty('--message-group-gap', `${appearance.messageGroupSpacing ?? 16}px`);
   root.style.colorScheme = resolvedTheme === 'light' ? 'light' : 'dark';
@@ -328,7 +425,10 @@ export function initPreferences() {
 }
 
 export function useUserSettings() {
-  const [prefs, setPrefs] = useState(current);
+  const [raw, setPrefs] = useState(current);
+  // The derived clock follows the app language, so re-derive on a switch.
+  const locale = useLocaleCode();
+  const prefs = useMemo(() => withDerived(raw, localeTag()), [raw, locale]);
 
   useEffect(() => {
     listeners.add(setPrefs);

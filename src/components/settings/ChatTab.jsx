@@ -1,10 +1,26 @@
 import React from 'react';
-import { useUserSettings } from '../../hooks/useUserSettings';
+import { useUserSettings, localeUses24Hour } from '../../hooks/useUserSettings';
 import { t, localeTag, getAvailableLocales, currentLocaleCode } from '../../i18n/index.jsx';
 import { targetLanguage } from '../../translation';
 import {
-  PageHeader, Section, SettingToggle, RadioList, ResetButton, Divider, Select
+  PageHeader, Section, SettingToggle, RadioList, ResetButton, Divider, Select, StackedRow
 } from './primitives';
+
+/** 13:30 or 1:30 PM for a fixed sample time, in the app language. */
+function sampleTime(hour12) {
+  const sample = new Date(2026, 0, 1, 13, 30);
+  try {
+    return sample.toLocaleTimeString(localeTag(), { hour: 'numeric', minute: '2-digit', ...(hour12 === undefined ? {} : { hour12 }) });
+  } catch {
+    return hour12 ? '1:30 PM' : '13:30';
+  }
+}
+
+const CLOCK_FORMATS = () => [
+  { key: 'auto', label: t('chatTab.clockAuto'), hint: sampleTime(!localeUses24Hour()) },
+  { key: '12h',  label: t('chatTab.clock12'),   hint: sampleTime(true) },
+  { key: '24h',  label: t('chatTab.clock24'),   hint: sampleTime(false) }
+];
 
 const SPOILER_MODES = () => [
   { key: 'click',  label: t('chatTab.spoilerClick'),  hint: t('chatTab.spoilerClickHint') },
@@ -81,11 +97,14 @@ export default function ChatTab() {
           checked={chat.showTimestamps}
           onChange={(value) => set({ showTimestamps: value })}
         />
-        <SettingToggle
-          label={t('chatTab.use24Hour')}
-          checked={chat.use24HourClock}
-          onChange={(value) => set({ use24HourClock: value })}
-        />
+        <StackedRow label={t('chatTab.clockFormat')} hint={t('chatTab.clockFormatHint')}>
+          <RadioList
+            label={t('chatTab.clockFormat')}
+            value={chat.clockFormat ?? (chat.use24HourClock === false ? '12h' : 'auto')}
+            onChange={(value) => set({ clockFormat: value, use24HourClock: value === 'auto' ? localeUses24Hour() : value === '24h' })}
+            options={CLOCK_FORMATS()}
+          />
+        </StackedRow>
         <SettingToggle
           label={t('chatTab.convertEmoticons')}
           hint={t('chatTab.convertEmoticonsHint')}

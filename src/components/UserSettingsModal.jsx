@@ -44,12 +44,13 @@ import ChatTab from './settings/ChatTab';
 import StreamerModeTab from './settings/StreamerModeTab';
 import ActivityTab from './settings/ActivityTab';
 import ProfileTab from './settings/ProfileTab';
-import { useDialog } from './settings/primitives';
+import { useDialog, PageHeader, Section } from './settings/primitives';
 import ConfirmModal from './ConfirmModal';
 import {
   X, ArrowLeft, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
-  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot
+  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot, Languages
 } from 'lucide-react';
+import { LanguageList } from '../i18n/LanguagePicker.jsx';
 import { t, useLocaleCode } from '../i18n/index.jsx';
 
 const APP_VERSION = import.meta.env?.VITE_APP_VERSION ?? '1.0.0';
@@ -73,6 +74,11 @@ const tabGroups = () => [
     tabs: [
       { key: 'appearance',    icon: Palette,       label: t('settings.appearanceTab'),    keywords: t('settings.kwAppearance') },
       { key: 'accessibility', icon: Accessibility, label: t('settings.accessibilityTab'), keywords: t('settings.kwAccessibility') },
+      // Its own page, as in Discord: under "Appearance" (ja: テーマ, "Theme")
+      // people never found it. The keywords include the word "language" in
+      // the big languages, so someone stuck in a UI they cannot read can still
+      // search their way here.
+      { key: 'language',      icon: Languages,     label: t('settings.languageTab'),      keywords: `${t('settings.kwLanguage')} ${LANGUAGE_WORDS}` },
       { key: 'voice',         icon: Volume2,       label: t('settings.voiceTab'),         keywords: t('settings.kwVoice') },
       { key: 'notifications', icon: Bell,          label: t('settings.notificationsTab'), keywords: t('settings.kwNotifications') },
       { key: 'keybinds',      icon: Keyboard,      label: t('settings.keybindsTab'),      keywords: t('settings.kwKeybinds') },
@@ -88,11 +94,26 @@ const tabGroups = () => [
   }
 ];
 
+const LANGUAGE_WORDS = 'language lang locale idioma langue lingua sprache taal språk język jazyk kieli язык мова ' +
+  'γλώσσα dil ngôn ngữ bahasa भाषा ภาษา 言語 语言 語言 언어';
+
 const matches = (tab, query) => {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   return `${tab.label} ${tab.keywords ?? ''}`.toLowerCase().includes(needle);
 };
+
+/** Settings › Language: the app language, on its own page as in Discord. */
+function LanguageTab() {
+  return (
+    <div>
+      <PageHeader title={t('settings.languageTitle')} description={t('settings.languageLead')} />
+      <Section>
+        <LanguageList />
+      </Section>
+    </div>
+  );
+}
 
 export default function UserSettingsModal({
   currentUser, servers = [], initialTab = 'profile', onClose, onSaveProfile, onSetStatus, onSignOut, onToast
@@ -276,6 +297,7 @@ export default function UserSettingsModal({
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
           {activeTab === 'appearance' && <AppearanceTab />}
           {activeTab === 'accessibility' && <AccessibilityTab onToast={onToast} />}
+          {activeTab === 'language' && <LanguageTab />}
           {activeTab === 'voice' && <VoiceSettings onToast={onToast} />}
           {activeTab === 'notifications' && <NotificationsTab onToast={onToast} />}
           {activeTab === 'keybinds' && <KeybindsTab onToast={onToast} />}

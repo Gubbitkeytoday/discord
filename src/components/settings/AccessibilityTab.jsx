@@ -3,6 +3,7 @@ import { Play, Square } from 'lucide-react';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { speak, cancelSpeech, isSpeechSupported } from '../../utils/speech';
 import { t } from '../../i18n/index.jsx';
+import { readableRoleColor, themeBackground } from '../../utils/color';
 import {
   PageHeader, Section, SettingToggle, Slider, RadioList, Segmented,
   ResetButton, Divider, StackedRow, Button
@@ -20,7 +21,7 @@ const ROLE_COLOR_MODES = () => [
     key: 'names',
     label: t('a11y.roleColorsNames'),
     hint: t('a11y.roleColorsNamesHint'),
-    sample: <span style={{ color: '#f0b232' }}>Kira</span>
+    sample: <span style={{ color: readableRoleColor('#f0b232', themeBackground('--color-d-surface')) ?? undefined }}>Kira</span>
   },
   {
     key: 'dots',
@@ -50,6 +51,11 @@ export default function AccessibilityTab({ onToast }) {
   const a11y = prefs.accessibility;
   const [previewing, setPreviewing] = useState(false);
   const set = (patch) => update('accessibility', patch);
+  const setAppearance = (patch) => update('appearance', patch);
+  const osReducesMotion = (() => {
+    try { return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches); } catch { return false; }
+  })();
+  const syncMotion = a11y.syncReducedMotion !== false;
 
   const previewTts = () => {
     if (previewing) { cancelSpeech(); setPreviewing(false); return; }
@@ -65,6 +71,31 @@ export default function AccessibilityTab({ onToast }) {
     <div>
       <PageHeader title={t('settings.accessibilityTitle')} description={t('settings.accessibilityLead')} />
 
+      {/* Text size first: it is what people come here for, and it used to be
+          three screens down in Appearance. Same settings, same storage. */}
+      <Section title={t('a11y.textSizeTitle')}>
+        <Slider
+          label={t('appearance.chatFontScale')}
+          hint={t('appearance.chatFontScaleHint')}
+          value={prefs.appearance.chatFontScale}
+          min={80} max={160} step={5}
+          format={(v) => `${v}%`}
+          onChange={(value) => setAppearance({ chatFontScale: value })}
+        />
+        <Slider
+          label={t('appearance.zoom')}
+          hint={t('a11y.zoomHint')}
+          value={prefs.appearance.zoom}
+          min={50} max={200} step={10}
+          format={(v) => `${v}%`}
+          marks={['50%', '100%', '150%', '200%']}
+          onChange={(value) => setAppearance({ zoom: value })}
+          last
+        />
+      </Section>
+
+      <Divider />
+
       <Section title={t('a11y.visionTitle')}>
         <SettingToggle
           label={t('a11y.highContrast')}
@@ -73,10 +104,10 @@ export default function AccessibilityTab({ onToast }) {
           onChange={(value) => set({ highContrast: value })}
         />
         <SettingToggle
-          label={t('a11y.reducedMotion')}
-          hint={t('a11y.reducedMotionHint')}
-          checked={a11y.reducedMotion}
-          onChange={(value) => set({ reducedMotion: value })}
+          label={t('a11y.underlineLinks')}
+          hint={t('a11y.underlineLinksHint')}
+          checked={a11y.underlineLinks !== false}
+          onChange={(value) => set({ underlineLinks: value })}
         />
         <Slider
           label={t('a11y.saturation')}
@@ -86,6 +117,49 @@ export default function AccessibilityTab({ onToast }) {
           format={(v) => `${v}%`}
           marks={[t('a11y.saturationGrey'), t('a11y.saturationFull')]}
           onChange={(value) => set({ saturation: value })}
+        />
+        <SettingToggle
+          label={t('a11y.saturateCustom')}
+          hint={t('a11y.saturateCustomHint')}
+          checked={a11y.saturateCustomColors !== false}
+          onChange={(value) => set({ saturateCustomColors: value })}
+          last
+        />
+      </Section>
+
+      <Divider />
+
+      <Section title={t('a11y.motionTitle')}>
+        <SettingToggle
+          label={t('a11y.syncReducedMotion')}
+          hint={t(osReducesMotion ? 'a11y.syncReducedMotionOn' : 'a11y.syncReducedMotionOff')}
+          checked={syncMotion}
+          onChange={(value) => set({ syncReducedMotion: value })}
+        />
+        <SettingToggle
+          label={t('a11y.reducedMotion')}
+          hint={syncMotion ? t('a11y.reducedMotionSynced') : t('a11y.reducedMotionHint')}
+          checked={syncMotion ? osReducesMotion : Boolean(a11y.reducedMotion)}
+          disabled={syncMotion}
+          onChange={(value) => set({ reducedMotion: value })}
+          last
+        />
+      </Section>
+
+      <Divider />
+
+      <Section title={t('a11y.inputTitle')} description={t('a11y.inputLead')}>
+        <SettingToggle
+          label={t('a11y.largeTargets')}
+          hint={t('a11y.largeTargetsHint')}
+          checked={Boolean(a11y.largeTargets)}
+          onChange={(value) => set({ largeTargets: value })}
+        />
+        <SettingToggle
+          label={t('a11y.alwaysShowActions')}
+          hint={t('a11y.alwaysShowActionsHint')}
+          checked={Boolean(a11y.alwaysShowMessageActions)}
+          onChange={(value) => set({ alwaysShowMessageActions: value })}
           last
         />
       </Section>

@@ -1,8 +1,10 @@
-import React, { useMemo, useState } from 'react';
-import { Plus, Compass, Folder, FolderOpen } from 'lucide-react';
-import { useUserSettings } from '../hooks/useUserSettings';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Compass, FolderOpen } from 'lucide-react';
+import { useUserSettings, getPreferences, updatePreferences } from '../hooks/useUserSettings';
 import { t } from '../i18n/index.jsx';
 import { serverIconOf, serverInitials } from '../utils/avatar';
+import BrandMark from './ui/BrandMark.jsx';
+import { MentionBadge } from './ui/Badge.jsx';
 
 const FOLDER_COLORS = ['#5865f2', '#57f287', '#fee75c', '#eb459e', '#ed4245', '#f47b67', '#3ba55c', '#faa61a'];
 
@@ -33,9 +35,65 @@ function buildRows(servers, layout) {
   return rows;
 }
 
+// The rail is always mounted while signed in; it records the server list so
+// the server context menu can reorder without being handed it.
+let lastServers = [];
+
+/** The ids a server moves among: its folder's servers, or the top-level rows. */
+function siblingsOf(serverId, servers, layout) {
+  const folder = (layout.serverFolders ?? []).find((f) => f.serverIds.includes(serverId));
+  if (folder) return { folder, ids: folder.serverIds.filter((id) => servers.some((s) => s.id === id)) };
+  return { folder: null, ids: buildRows(servers, layout).map((r) => (r.kind === 'folder' ? r.folder.id : r.server.id)) };
+}
+
+/**
+ * Move a server one step up or down in the rail — the keyboard and menu
+ * alternative to drag-and-drop (WCAG 2.5.7). Inside a folder it moves within
+ * the folder; at the top level it swaps with the neighbouring row (a folder
+ * counts as one row). Returns the new 1-based position, or null if it could
+ * not move. Exported so the server context menu can offer Move up / Move down.
+ */
+export function moveServerInRail(serverId, delta, servers = lastServers) {
+  const layout = getPreferences().layout ?? { serverFolders: [], serverOrder: [] };
+  const { folder, ids } = siblingsOf(serverId, servers, layout);
+  const from = ids.indexOf(serverId);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= ids.length) return null;
+  [ids[from], ids[to]] = [ids[to], ids[from]];
+  if (folder) {
+    updatePreferences('layout', {
+      ...layout,
+      serverFolders: layout.serverFolders.map((f) => (f.id === folder.id ? { ...f, serverIds: ids } : f))
+    });
+  } else {
+    updatePreferences('layout', { ...layout, serverOrder: ids });
+  }
+  return to + 1;
+}
+
+/** Can this server move in that direction? (For disabling menu items.) */
+export function canMoveServerInRail(serverId, delta, servers = lastServers) {
+  const layout = getPreferences().layout ?? { serverFolders: [], serverOrder: [] };
+  const { ids } = siblingsOf(serverId, servers, layout);
+  const at = ids.indexOf(serverId);
+  return at >= 0 && at + delta >= 0 && at + delta < ids.length;
+}
+
+/** "Server name, 3 mentions" / "Server name, unread" / "…, muted": the icon's accessible name. */
+function railLabel(name, { mentions = 0, unread = false, muted = false } = {}) {
+  const parts = [name];
+  if (mentions > 0) parts.push(t('a11y.mentionCount', { count: mentions }));
+  else if (unread) parts.push(t('a11y.unread'));
+  if (muted) parts.push(t('a11y.muted'));
+  return parts.join(', ');
+}
+
 /**
  * The 72px rail. Each icon carries Discord's two unread affordances: the white
  * pill on the left edge for any unread, and a red badge for mention counts.
+ *
+ * Keyboard: the rail is ONE tab stop (roving tabindex). ↑/↓/Home/End move
+ * between icons, Enter opens, and Ctrl+Shift+↑/↓ moves the focused server.
  */
 export default function ServerRail({
   servers = [],
@@ -56,6 +114,7 @@ export default function ServerRail({
   const rows = useMemo(() => buildRows(servers, layout), [servers, layout]);
   const [dragging, setDragging] = useState(null);   // { serverId, fromFolderId }
   const [dropTarget, setDropTarget] = useState(null); // row key being hovered
+  lastServers = servers;
 
   const saveLayout = (next) => update('layout', next);
   const rowKey = (row) => (row.kind === 'folder' ? `folder:${row.folder.id}` : `server:${row.server.id}`);
@@ -118,61 +177,131 @@ export default function ServerRail({
     onDrop: (e) => { e.preventDefault(); if (dragging) handler(dragging.serverId); setDragging(null); setDropTarget(null); }
   });
 
-  // Mentions roll up from a server's channels onto its icon. Channels for
-  // servers we have not opened are not loaded, so this counts what we know —
-  // the same trade-off Discord makes before a guild is hydrated.
-  const perServer = useMemo(() => {
+  // Unread state per server. Every read-state row carries its channel's
+  // `server_id` (services/messages.js getUnreadSummary), so every server the
+  // user is in gets its pill and mention count, not only the one whose
+  // channels happen to be loaded. `channels` is a fallback for a row created
+  // locally before the server said which guild it belongs to. Rows with no
+  // server are DMs and roll up onto the Home button.
+  const { perServer, dmMentions } = useMemo(() => {
+    const channelServer = new Map(channels.filter((c) => c.server_id).map((c) => [c.id, c.server_id]));
     const map = new Map();
-    for (const channel of channels) {
-      if (!channel.server_id) continue;
-      const state = readStates[channel.id];
+    let dm = 0;
+    for (const [channelId, state] of Object.entries(readStates)) {
       if (!state) continue;
-      const entry = map.get(channel.server_id) ?? { unread: false, mentions: 0 };
+      const serverId = state.server_id ?? channelServer.get(channelId) ?? null;
+      if (!serverId) { dm += state.mention_count ?? 0; continue; }
+      const entry = map.get(serverId) ?? { unread: false, mentions: 0 };
       if (state.unread) entry.unread = true;
       entry.mentions += state.mention_count ?? 0;
-      map.set(channel.server_id, entry);
+      map.set(serverId, entry);
     }
-    return map;
+    return { perServer: map, dmMentions: dm };
   }, [channels, readStates]);
 
-  const dmMentions = useMemo(() => {
-    const guildChannelIds = new Set(channels.filter((c) => c.server_id).map((c) => c.id));
-    return Object.entries(readStates)
-      .filter(([id]) => !guildChannelIds.has(id))
-      .reduce((n, [, state]) => n + (state?.mention_count ?? 0), 0);
-  }, [readStates, channels]);
+  // --- keyboard: one tab stop, arrows move within the rail (roving tabindex) ---
+  const navRef = useRef(null);
+  const [rovingKey, setRovingKey] = useState(null);
+  const [announcement, setAnnouncement] = useState('');
+  const activeKey = activeServerId === 'home' ? 'home' : `server:${activeServerId}`;
+  const itemKeys = useMemo(() => {
+    const keys = ['home'];
+    for (const row of rows) {
+      if (row.kind === 'server') { keys.push(`server:${row.server.id}`); continue; }
+      keys.push(`folder:${row.folder.id}`);
+      const open = !row.folder.collapsed || row.servers.some((sv) => sv.id === activeServerId);
+      if (open) for (const sv of row.servers) keys.push(`server:${sv.id}`);
+    }
+    keys.push('add', 'explore');
+    return keys;
+  }, [rows, activeServerId]);
+  const tabKey = itemKeys.includes(rovingKey) ? rovingKey : (itemKeys.includes(activeKey) ? activeKey : 'home');
+
+  const focusItem = (key) => {
+    const el = [...(navRef.current?.querySelectorAll('[data-rail-key]') ?? [])].find((node) => node.dataset.railKey === key);
+    if (el) { setRovingKey(key); el.focus(); }
+  };
+
+  const onRailKeyDown = (event) => {
+    const key = event.target?.closest?.('[data-rail-key]')?.dataset.railKey;
+    if (!key) return;
+    const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
+    // Ctrl+Shift+↑/↓ moves the focused server: the alternative to dragging.
+    if (vertical && event.shiftKey && (event.ctrlKey || event.metaKey)) {
+      if (!key.startsWith('server:')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const serverId = key.slice('server:'.length);
+      const up = event.key === 'ArrowUp';
+      const position = moveServerInRail(serverId, up ? -1 : 1, servers);
+      const name = servers.find((sv) => sv.id === serverId)?.name ?? '';
+      setAnnouncement(position
+        ? t('rail.movedTo', { name, position })
+        : t(up ? 'rail.alreadyFirst' : 'rail.alreadyLast', { name }));
+      requestAnimationFrame(() => focusItem(key));
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const index = itemKeys.indexOf(key);
+    let next = null;
+    if (event.key === 'ArrowDown') next = itemKeys[Math.min(index + 1, itemKeys.length - 1)];
+    else if (event.key === 'ArrowUp') next = itemKeys[Math.max(index - 1, 0)];
+    else if (event.key === 'Home') next = itemKeys[0];
+    else if (event.key === 'End') next = itemKeys[itemKeys.length - 1];
+    if (next === null) return;
+    event.preventDefault();
+    focusItem(next);
+  };
+
+  // Clear the live region so the same message can be announced again.
+  useEffect(() => {
+    if (!announcement) return undefined;
+    const id = setTimeout(() => setAnnouncement(''), 2500);
+    return () => clearTimeout(id);
+  }, [announcement]);
+
+  const itemProps = (key) => ({
+    'data-rail-key': key,
+    tabIndex: key === tabKey ? 0 : -1,
+    onFocus: () => setRovingKey(key)
+  });
 
   return (
     // Below `md` the rail slides in together with the channel list as one
     // navigation drawer, so the conversation gets the whole width of a phone.
     <nav
+      ref={navRef}
       aria-label={t('sidebar.servers')}
-      className={`w-[72px] bg-d-base flex flex-col items-center py-3 gap-2 shrink-0 select-none z-20 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:transition-transform ${
+      aria-describedby="rail-keyboard-hint"
+      onKeyDown={onRailKeyDown}
+      className={`w-[72px] bg-d-base flex flex-col items-center pt-3 gap-2 shrink-0 select-none z-20 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:transition-transform max-md:pt-[max(0.75rem,env(safe-area-inset-top))] ${
         mobileOpen ? '' : 'max-md:-translate-x-full max-md:invisible'
       }`}
     >
+      <span id="rail-keyboard-hint" className="sr-only">{t('rail.keyboardHint')}</span>
+      <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
       <RailButton
+        {...itemProps('home')}
         active={activeServerId === 'home'}
         onClick={onSelectHome}
         title={t('dm.directMessages')}
+        label={railLabel(t('dm.directMessages'), { mentions: dmMentions + pendingFriendCount })}
         badge={dmMentions + pendingFriendCount}
         activeClass="bg-d-brand text-white"
       >
-        <svg className="w-7 h-7" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
-        </svg>
+        <BrandMark className="w-7 h-7" />
       </RailButton>
 
-      <div className="w-8 h-[2px] bg-d-hover2 rounded my-1" />
+      <div className="w-8 h-[2px] bg-d-hover2 rounded my-1 shrink-0" aria-hidden="true" />
 
-      <div className="flex-1 w-full space-y-2 overflow-y-auto scrollbar-none flex flex-col items-center">
+      <div className="flex-1 w-full space-y-2 overflow-y-auto scrollbar-none flex flex-col items-center pb-3 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         {rows.map((row) => {
           const key = rowKey(row);
           const gap = (
             <div
               key={`gap-${key}`}
               {...dropOn(`gap-${key}`, (id) => placeBefore(id, key))}
-              className={`w-10 transition-all ${dropTarget === `gap-${key}` ? 'h-2 bg-d-brand rounded' : 'h-0'}`}
+              className={`w-10 transition-[height] ${dropTarget === `gap-${key}` ? 'h-2 bg-d-brand rounded' : 'h-0'}`}
               aria-hidden="true"
             />
           );
@@ -189,11 +318,12 @@ export default function ServerRail({
                   {...dropOn(key, (id) => foldTogether(id, server.id))}
                 >
                   <ServerIcon
+                    {...itemProps(`server:${server.id}`)}
                     server={server}
                     active={activeServerId === server.id}
                     unread={Boolean(state.unread) && !muted}
                     badge={muted ? 0 : state.mentions}
-                    dim={muted}
+                    muted={muted}
                     onSelect={() => onSelectServer(server.id)}
                     onContextMenu={(e) => { e.preventDefault(); onServerContextMenu?.(server, e.clientX, e.clientY); }}
                   />
@@ -217,17 +347,20 @@ export default function ServerRail({
                 {...dropOn(key, (id) => joinFolder(id, folder.id))}
               >
                 <RailButton
+                  {...itemProps(`folder:${folder.id}`)}
                   onClick={() => toggleFolder(folder.id)}
                   onContextMenu={(e) => { e.preventDefault(); renameFolder(folder.id); }}
                   title={label}
+                  label={railLabel(t('rail.folderLabel', { name: label }), { mentions: open ? 0 : mentions, unread: !open && anyUnread })}
+                  expanded={open}
                   unread={!open && anyUnread}
                   badge={open ? 0 : mentions}
                   activeClass=""
                 >
                   {open ? (
-                    <FolderOpen className="w-6 h-6" style={{ color: folder.color ?? undefined }} />
+                    <FolderOpen className="w-6 h-6" aria-hidden="true" style={{ color: folder.color ?? undefined }} />
                   ) : (
-                    <div className="grid grid-cols-2 gap-0.5 p-2 w-full h-full" style={{ color: folder.color ?? undefined }}>
+                    <div aria-hidden="true" className="grid grid-cols-2 gap-0.5 p-2 w-full h-full" style={{ color: folder.color ?? undefined }}>
                       {members.slice(0, 4).map((sv) => (
                         serverIconOf(sv)
                           ? <img key={sv.id} src={serverIconOf(sv)} alt="" className="w-full h-full rounded-full object-cover" />
@@ -242,11 +375,12 @@ export default function ServerRail({
                   return (
                     <div key={server.id} className={`w-full flex justify-center ${dragging?.serverId === server.id ? 'opacity-40' : ''}`} {...dragProps(server.id, folder.id)}>
                       <ServerIcon
+                        {...itemProps(`server:${server.id}`)}
                         server={server}
                         active={activeServerId === server.id}
                         unread={Boolean(state.unread) && !muted}
                         badge={muted ? 0 : state.mentions}
-                        dim={muted}
+                        muted={muted}
                         onSelect={() => onSelectServer(server.id)}
                         onContextMenu={(e) => { e.preventDefault(); onServerContextMenu?.(server, e.clientX, e.clientY); }}
                       />
@@ -259,72 +393,101 @@ export default function ServerRail({
         })}
         <div
           {...dropOn('gap-end', (id) => placeBefore(id, 'end'))}
-          className={`w-10 transition-all ${dropTarget === 'gap-end' ? 'h-2 bg-d-brand rounded' : 'h-0'}`}
+          className={`w-10 transition-[height] ${dropTarget === 'gap-end' ? 'h-2 bg-d-brand rounded' : 'h-0'}`}
           aria-hidden="true"
         />
 
         <RailButton
+          {...itemProps('add')}
           onClick={onOpenCreateServerModal}
           title={t('server.addServer')}
           accent
         >
-          <Plus className="w-6 h-6" />
+          <Plus className="w-6 h-6" aria-hidden="true" />
         </RailButton>
 
-        <RailButton onClick={onJoinWithInvite} title={t('server.joinTitle')} accent>
-          <Compass className="w-6 h-6" />
+        <RailButton {...itemProps('explore')} onClick={onJoinWithInvite} title={t('server.joinTitle')} accent>
+          <Compass className="w-6 h-6" aria-hidden="true" />
         </RailButton>
       </div>
     </nav>
   );
 }
 
-function ServerIcon({ server, active, unread, badge, dim, onSelect, onContextMenu }) {
+/** Initials get smaller as there are more of them, like Discord's. */
+function initialsClass(text) {
+  if (/\p{Extended_Pictographic}/u.test(text)) return 'text-2xl leading-none';
+  const length = Array.from(text).length;
+  if (length <= 1) return 'text-lg font-semibold';
+  if (length === 2) return 'text-base font-semibold';
+  return 'text-sm font-semibold';
+}
+
+function ServerIcon({ server, active, unread, badge, muted, onSelect, onContextMenu, ...rest }) {
   // A dead icon URL must not leave a broken-image glyph in the rail; the
   // acronym is what Discord shows for a guild without an icon anyway.
   const [iconFailed, setIconFailed] = useState(false);
+  const initials = serverInitials(server.name);
   return (
-    <RailButton active={active} unread={unread} badge={badge} onClick={onSelect} onContextMenu={onContextMenu} title={server.name} dim={dim}>
+    <RailButton
+      {...rest}
+      active={active}
+      unread={unread}
+      badge={badge}
+      onClick={onSelect}
+      onContextMenu={onContextMenu}
+      title={server.name}
+      label={railLabel(server.name, { mentions: badge, unread, muted })}
+      dim={muted}
+    >
       {serverIconOf(server) && !iconFailed ? (
-        <img src={serverIconOf(server)} alt="" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
+        <img src={serverIconOf(server)} alt="" width={48} height={48} decoding="async" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
       ) : (
-        <span className="font-semibold text-sm">{serverInitials(server.name)}</span>
+        <span aria-hidden="true" className={initialsClass(initials)}>{initials}</span>
       )}
     </RailButton>
   );
 }
 
 function RailButton({
-  children, active, unread, badge = 0, onClick, onContextMenu, title, accent, activeClass, dim
+  children, active, unread, badge = 0, onClick, onContextMenu, title, label, accent, activeClass, dim, expanded,
+  ...rest
 }) {
   return (
-    <div className="relative group flex items-center justify-center w-full">
+    <div className="relative group flex items-center justify-center w-full shrink-0">
       <span
         aria-hidden="true"
-        className={`absolute left-0 w-1 bg-white rounded-r transition-all duration-200 ${
+        className={`absolute left-0 w-1 bg-d-strong rounded-r transition-[height] duration-200 ${
           active ? 'h-10' : unread ? 'h-2' : 'h-0 group-hover:h-5'
         }`}
       />
       <button
+        {...rest}
+        type="button"
         onClick={onClick}
         onContextMenu={onContextMenu}
         title={title}
-        aria-label={title}
+        aria-label={label ?? title}
         aria-current={active ? 'page' : undefined}
-        className={`w-12 h-12 rounded-[24px] hover:rounded-[16px] flex items-center justify-center overflow-hidden transition-all duration-200 ${
+        aria-expanded={expanded}
+        className={`w-12 h-12 flex items-center justify-center overflow-hidden
+          transition-[border-radius,background-color,color] duration-200 ${
           active
             ? `${activeClass ?? 'ring-2 ring-d-brand'} rounded-[16px]`
-            : accent
-            ? 'bg-d-canvas text-d-online hover:bg-d-online hover:text-white'
-            : 'bg-d-canvas text-d-text hover:bg-d-brand hover:text-white'
+            : `rounded-[24px] hover:rounded-[16px] focus-visible:rounded-[16px] ${accent
+              ? 'bg-d-canvas text-d-online hover:bg-d-online hover:text-white'
+              : 'bg-d-canvas text-d-text hover:bg-d-brand hover:text-white'}`
         } ${dim ? 'opacity-50' : ''}`}
       >
         {children}
       </button>
       {badge > 0 && (
-        <span className="absolute -bottom-0.5 right-2 bg-d-danger text-white text-[10px] font-bold min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center border-2 border-d-base">
-          {badge > 99 ? '99+' : badge}
-        </span>
+        <MentionBadge
+          count={badge}
+          decorative
+          ring="var(--color-d-base)"
+          className="absolute -bottom-1 right-1.5 pointer-events-none"
+        />
       )}
     </div>
   );

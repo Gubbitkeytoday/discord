@@ -53,9 +53,51 @@ export function serverIconOf(server) {
   return proxiedImageUrl(url);
 }
 
-/** Discord's acronym for an icon-less guild: first letter of each word. */
+// Thai is written with vowels that come BEFORE the consonant they follow in
+// speech (เ แ โ ใ ไ), and with tone marks and vowels stacked above/below it.
+// An initial must be the base consonant alone: "ไรเดอร์" → "ร", not "ไ", and
+// "บ้าน" → "บ", not "บ้" with a floating tone mark.
+const THAI_LEADING_VOWEL = /^[เ-ไ]$/u;
+const COMBINING = /[\p{M}ัิ-ฺ็-๎]/gu;
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+
+let segmenter = null;
+function graphemes(text) {
+  try {
+    segmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    return Array.from(segmenter.segment(text), (s) => s.segment);
+  } catch {
+    return Array.from(text);
+  }
+}
+
+/** The initial of one word: its first letter/number, script-aware. */
+function wordInitial(word) {
+  const parts = graphemes(word);
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (THAI_LEADING_VOWEL.test(part)) continue;
+    if (/^[฀-๿]/u.test(part)) {
+      const base = part.replace(COMBINING, '');
+      if (base) return base;
+      continue;
+    }
+    if (/[\p{L}\p{N}]/u.test(part)) return part;
+  }
+  return '';
+}
+
+/**
+ * Discord's acronym for an icon-less guild: the first letter of each word,
+ * up to three. Script-aware (Thai base consonants, whole graphemes for
+ * Devanagari/Korean/emoji), and a name with an emoji in it uses the emoji —
+ * "บ้านเรา 🏠" is more recognisable as 🏠 than as "บ".
+ */
 export function serverInitials(name = '') {
-  const words = String(name).trim().split(/\s+/).filter(Boolean);
-  const letters = words.map((w) => Array.from(w)[0]).filter((c) => /[\p{L}\p{N}]/u.test(c));
-  return (letters.slice(0, 3).join('') || '?').toUpperCase();
+  const text = String(name ?? '').trim();
+  if (!text) return '?';
+  const emoji = graphemes(text).find((g) => PICTOGRAPH.test(g));
+  if (emoji) return emoji;
+  const letters = text.split(/\s+/u).filter(Boolean).map(wordInitial).filter(Boolean);
+  return (letters.slice(0, 3).join('') || '?').toLocaleUpperCase();
 }

@@ -12,15 +12,78 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Antigravity" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the pt-safe/pb-safe utilities pad around the
+         notch; resizes-content makes the soft keyboard shrink the layout
+         instead of covering the composer. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="dark light" />
     <title>Antigravity Discord</title>
     <!-- Fonts are self-hosted (@fontsource, imported in src/main.jsx): no
-         third-party request, and the app renders the same offline. -->
+         third-party request, and the app renders the same offline. The Latin
+         400 face paints nearly every glyph of the first screen, so fetch it in
+         parallel with the JS instead of after the CSS has been parsed. Vite
+         fingerprints this path to the same file the @font-face rule uses. -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2" />
+    <!-- Critical CSS for the loading splash. It must paint before the
+         stylesheet and the bundle arrive (22 s on Slow 3G), so it is inline
+         and needs no JavaScript. React replaces #root's content on mount. -->
+    <style>
+      html { background: #1e1f22; color: #dbdee1; }
+      /* Until the bundle applies the saved theme (data-theme), follow the OS —
+         also after index.css has loaded, whose token default is dark. */
+      @media (prefers-color-scheme: light) {
+        html { background: #f2f3f5; color: #2e3338; }
+        html:not([data-theme]) body { background: #f2f3f5 !important; color: #2e3338 !important; }
+      }
+      html, body { margin: 0; height: 100%; overscroll-behavior-x: none; }
+      #root { height: 100%; }
+      .boot {
+        box-sizing: border-box; height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 20px; padding: 24px;
+        font: 600 15px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Noto Sans Thai', sans-serif;
+      }
+      .boot-logo { width: 72px; height: 72px; animation: boot-bob 1.6s ease-in-out infinite; }
+      .boot-spinner {
+        width: 28px; height: 28px; border-radius: 50%;
+        border: 3px solid rgba(128, 132, 142, 0.35); border-top-color: #5865f2;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      .boot-name { margin: 0; letter-spacing: 0.01em; opacity: 0.9; }
+      .boot-slow { margin: 0; max-width: 28em; text-align: center; font-weight: 400; font-size: 14px; opacity: 0; animation: boot-fade 0.4s ease-out 6s forwards; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @keyframes boot-bob { 50% { transform: translateY(-6px); } }
+      @keyframes boot-fade { to { opacity: 0.8; } }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-logo { animation: none; }
+        .boot-spinner { animation-duration: 2.4s; }
+      }
+    </style>
   </head>
   <!-- Colours come from the theme tokens in index.css, never hardcoded here:
        a literal hex background on body would override the light theme. -->
   <body class="bg-d-base text-d-text overflow-hidden">
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot" role="status" aria-live="polite" aria-label="Loading Antigravity…">
+        <svg class="boot-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+          <rect width="64" height="64" rx="18" fill="#5865f2" />
+          <path d="M18 20h28a4 4 0 0 1 4 4v14a4 4 0 0 1-4 4H30l-9 7v-7h-3a4 4 0 0 1-4-4V24a4 4 0 0 1 4-4z" fill="#fff" />
+          <circle cx="26" cy="31" r="3" fill="#5865f2" />
+          <circle cx="38" cy="31" r="3" fill="#5865f2" />
+        </svg>
+        <p class="boot-name" aria-hidden="true">Antigravity</p>
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <!-- Only if the network is slow: reassure, in the two languages the
+             app ships first (the bundle, which knows the user's language, has
+             not arrived yet). -->
+        <p class="boot-slow" aria-hidden="true">
+          <span lang="en">Still loading — slow connection</span> ·
+          <span lang="th">กำลังโหลด อินเทอร์เน็ตช้า</span>
+        </p>
+      </div>
+      <noscript>
+        <p style="text-align:center;padding:24px">Antigravity needs JavaScript to run. Please enable it in your browser.</p>
+      </noscript>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
