@@ -229,6 +229,7 @@ describe('roles and audit log', () => {
     assert.equal(entry.target.type, 'user');
     assert.equal(entry.target.id, victim);
     assert.equal(entry.target.name, victim);
+    assert.equal(entry.target_name, victim);
     assert.equal(entry.user_id, owner);
 
     const { listAuditLog } = await import('../services/guilds.js');

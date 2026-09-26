@@ -850,6 +850,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
   const dirty = draft && selected && (
     draft.name !== selected.name ||
     draft.color !== selected.color ||
+    (draft.color_secondary ?? null) !== (selected.color_secondary ?? null) ||
     String(draft.permissions) !== String(selected.permissions) ||
     Boolean(draft.hoist) !== Boolean(selected.hoist) ||
     Boolean(draft.mentionable) !== Boolean(selected.mentionable)
@@ -886,7 +887,8 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
       await api(`/roles/${draft.id}`, {
         method: 'PATCH',
         body: {
-          name: draft.name, color: draft.color, permissions: String(draft.permissions),
+          name: draft.name, color: draft.color, color_secondary: draft.color_secondary ?? null,
+          permissions: String(draft.permissions),
           hoist: Boolean(draft.hoist), mentionable: Boolean(draft.mentionable)
         }
       });
@@ -1055,12 +1057,58 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                           draft.color === color ? 'ring-2 ring-white' : ''
                         }`}
                         aria-label={t('roles.colorSwatch', { color })}
+                        aria-pressed={draft.color === color}
                       >
                         {draft.color === color && <Check className="w-3.5 h-3.5 text-d-strong drop-shadow" />}
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {/* Discord's role styles: a flat colour, or a two-colour gradient name. */}
+                <fieldset className="mt-4">
+                  <legend className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('adm.roleStyle')}</legend>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[['solid', t('adm.roleStyleSolid')], ['gradient', t('adm.roleStyleGradient')]].map(([key, text]) => {
+                      const on = key === 'gradient' ? Boolean(draft.color_secondary) : !draft.color_secondary;
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          role="radio"
+                          aria-checked={on}
+                          onClick={() => setDraft({ ...draft, color_secondary: key === 'gradient' ? (draft.color_secondary || '#5865f2') : null })}
+                          className={`min-h-[32px] px-3 py-1 rounded-full text-sm border ${on ? 'bg-d-brand border-d-brand text-white' : 'border-d-divider text-d-text2 hover:bg-d-hover/60'}`}
+                        >
+                          {text}
+                        </button>
+                      );
+                    })}
+                    <span
+                      className="ml-2 text-sm font-semibold"
+                      style={draft.color_secondary
+                        ? { backgroundImage: `linear-gradient(90deg, ${draft.color || '#99aab5'}, ${draft.color_secondary})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
+                        : { color: draft.color || 'var(--color-d-text)' }}
+                    >
+                      {draft.name || t('roles.newRoleName')}
+                    </span>
+                  </div>
+                  {Boolean(draft.color_secondary) && (
+                    <div className="flex flex-wrap gap-1.5 mt-2" aria-label={t('adm.secondColour')} role="group">
+                      {ROLE_COLOR_PRESETS.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          onClick={() => setDraft({ ...draft, color_secondary: color })}
+                          style={{ backgroundColor: color }}
+                          aria-pressed={draft.color_secondary === color}
+                          aria-label={t('roles.colorSwatch', { color })}
+                          className={`w-6 h-6 rounded ${draft.color_secondary === color ? 'ring-2 ring-white' : ''}`}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </fieldset>
 
                 <div className="flex max-sm:flex-col gap-3 sm:gap-6 mt-4">
                   <Toggle
@@ -1884,7 +1932,7 @@ function AuditTab({ entries, api, onToast }) {
     const target = entry.target;
     if (!target) return null;
     if (target.type === 'user') {
-      return <strong className="text-d-strong">{target.name ?? target.id}</strong>;
+      return <strong className="text-d-strong">{entry.target_name ?? target.id}</strong>;
     }
     if (target.type === 'channel') {
       const Icon = target.channel_type === 'category' ? Folder : Hash;

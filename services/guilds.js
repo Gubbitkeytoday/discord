@@ -1354,7 +1354,8 @@ export async function listAuditLog(serverId, { limit = 50, before = null, action
       target_username: _a, target_display_name: _b, target_avatar_url: _c,
       target_channel_name: _d, target_channel_type: _e, target_role_name: _f, target_role_color: _g, ...rest
     } = r;
-    return { ...rest, changes, target };
+    // `target_name` is the flat form for simple API consumers (bots, exports).
+    return { ...rest, changes, target, target_name: target?.name ?? null };
   });
 }
 
