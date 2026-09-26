@@ -130,7 +130,8 @@ services:
       - "443:443"
       - "443:443/udp"     # HTTP/3
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # `scale` profile: CADDYFILE=./Caddyfile.scale (two sticky upstreams).
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy-data:/data           # certificates — losing this re-issues them
       - caddy-config:/config
     networks:
@@ -177,6 +178,48 @@ services:
         --denied-peer-ip=192.168.0.0-192.168.255.255
         --total-quota=300 --stale-nonce=600
     logging: *logging
+
+  # --- scale profile (realtime-scale) ---------------------------------------
+  # Two app instances sharing Valkey: Socket.IO Redis Streams adapter for
+  # cross-instance fan-out and connection-state recovery, shared rate limits,
+  # presence with TTL heartbeats. Requires PostgreSQL (the default above) and
+  # in .env:
+  #   REDIS_URL=redis://valkey:6379
+  #   CADDYFILE=./Caddyfile.scale
+  # then: docker compose --profile scale up -d
+  # See DEPLOYMENT.md §8 "Running several instances".
+  valkey:
+    image: valkey/valkey:8-alpine
+    profiles: ["scale"]
+    restart: unless-stopped
+    # Ephemeral by design: sockets, presence, rate buckets and the replay
+    # stream are all rebuilt within minutes. No persistence, bounded memory.
+    command: ["valkey-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    expose:
+      - "6379"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  app-2:
+    extends:
+      service: app
+    profiles: ["scale"]
+    environment:
+      # Snowflake ids embed a worker id; every instance needs its own (the
+      # first app uses the default, 0). A third instance would use 2, etc.
+      WORKER_ID: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
 
 volumes:
   app-data:
