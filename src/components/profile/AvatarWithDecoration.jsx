@@ -22,16 +22,41 @@ import '../../profile/profile.css';
  *                whenever motion is reduced.
  *   hovered      let a parent row drive hover (e.g. the whole member row)
  */
-export default function AvatarWithDecoration({
+export default function AvatarWithDecoration(props) {
+  const isAnimated = props.animated ?? isAnimatedImage({ url: props.src ?? '' });
+  // Most avatars in a long chat have nothing to animate: those skip the
+  // hover state and motion / viewer subscriptions entirely.
+  if (!props.decoration && !isAnimated) return <PlainAvatar {...props} />;
+  return <DecoratedAvatar {...props} isAnimated={isAnimated} />;
+}
+
+function PlainAvatar({
+  src, userId = null, size = 40, status = null, ring = 'var(--color-d-panel)', alt = '', className = '', imgClassName = ''
+}) {
+  const url = proxiedImageUrl(src || (userId ? defaultAvatar(userId) : DEFAULT_AVATAR));
+  const dot = Math.min(24, Math.max(10, Math.round(size * 0.24)));
+  return (
+    <span className={`relative inline-block shrink-0 ${className}`} style={{ width: size, height: size }}>
+      <img src={url} alt={alt} className={`h-full w-full rounded-full object-cover ${imgClassName}`}
+        loading="lazy" decoding="async" />
+      {status && (
+        <span className="absolute" style={{ right: -2, bottom: -2 }}>
+          <StatusIndicator status={status} size={dot} ring={ring} />
+        </span>
+      )}
+    </span>
+  );
+}
+
+function DecoratedAvatar({
   src, userId = null, size = 40, decoration = null, context = 'list', status = null,
-  ring = 'var(--color-d-panel)', animated, hovered, alt = '', className = '', imgClassName = ''
+  ring = 'var(--color-d-panel)', isAnimated, hovered, alt = '', className = '', imgClassName = ''
 }) {
   const [hoverSelf, setHoverSelf] = useState(false);
   const hover = hovered ?? hoverSelf;
   const motion = useMotionAllowed();
   const viewer = useViewerPrefs();
   const url = proxiedImageUrl(src || (userId ? defaultAvatar(userId) : DEFAULT_AVATAR));
-  const isAnimated = animated ?? isAnimatedImage({ url: src ?? '' });
   const playAvatar = motion && (context === 'profile' || hover);
   const showDeco = decoration && viewer.decorations !== 'off';
   const animateDeco = viewer.decorations === 'animate'

@@ -2908,4 +2908,8 @@ export default {
   "apiError.INVALID_EMOJI": "Използвай едно емоджи.",
   "apiError.INVALID_EXPIRY": "Избери кога да се изчисти статусът.",
   "apiError.UNKNOWN_COSMETIC": "Този предмет вече не е наличен.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Идентичност",
+  "admin.tab.cosmetics": "Козметика",
 };

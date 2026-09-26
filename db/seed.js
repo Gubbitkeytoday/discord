@@ -40,14 +40,15 @@ const SEED_SERVERS = [
 // role key -> definition. `everyone` is created for every server automatically.
 const SEED_ROLES = {
   'server-1': [
-    { id: 'role-1-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
-    { id: 'role-1-mod',   name: 'Moderator', color: '#faa61a', position: 60, hoist: 1, mentionable: 1, permissions: fromNames(['KICK_MEMBERS','BAN_MEMBERS','MANAGE_MESSAGES','MODERATE_MEMBERS','MANAGE_THREADS','VIEW_AUDIT_LOG','MUTE_MEMBERS','DEAFEN_MEMBERS','MOVE_MEMBERS']) },
+    // Role name styles (v46): a gradient, an emoji role icon, a shimmer (VIP).
+    { id: 'role-1-admin', name: 'Admin', color: '#f04747', color_secondary: '#faa61a', style: 'gradient', gradient_angle: 90, position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
+    { id: 'role-1-mod',   name: 'Moderator', color: '#faa61a', unicode_emoji: '🛡️', position: 60, hoist: 1, mentionable: 1, permissions: fromNames(['KICK_MEMBERS','BAN_MEMBERS','MANAGE_MESSAGES','MODERATE_MEMBERS','MANAGE_THREADS','VIEW_AUDIT_LOG','MUTE_MEMBERS','DEAFEN_MEMBERS','MOVE_MEMBERS']) },
     { id: 'role-1-bot',   name: 'Bot', color: '#5865f2', position: 40, hoist: 0, mentionable: 0, managed: 1, permissions: fromNames(['SEND_MESSAGES','EMBED_LINKS','ATTACH_FILES','READ_MESSAGE_HISTORY','ADD_REACTIONS','VIEW_CHANNEL']) },
     { id: 'role-1-dev',   name: 'Developer', color: '#43b581', position: 20, hoist: 1, mentionable: 1, permissions: '0' }
   ],
   'server-2': [
     { id: 'role-2-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
-    { id: 'role-2-vip',   name: 'VIP', color: '#e91e63', position: 30, hoist: 1, mentionable: 1, permissions: '0' }
+    { id: 'role-2-vip',   name: 'VIP', color: '#e91e63', style: 'holographic', position: 30, hoist: 1, mentionable: 1, permissions: '0' }
   ],
   'server-3': [
     { id: 'role-3-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) }
@@ -111,6 +112,17 @@ const SEED_FRIENDS = [
   { id: 'fr-3', user_id: 'user-me', friend_id: 'user-5', status: 'pending' }
 ];
 
+// Built-in collectibles worn by the demo accounts (see services/cosmetics.js).
+const SEED_COSMETICS = [
+  { user_id: 'user-me', decoration: 'builtin-deco-stars', nameplate: 'builtin-plate-aurora' },
+  {
+    user_id: 'user-2', decoration: 'builtin-deco-lotus', nameplate: 'builtin-plate-kranok',
+    effect: 'builtin-effect-lanterns', tag: 'server-1',
+    name_style: { font: 'kanit', effect: 'gradient', colors: ['#ff5f6d', '#ffc371'] }
+  },
+  { user_id: 'user-4', decoration: 'builtin-deco-cat-ears', nameplate: 'builtin-plate-petals' }
+];
+
 const SEED_EMOJIS = [
   { id: 'emoji-1', server_id: 'server-1', name: 'antigravity', url: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=64', creator_id: 'user-me' },
   { id: 'emoji-2', server_id: 'server-1', name: 'pogchamp',    url: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=64', creator_id: 'user-2' }
@@ -160,10 +172,11 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
 
       for (const r of SEED_ROLES[s.id] ?? []) {
         await runQuery(
-          `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable, managed, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [r.id, s.id, r.name, r.color ?? null, r.position, r.permissions,
-           r.hoist ?? 0, r.mentionable ?? 0, r.managed ?? 0, now()]
+          `INSERT INTO roles (id, server_id, name, color, color_secondary, style, gradient_angle, unicode_emoji,
+                              position, permissions, hoist, mentionable, managed, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [r.id, s.id, r.name, r.color ?? null, r.color_secondary ?? null, r.style ?? 'solid', r.gradient_angle ?? 90,
+           r.unicode_emoji ?? null, r.position, r.permissions, r.hoist ?? 0, r.mentionable ?? 0, r.managed ?? 0, now()]
         );
       }
     }
@@ -286,6 +299,30 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
       [dmMsgId, dmId, now()]
     );
     await runQuery(`UPDATE channels SET last_message_id = ? WHERE id = ?`, [dmMsgId, dmId]);
+
+    // Profiles and role styles, so a fresh dev instance shows them off: the
+    // built-in collectibles (ids from services/cosmetics.js, created on first
+    // use), a name style, a server tag and badge, and styled roles.
+    for (const c of SEED_COSMETICS) {
+      await runQuery(
+        `UPDATE users SET avatar_decoration_id = ?, nameplate_id = ?, profile_effect_id = ?, name_style = ?,
+                primary_server_tag_id = ? WHERE id = ?`,
+        [c.decoration ?? null, c.nameplate ?? null, c.effect ?? null,
+         c.name_style ? JSON.stringify(c.name_style) : null, c.tag ?? null, c.user_id]
+      );
+    }
+    await runQuery(
+      `INSERT INTO server_tags (server_id, tag, icon, color, enabled, updated_by) VALUES ('server-1', 'AGHQ', 'rocket', '#8b5cf6', 1, 'user-me')`
+    );
+    await runQuery(
+      `INSERT INTO badges (id, kind, server_id, name, description, icon, color, position, created_by)
+       VALUES ('badge-seed-founder', 'server', 'server-1', 'Founding crew', 'Here from day one', 'rocket', '#f59e0b', 0, 'user-me')`
+    );
+    for (const uid of ['user-me', 'user-2']) {
+      await runQuery(
+        `INSERT INTO user_badges (user_id, badge_id, granted_by) VALUES (?, 'badge-seed-founder', 'user-me')`, [uid]
+      );
+    }
   });
 
   console.log('✅ Seed complete.');

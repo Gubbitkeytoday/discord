@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "이모지를 하나만 써 주세요.",
   "apiError.INVALID_EXPIRY": "상태를 언제 지울지 골라 주세요.",
   "apiError.UNKNOWN_COSMETIC": "이 항목은 더 이상 사용할 수 없어요.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "아이덴티티",
+  "admin.tab.cosmetics": "꾸미기",
 };

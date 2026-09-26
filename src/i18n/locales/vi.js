@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "Chỉ dùng một emoji.",
   "apiError.INVALID_EXPIRY": "Hãy chọn thời điểm xóa trạng thái.",
   "apiError.UNKNOWN_COSMETIC": "Mục này không còn nữa.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Danh tính",
+  "admin.tab.cosmetics": "Trang trí",
 };

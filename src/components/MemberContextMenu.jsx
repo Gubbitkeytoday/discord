@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   User, MessageSquare, UserPlus, UserMinus, Ban, Shield, Pencil, Clock,
-  LogOut, Copy, ShieldAlert, ShieldOff
+  LogOut, Copy, ShieldAlert, ShieldOff, Eraser
 } from 'lucide-react';
 import ContextMenu from './ContextMenu';
 import ModerationDialog, { TIMEOUT_OPTIONS } from './admin/ModerationDialog';
@@ -15,7 +15,7 @@ import { t } from '../i18n/index.jsx';
 export default function MemberContextMenu({
   user, x, y, currentUser, isGuild, server, roles = [], members = [], friends = [], blocked = [],
   can, onClose, onProfile, onMessage, onAddFriend, onRemoveFriend, onBlock, onUnblock,
-  onChangeNickname, onToggleRole, onTimeout, onRemoveTimeout, onKick, onBan, onToast
+  onChangeNickname, onToggleRole, onTimeout, onRemoveTimeout, onKick, onBan, onResetProfile, onToast
 }) {
   // Ban opens Discord's full dialog (reason + "delete message history")
   // right here, in place of the menu, instead of a bare confirm.
@@ -47,6 +47,11 @@ export default function MemberContextMenu({
     canModerate && can('MANAGE_NICKNAMES') && { separator: true },
     ((isGuild && isSelf && can('CHANGE_NICKNAME')) || (canModerate && can('MANAGE_NICKNAMES'))) && {
       icon: Pencil, label: t('members.changeNickname'), action: () => onChangeNickname(member ?? user)
+    },
+    // Clears their collectibles here and hides their worn tag (audit-logged);
+    // the same permission as renaming them.
+    canModerate && can('MANAGE_NICKNAMES') && onResetProfile && {
+      icon: Eraser, label: t('profiles.resetMenu'), action: () => onResetProfile(member ?? user)
     },
     isGuild && can('MANAGE_ROLES') && !isOwnerTarget && {
       icon: Shield,

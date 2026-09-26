@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "Egyetlen emojit használj.",
   "apiError.INVALID_EXPIRY": "Válaszd ki, mikor törlődjön az állapot.",
   "apiError.UNKNOWN_COSMETIC": "Ez az elem már nem érhető el.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitás",
+  "admin.tab.cosmetics": "Kozmetikumok",
 };

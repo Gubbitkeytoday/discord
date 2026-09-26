@@ -2975,4 +2975,8 @@ export default {
   "apiError.INVALID_EMOJI": "Koristi samo jedan emoji.",
   "apiError.INVALID_EXPIRY": "Odaberi kada se status briše.",
   "apiError.UNKNOWN_COSMETIC": "Ta stavka više nije dostupna.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitet",
+  "admin.tab.cosmetics": "Kozmetika",
 };

@@ -85,9 +85,11 @@ export function useFocusTrap(active = true, onEscape) {
 
     // Move focus in — unless something inside already has it (autoFocus).
     // Prefer the first field over the first button, so opening a form does not
-    // land on "Cancel".
+    // land on "Cancel". `data-initial-focus` (on the container or inside it)
+    // overrides that, e.g. a profile popout whose only field is a side note.
     if (!container.contains(document.activeElement)) {
-      const initial = container.querySelector('input, textarea, select') ?? focusable()[0];
+      const marked = container.matches('[data-initial-focus]') ? container : container.querySelector('[data-initial-focus]');
+      const initial = marked ?? container.querySelector('input, textarea, select') ?? focusable()[0];
       if (initial) initial.focus?.();
       else {
         if (!container.hasAttribute('tabindex')) container.setAttribute('tabindex', '-1');

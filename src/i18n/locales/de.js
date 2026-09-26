@@ -2908,4 +2908,8 @@ export default {
   "apiError.INVALID_EMOJI": "Verwende ein einzelnes Emoji.",
   "apiError.INVALID_EXPIRY": "Wähle, wann der Status gelöscht werden soll.",
   "apiError.UNKNOWN_COSMETIC": "Dieses Objekt ist nicht mehr verfügbar.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identität",
+  "admin.tab.cosmetics": "Kosmetik",
 };

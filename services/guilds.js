@@ -309,7 +309,8 @@ export async function getServerDetail(serverId, viewerId = null) {
   )).map((m) => ({ ...m, status: publicStatus(m.status, viewerId, m.id) }));
 
   const roleRows = await allQuery(
-    `SELECT mr.user_id, r.id, r.name, r.color, r.color_secondary, r.position, r.permissions, r.hoist, r.managed, r.icon_url
+    `SELECT mr.user_id, r.id, r.name, r.color, r.color_secondary, r.position, r.permissions, r.hoist, r.managed, r.icon_url,
+            r.style, r.gradient_angle, r.unicode_emoji
        FROM member_roles mr JOIN roles r ON r.id = mr.role_id
       WHERE mr.server_id = ?
       ORDER BY r.position DESC`,
@@ -330,9 +331,10 @@ export async function getServerDetail(serverId, viewerId = null) {
       ...m,
       display_name: m.nickname || m.display_name,
       avatar_url: m.member_avatar_url || m.avatar_url,
-      roles: roles.map(({ id, name, color, color_secondary, position, hoist, icon_url }) => ({
+      roles: roles.map(({ id, name, color, color_secondary, position, hoist, icon_url, style, gradient_angle, unicode_emoji }) => ({
         id, name, color, color_secondary: color_secondary ?? null,
-        position, hoist: Boolean(hoist), icon_url: icon_url ?? null
+        position, hoist: Boolean(hoist), icon_url: icon_url ?? null,
+        style: style ?? 'solid', gradient_angle: gradient_angle ?? 90, unicode_emoji: unicode_emoji ?? null
       })),
       role_color: topColoured?.color ?? null,
       // Present only when that role has a second colour: the name renders as a

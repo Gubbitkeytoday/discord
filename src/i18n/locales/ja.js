@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "絵文字は1つだけ使ってください。",
   "apiError.INVALID_EXPIRY": "ステータスをクリアする時間を選んでください。",
   "apiError.UNKNOWN_COSMETIC": "そのアイテムはもう利用できません。",
+
+  // --- integration (round 4) ---
+  "settings.identity": "アイデンティティ",
+  "admin.tab.cosmetics": "コスメティック",
 };

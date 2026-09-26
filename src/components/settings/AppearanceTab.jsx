@@ -222,6 +222,12 @@ export default function AppearanceTab({ onToast }) {
 
           <Section>
             <SettingToggle
+              label={t('srv.showRoleIcons')}
+              hint={t('srv.showRoleIconsHint')}
+              checked={appearance.showRoleIcons !== false}
+              onChange={(value) => set({ showRoleIcons: value })}
+            />
+            <SettingToggle
               label={t('appearance.showSendButton')}
               checked={appearance.showSendButton}
               onChange={(value) => set({ showSendButton: value })}

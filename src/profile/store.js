@@ -100,9 +100,11 @@ const getVersion = () => version;
 
 /** Identity of one user (in a server's context when serverId is given). */
 export function useIdentity(userId, serverId = null) {
-  useSyncExternalStore(subscribe, getVersion);
+  const v = useSyncExternalStore(subscribe, getVersion);
   const sid = serverId && serverId !== 'home' ? serverId : null;
-  useEffect(() => { if (userId) request(userId, sid); }, [userId, sid]);
+  // `v` too: after invalidateIdentity() drops an entry, the next version
+  // re-requests it (request() is a no-op for anything cached or in flight).
+  useEffect(() => { if (userId) request(userId, sid); }, [userId, sid, v]);
   return userId ? identities.get(keyOf(userId, sid)) ?? null : null;
 }
 
@@ -114,7 +116,7 @@ export function useIdentities(userIds, serverId = null) {
   useEffect(() => {
     for (const id of userIds ?? []) if (id) request(id, sid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, sid]);
+  }, [key, sid, v]);
   return useMemo(() => {
     const out = {};
     for (const id of userIds ?? []) out[id] = identities.get(keyOf(id, sid)) ?? null;

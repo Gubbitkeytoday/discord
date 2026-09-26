@@ -3,7 +3,7 @@ import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
   ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3,
-  ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ShieldCheck, LogOut, Filter, Hash, Folder
+  ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ShieldCheck, LogOut, Filter, Hash, Folder, IdCard
 } from 'lucide-react';
 
 import { useDialog, UnsavedBar, useReportDirty, SettingToggle } from './settings/primitives';
@@ -28,6 +28,7 @@ import RoleStyleEditor from './server/RoleStyleEditor.jsx';
 import RoleIcon from './server/RoleIcon.jsx';
 import { styleOf } from './server/roleStyle';
 import ServerAppearanceSettings from './server/ServerAppearanceSettings.jsx';
+import ServerIdentitySettings from './profile/ServerIdentitySettings.jsx';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -44,6 +45,8 @@ const tabGroups = () => [
     tabs: [
       { key: 'overview', label: t('settings.overview'), icon: SettingsIcon, perm: 'MANAGE_GUILD' },
       { key: 'roles', label: t('settings.roles'), icon: Shield, perm: 'MANAGE_ROLES' },
+      // Server tag, server badges, "hide members' collectibles", 🌱 window.
+      { key: 'identity', label: t('settings.identity'), icon: IdCard, perm: 'MANAGE_GUILD' },
       { key: 'permissions', label: t('settings.channelPermissions'), icon: KeyRound, perm: 'MANAGE_ROLES' },
       { key: 'emojis', label: t('chat.emoji'), icon: Smile, perm: 'MANAGE_EMOJIS' },
       { key: 'stickers', label: t('settings.stickers'), icon: Sticker, perm: 'MANAGE_EMOJIS' },
@@ -289,6 +292,14 @@ export default function ServerSettingsModal({
         )}
         {tab === 'roles' && (
           <RolesTab roles={roles} api={api} reload={() => load('roles')} onToast={onToast} serverId={server.id} {...dirtyProps} />
+        )}
+        {tab === 'identity' && (
+          <ServerIdentitySettings
+            serverId={server.id}
+            serverName={server.name}
+            onToast={onToast}
+            canManage={can('MANAGE_GUILD')}
+          />
         )}
         {tab === 'members' && (
           <MembersTab

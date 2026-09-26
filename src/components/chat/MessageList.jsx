@@ -6,6 +6,8 @@ import { ArrowDown, CheckCheck, Loader2 } from 'lucide-react';
 import { t, localeTag } from '../../i18n/index.jsx';
 import { messageFlags, formatTime } from '../../utils/messageGrouping';
 import MessageRow from './MessageRow';
+import { useIdentities } from '../../profile/store';
+import { memberRoleLook } from '../server/roleStyle';
 
 // "Following the conversation" = within this many px of the bottom.
 const AT_BOTTOM_PX = 120;
@@ -41,6 +43,7 @@ function formatUnreadSince(date, use24Hour) {
  */
 const MessageList = forwardRef(function MessageList({
   channelId, channelLabel, messages, lastReadMessageId, currentUserId, ctx, memberColors,
+  serverId = null, membersById = null, rolesById = null,
   hasMoreHistory, hasNewerHistory, isLoadingHistory, isLoadingMessages, onLoadMore, onLoadNewer,
   onJumpToPresent, onClearReadMarker, editingId, bursts, revealed, intro, use24Hour
 }, ref) {
@@ -61,6 +64,38 @@ const MessageList = forwardRef(function MessageList({
     messages.forEach((m, i) => map.set(String(m.id), i));
     return map;
   }, [messages]);
+
+  // Authors, resolved once per distinct author rather than per row: one
+  // batched identity request (decorations, name styles, tags) and one role
+  // lookup each. Both return stable objects, so memoised rows only re-render
+  // when their author's look actually changes.
+  const authorKey = useMemo(() => {
+    const seen = new Set();
+    for (const m of messages) if (m.user_id) seen.add(m.user_id);
+    return [...seen].join(',');
+  }, [messages]);
+  const authorIds = useMemo(() => (authorKey ? authorKey.split(',') : []), [authorKey]);
+  const identities = useIdentities(authorIds, serverId);
+  const looks = useMemo(() => {
+    const map = new Map();
+    for (const id of authorIds) {
+      const member = membersById?.get(id);
+      if (member) map.set(id, memberRoleLook(member, rolesById));
+    }
+    return map;
+  }, [authorIds, membersById, rolesById]);
+  // A colour-only look for authors known just by message.role_color, cached
+  // so the object (and the row's memo) stays the same between renders.
+  const colourLooks = useRef(new Map());
+  const lookFor = (msg) => {
+    const look = looks.get(msg.user_id);
+    if (look?.styleRole) return look;
+    const colour = msg.role_color ?? memberColors?.get(msg.user_id) ?? null;
+    if (!colour) return look ?? null;
+    const key = `${colour}|${look?.iconRole?.id ?? look?.iconRole?.icon_url ?? ''}`;
+    if (!colourLooks.current.has(key)) colourLooks.current.set(key, { styleRole: { color: colour }, iconRole: look?.iconRole ?? null });
+    return colourLooks.current.get(key);
+  };
 
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -256,12 +291,23 @@ const MessageList = forwardRef(function MessageList({
     if (event.key === 'Enter' && msg.reply_to_id) { event.preventDefault(); actions.jumpTo(msg.reply_to_id); }
   }, [ctx, currentUserId, moveTo]);
 
+  // A finger that lands on the author name focuses it; if that focus raised
+  // the action bar, the bar would cover the name before the tap's click
+  // arrives and the profile would never open. Touch focus therefore moves the
+  // Tab stop only; a tap on the row itself still opens the bar (tapRow).
+  const lastPointer = useRef({ type: null, at: 0 });
+  const touchFocus = () => lastPointer.current.type && lastPointer.current.type !== 'mouse'
+    && Date.now() - lastPointer.current.at < 1000;
+
   const rowCtx = useMemo(() => ({
     ...ctx,
     actions: {
       ...ctx.actions,
       hoverRow: (id) => setHoveredId(id),
-      focusRow: (id, isRow = true) => { setFocusedId(id); if (isRow) setTabStopId(id); },
+      focusRow: (id, isRow = true) => {
+        if (!touchFocus()) setFocusedId(id);
+        if (isRow) setTabStopId(id);
+      },
       blurRow: (id) => setFocusedId((current) => (current === id ? null : current)),
       tapRow: (id) => { if (hoverless()) setTouchOpenId((current) => (current === id ? null : id)); },
       closeTouchActions: () => setTouchOpenId(null)
@@ -332,6 +378,7 @@ const MessageList = forwardRef(function MessageList({
         onScroll={onScroll}
         onKeyDown={onKeyDown}
         onPointerLeave={() => setHoveredId(null)}
+        onPointerDownCapture={(e) => { lastPointer.current = { type: e.pointerType, at: Date.now() }; }}
         role="log"
         aria-live="off"
         aria-label={t('chat.messagesIn', { channel: channelLabel })}
@@ -372,7 +419,8 @@ const MessageList = forwardRef(function MessageList({
                     touchOpen={id === touchOpenId}
                     isFocusTarget={id === stopId}
                     isEditing={id === editingId}
-                    roleColor={msg.role_color ?? memberColors?.get(msg.user_id) ?? null}
+                    identity={identities[msg.user_id] ?? null}
+                    look={lookFor(msg)}
                     burst={bursts?.[id] ?? null}
                     revealed={revealed?.has(id) ?? false}
                   />

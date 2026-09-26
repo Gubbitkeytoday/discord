@@ -18,6 +18,10 @@ import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
 import { get, post, patch, del } from '../api';
+import ServerBanner, { useScrolledPast } from './server/ServerBanner.jsx';
+import ChannelEmojiIcon, { channelEmojiOf } from './server/ChannelEmojiIcon.jsx';
+import { useCollapsedCategories } from './server/useCollapsedCategories';
+import LiveEventBanner, { useServerEvents } from './server/LiveEventBanner.jsx';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -75,15 +79,20 @@ export default function ChannelSidebar({
   onDeleteChannel,
   onMarkChannelRead,
   onMuteChannel,
-  onToast
+  onToast,
+  socket = null,
+  emojis = [],
+  onJoinVoiceChannel
 }) {
-  // Collapsed categories are remembered per server, as on Discord.
-  const collapseKey = currentServer?.id ? `collapsed-categories:${currentServer.id}` : null;
-  const [collapsed, setCollapsed] = useState({});
-  useEffect(() => {
-    if (!collapseKey) return;
-    try { setCollapsed(JSON.parse(localStorage.getItem(collapseKey) || '{}') || {}); } catch { setCollapsed({}); }
-  }, [collapseKey]);
+  // Collapsed categories are remembered per server and follow the account
+  // (prefs.layout.collapsedCategories), as on Discord.
+  const { isCollapsed, toggle } = useCollapsedCategories(currentServer?.id ?? null);
+  // The banner shrinks to the header bar once the channel list scrolls.
+  const [listEl, setListEl] = useState(null);
+  const bannerCollapsed = useScrolledPast(listEl, 24);
+  // A live event gets a banner at the top of the list (Discord's "LIVE").
+  const events = useServerEvents(currentServer?.id ?? null, socket);
+  const liveEvent = events.find((e) => e.status === 'active') ?? null;
   const { prefs, update } = useUserSettings();
   const [showServerMenu, setShowServerMenu] = useState(false);
   const [channelMenu, setChannelMenu] = useState(null);
@@ -310,13 +319,6 @@ export default function ChannelSidebar({
 
   if (!currentServer) return null;
 
-  const toggle = (key) => setCollapsed((prev) => {
-    const next = { ...prev, [key]: !prev[key] };
-    if (!next[key]) delete next[key];
-    try { if (collapseKey) localStorage.setItem(collapseKey, JSON.stringify(next)); } catch { /* storage unavailable */ }
-    return next;
-  });
-
   const channelMenuItems = (channel) => {
     const muted = Boolean(channelSettings[channel.id]?.muted);
     const hasUnread = Boolean(readStates[channel.id]?.unread);
@@ -393,8 +395,8 @@ export default function ChannelSidebar({
         action: () => (group?.channels ?? []).forEach((c) => { if (readStates[c.id]?.unread) onMarkChannelRead?.(c.id); })
       },
       {
-        icon: collapsed[category.id] ? ChevronDown : ChevronRight,
-        label: collapsed[category.id] ? t('adm.expandCategory') : t('adm.collapseCategory'),
+        icon: isCollapsed(category.id) ? ChevronDown : ChevronRight,
+        label: isCollapsed(category.id) ? t('adm.expandCategory') : t('adm.collapseCategory'),
         action: () => toggle(category.id)
       },
       canManageChannels && { separator: true },
@@ -481,8 +483,9 @@ export default function ChannelSidebar({
         aria-label={t('adm.channelsOf', { name: currentServer.name })}
         className={`w-60 bg-d-surface flex flex-col shrink-0 select-none z-20 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:z-40 max-md:w-[min(20rem,calc(100vw-72px-3rem))] max-md:shadow-2xl max-md:transition-transform ${mobileOpen ? '' : 'max-md:-translate-x-[calc(100%+72px)] max-md:invisible'}`}
       >
-      {/* Server header */}
+      {/* Server header — over the server's banner art when it has one */}
       <div className="relative shrink-0">
+        <ServerBanner server={currentServer} collapsed={bannerCollapsed}>
         <button
           ref={serverButtonRef}
           onClick={() => setShowServerMenu((v) => !v)}
@@ -495,7 +498,9 @@ export default function ChannelSidebar({
           aria-haspopup="menu"
           aria-expanded={showServerMenu}
           aria-controls={showServerMenu ? 'server-menu' : undefined}
-          className="w-full h-12 px-4 shadow-sm border-b border-d-edge flex items-center justify-between gap-2 font-bold text-d-strong hover:bg-d-hover/50 transition-colors"
+          className={`w-full h-12 px-4 flex items-center justify-between gap-2 font-bold text-d-strong hover:bg-d-hover/50 transition-colors ${
+            currentServer.banner_url && !bannerCollapsed ? '' : 'shadow-sm border-b border-d-edge'
+          }`}
         >
           <span className="min-w-0 truncate text-[15px] flex items-center gap-1.5">
             <span className="truncate">{currentServer.name}</span>
@@ -504,6 +509,7 @@ export default function ChannelSidebar({
           </span>
           {showServerMenu ? <X className="w-4 h-4 text-d-text3 shrink-0" /> : <ChevronDown className="w-5 h-5 text-d-text3 shrink-0" />}
         </button>
+        </ServerBanner>
 
         {showServerMenu && (
           <ServerDropdown
@@ -529,10 +535,18 @@ export default function ChannelSidebar({
       </div>
 
       {/* Channels */}
-      <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 py-3 space-y-4 focus:outline-none">
+      <div ref={setListEl} id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 py-3 space-y-4 focus:outline-none">
+        {liveEvent && (
+          <LiveEventBanner
+            event={liveEvent}
+            compact
+            onOpen={onOpenEvents}
+            onJoin={onJoinVoiceChannel ? () => onJoinVoiceChannel(liveEvent.channel_id) : undefined}
+          />
+        )}
         {grouped.map((group) => {
-          const isCollapsed = collapsed[group.key];
-          const visible = isCollapsed
+          const groupCollapsed = isCollapsed(group.key);
+          const visible = groupCollapsed
             ? group.list.filter((c) => c.id === activeChannelId || readStates[c.id]?.unread)
             : group.list;
           const isVoiceCategory = group.list.length > 0 && group.list.every((c) => c.type === 'voice' || c.type === 'stage');
@@ -558,14 +572,14 @@ export default function ChannelSidebar({
                         nudgeCategory(category, e.key === 'ArrowUp' ? -1 : 1);
                       }
                     } : undefined}
-                    aria-expanded={!isCollapsed}
+                    aria-expanded={!groupCollapsed}
                     aria-keyshortcuts={category && canManageChannels ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
                     draggable={Boolean(category && canManageChannels)}
                     onDragStart={category ? () => setDrag({ id: category.id, kind: 'category' }) : undefined}
                     onDragEnd={() => { setDrag(null); setDropHint(null); }}
                     className="flex items-center gap-1 hover:text-d-strong transition-colors min-w-0 min-h-[24px] px-1 flex-1 text-left uppercase"
                   >
-                    {isCollapsed ? <ChevronRight className="w-3 h-3 shrink-0" aria-hidden="true" /> : <ChevronDown className="w-3 h-3 shrink-0" aria-hidden="true" />}
+                    {groupCollapsed ? <ChevronRight className="w-3 h-3 shrink-0" aria-hidden="true" /> : <ChevronDown className="w-3 h-3 shrink-0" aria-hidden="true" />}
                     <span className="truncate">{group.title}</span>
                   </button>
                   {category && (
@@ -648,7 +662,7 @@ export default function ChannelSidebar({
                         aria-current={isActive ? 'page' : undefined}
                         aria-label={channelRowLabel(channel, { hasUnread, mentions, muted, isPrivate })}
                         aria-keyshortcuts={draggable ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
-                        className={`w-full min-h-[32px] flex items-center justify-between gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
+                        className={`w-full min-h-[var(--density-row)] flex items-center justify-between gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
                           isActive || isConnectedVoice
                             ? 'bg-d-active text-d-strong font-medium'
                             : hasUnread
@@ -657,10 +671,14 @@ export default function ChannelSidebar({
                         } ${drag?.id === channel.id ? 'opacity-40' : ''}`}
                       >
                         <span className="flex items-center gap-2 min-w-0">
-                          <span className="relative shrink-0" aria-hidden="true">
-                            <Icon className={`w-5 h-5 ${isConnectedVoice ? 'text-d-online' : 'text-d-text4'}`} />
-                            {isPrivate && <Lock className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 text-d-text3" />}
-                          </span>
+                          {channelEmojiOf(channel) ? (
+                            <ChannelEmojiIcon channel={channel} emojis={emojis} />
+                          ) : (
+                            <span className="relative shrink-0" aria-hidden="true">
+                              <Icon className={`w-5 h-5 ${isConnectedVoice ? 'text-d-online' : 'text-d-text4'}`} />
+                              {isPrivate && <Lock className="w-2.5 h-2.5 absolute -bottom-0.5 -right-0.5 text-d-text3" />}
+                            </span>
+                          )}
                           <span className="truncate">{channel.name}</span>
                         </span>
 

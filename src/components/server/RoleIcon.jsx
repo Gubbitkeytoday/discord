@@ -1,13 +1,12 @@
 import React from 'react';
 import { t } from '../../i18n/index.jsx';
 import { proxiedImageUrl } from '../../utils/media';
-import { useUserSettings } from '../../hooks/useUserSettings';
+import { usePreference } from '../../hooks/useUserSettings';
 import './server.css';
 
 /** Appearance › "Show role icons next to names" (default on). */
 export function useShowRoleIcons() {
-  const { prefs } = useUserSettings();
-  return prefs.appearance?.showRoleIcons !== false;
+  return usePreference((p) => p.appearance?.showRoleIcons !== false);
 }
 
 /**

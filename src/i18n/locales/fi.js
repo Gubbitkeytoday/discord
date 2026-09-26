@@ -2909,4 +2909,8 @@ export default {
   "apiError.INVALID_EMOJI": "Käytä yhtä emojia.",
   "apiError.INVALID_EXPIRY": "Valitse, milloin tila tyhjennetään.",
   "apiError.UNKNOWN_COSMETIC": "Kohde ei ole enää saatavilla.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identiteetti",
+  "admin.tab.cosmetics": "Kosmetiikka",
 };

@@ -43,7 +43,7 @@ export default function ChatArea(props) {
     channel, messages, pins = [], currentUser, viewerPermissions = [], isOwner = false,
     typingUsers = [], lastReadMessageId = null, hasMoreHistory = false, hasNewerHistory = false,
     isLoadingHistory = false, isLoadingMessages = false, members = [], channels = [], customEmojis = [],
-    externalEmojiGroups = [], stickers = [], botCommands = [], memberColors, blockedIds,
+    externalEmojiGroups = [], stickers = [], botCommands = [], memberColors, rolesById = null, blockedIds,
     showMemberList, channelSettings, inboxCount = 0, hideHeader = false, callBar,
     openPinsSignal = 0, openEmojiSignal = 0, toggleFormattingSignal = 0, focusSearchSignal = 0, focusHistorySignal = 0,
     onOpenMobileSidebar = null, onStartCall, onFollowChannel = null, onArchiveThread, onAddGroupRecipients,
@@ -53,6 +53,8 @@ export default function ChatArea(props) {
 
   const handlers = useRef(props);
   handlers.current = props;
+  // Author lookups for role styles (MessageList resolves each author once).
+  const membersById = useMemo(() => new Map((members ?? []).map((m) => [m.id, m])), [members]);
 
   const { prefs } = useUserSettings();
   const chatPrefs = prefs.chat;
@@ -489,6 +491,9 @@ export default function ChatArea(props) {
         currentUserId={currentUser?.id ?? null}
         ctx={ctx}
         memberColors={memberColors}
+        serverId={channel?.server_id ?? null}
+        membersById={membersById}
+        rolesById={rolesById}
         hasMoreHistory={hasMoreHistory}
         hasNewerHistory={hasNewerHistory}
         isLoadingHistory={isLoadingHistory}

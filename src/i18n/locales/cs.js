@@ -2976,4 +2976,8 @@ export default {
   "apiError.INVALID_EMOJI": "Použij jediné emoji.",
   "apiError.INVALID_EXPIRY": "Vyber, kdy se má stav vymazat.",
   "apiError.UNKNOWN_COSMETIC": "Tato položka už není dostupná.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identita",
+  "admin.tab.cosmetics": "Kosmetika",
 };

@@ -2975,4 +2975,8 @@ export default {
   "apiError.INVALID_EMOJI": "Naudok vieną jaustuką.",
   "apiError.INVALID_EXPIRY": "Pasirink, kada išvalyti būseną.",
   "apiError.UNKNOWN_COSMETIC": "Šis elementas nebeprieinamas.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Tapatybė",
+  "admin.tab.cosmetics": "Kosmetika",
 };

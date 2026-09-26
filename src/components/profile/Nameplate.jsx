@@ -26,7 +26,10 @@ export default function Nameplate({
       data-nameplate={item.slug}
       style={{
         ...style,
-        backgroundImage: `linear-gradient(90deg, ${scrim} 0%, color-mix(in srgb, ${scrim} 70%, transparent) 38%, transparent 72%), url("${item.asset_url}")`
+        // The scrim holds solid behind the avatar and most of the name, so
+        // role colours, tags and badges keep their contrast; the art shows
+        // through on the right, where Discord's nameplates carry theirs.
+        backgroundImage: `linear-gradient(90deg, ${scrim} 0%, ${scrim} 22%, color-mix(in srgb, ${scrim} 82%, transparent) 50%, transparent 88%), url("${item.asset_url}")`
       }}
       {...rest}
     >

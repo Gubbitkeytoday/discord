@@ -3,8 +3,6 @@ import { Reply, AlertTriangle, RotateCcw, Check, Clock, X, Pin, CornerUpRight } 
 import { t } from '../../i18n/index.jsx';
 import { formatDateDivider, formatTime, formatFullTimestamp } from '../../utils/messageGrouping';
 import { mentionsUser } from '../../utils/mentions';
-import { defaultAvatar } from '../../utils/avatar';
-import { proxiedImageUrl } from '../../utils/media';
 import { guessLang } from '../../chat/langGuess.js';
 import { useLongPress } from '../../hooks/useLongPress';
 import LinkEmbed from '../LinkEmbed';
@@ -19,6 +17,8 @@ import ImageGallery from './ImageGallery';
 import ReactionChip from './ReactionChip';
 import MessageActions from './MessageActions';
 import SystemMessage, { SYSTEM_TYPES } from './SystemMessage';
+import AvatarWithDecoration from '../profile/AvatarWithDecoration';
+import MemberName from '../profile/MemberName';
 
 // Errors a retry cannot fix: offering "Retry" there only repeats the refusal.
 const FINAL_ERRORS = new Set([
@@ -88,7 +88,7 @@ function EditForm({ msg, actions }) {
  */
 function MessageRow({
   msg, ctx, grouped, dateDivider, firstUnread, isActive, isFocusTarget, isEditing,
-  roleColor, burst, revealed, touchOpen
+  identity = null, look = null, burst, revealed, touchOpen
 }) {
   const { actions, currentUserId } = ctx;
   const longPress = useLongPress(() => actions.openSheet(msg), { delay: ctx.longPressMs });
@@ -238,16 +238,17 @@ function MessageRow({
             aria-label={authorName}
             onClick={() => actions.openProfile(msg.user_id)}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); actions.userMenu(msg.user_id, e.clientX, e.clientY); }}
-            className={`w-10 h-10 shrink-0 ${msg.reply_to_id ? 'mt-6' : 'mt-0.5'} rounded-full overflow-hidden hover:opacity-80 transition-opacity`}
+            className={`w-10 h-10 shrink-0 ${msg.reply_to_id ? 'mt-6' : 'mt-0.5'} rounded-full hover:opacity-80 transition-opacity`}
           >
-            <img
-              src={proxiedImageUrl(msg.avatar_url || defaultAvatar(msg.user_id))}
-              alt=""
-              width={40}
-              height={40}
-              loading="lazy"
-              decoding="async"
-              className="w-10 h-10 rounded-full object-cover"
+            {/* The decoration animates while the message is hovered or
+                focused, never while it just sits in the history. */}
+            <AvatarWithDecoration
+              src={msg.avatar_url}
+              userId={msg.user_id}
+              size={40}
+              decoration={identity?.decoration}
+              context="list"
+              hovered={isActive}
             />
           </button>
         )}
@@ -286,13 +287,18 @@ function MessageRow({
                 tabIndex={innerTab}
                 onClick={() => actions.openProfile(msg.user_id)}
                 onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); actions.userMenu(msg.user_id, e.clientX, e.clientY); }}
-                className="font-semibold text-sm hover:underline role-colored inline-flex items-center gap-1.5 min-w-0 truncate"
-                style={{ color: roleColor || 'var(--color-d-strong)' }}
+                className="font-semibold text-sm text-d-strong hover:underline inline-flex items-center min-w-0 max-w-full"
               >
-                {a11yPrefs.roleColors === 'dots' && roleColor && (
-                  <span className="role-dot w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: roleColor }} aria-hidden="true" />
-                )}
-                {authorName}
+                {/* Role colour / gradient (contrast-guarded), the author's
+                    name font, role icon, 🌱 and server tag. */}
+                <MemberName
+                  name={authorName}
+                  identity={identity}
+                  styleRole={look?.styleRole ?? null}
+                  iconRole={look?.iconRole ?? null}
+                  surface="chat"
+                  compact
+                />
               </button>
               {Boolean(msg.is_bot) && (
                 <span className="bg-d-brand text-white text-[11px] font-bold px-1.5 rounded">BOT</span>

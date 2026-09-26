@@ -371,7 +371,7 @@ function GuildProfileEditor({ serverId, onToast }) {
             <textarea
               rows={2}
               value={draft.bio}
-              onChange={(e) => setDraft({ ...draft, bio: e.target.value.slice(0, 190) })}
+              onChange={(e) => setDraft({ ...draft, bio: e.target.value.slice(0, 300) })}
               placeholder={profile?.effective?.bio ?? ''}
               className={`${field} resize-none`}
             />

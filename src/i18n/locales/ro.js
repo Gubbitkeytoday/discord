@@ -2968,4 +2968,8 @@ export default {
   "apiError.INVALID_EMOJI": "Folosește un singur emoji.",
   "apiError.INVALID_EXPIRY": "Alege când se șterge statusul.",
   "apiError.UNKNOWN_COSMETIC": "Elementul nu mai este disponibil.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitate",
+  "admin.tab.cosmetics": "Cosmetice",
 };

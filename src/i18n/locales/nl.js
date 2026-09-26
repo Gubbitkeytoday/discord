@@ -2908,4 +2908,8 @@ export default {
   "apiError.INVALID_EMOJI": "Gebruik één emoji.",
   "apiError.INVALID_EXPIRY": "Kies wanneer de status gewist moet worden.",
   "apiError.UNKNOWN_COSMETIC": "Dat item is niet meer beschikbaar.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identiteit",
+  "admin.tab.cosmetics": "Cosmetica",
 };

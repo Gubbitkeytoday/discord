@@ -2908,4 +2908,8 @@ export default {
   "apiError.INVALID_EMOJI": "एक ही इमोजी इस्तेमाल करें।",
   "apiError.INVALID_EXPIRY": "चुनें कि स्टेटस कब हटे।",
   "apiError.UNKNOWN_COSMETIC": "यह आइटम अब उपलब्ध नहीं है।",
+
+  // --- integration (round 4) ---
+  "settings.identity": "पहचान",
+  "admin.tab.cosmetics": "कॉस्मेटिक्स",
 };

@@ -54,9 +54,13 @@ export default function ProfilePopout({
         role="dialog"
         aria-modal="true"
         aria-label={t('profiles.profileOf', { name })}
+        // Focus lands on the popout itself (its name is read out), not in
+        // the private-note field — that would raise the keyboard on a phone.
+        tabIndex={-1}
+        data-initial-focus
         className={narrow
-          ? 'absolute inset-x-0 bottom-0 max-h-[88dvh] overflow-y-auto rounded-t-2xl shadow-2xl'
-          : 'absolute max-h-[calc(100dvh-16px)] overflow-y-auto rounded-xl shadow-2xl ring-1 ring-black/20'}
+          ? 'absolute inset-x-0 bottom-0 max-h-[88dvh] overflow-y-auto rounded-t-2xl shadow-2xl focus:outline-none'
+          : 'absolute max-h-[calc(100dvh-16px)] overflow-y-auto rounded-xl shadow-2xl ring-1 ring-black/20 focus:outline-none'}
         style={narrow ? undefined : { width: WIDTH, left: pos?.left ?? -9999, top: pos?.top ?? 0 }}
       >
         <ProfileCard
