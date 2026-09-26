@@ -1,7 +1,8 @@
 import React from 'react';
 import { Monitor, Sun, Moon, Circle, Check } from 'lucide-react';
 import { useUserSettings } from '../../hooks/useUserSettings';
-import { useI18n, LOCALES, t } from '../../i18n/index.jsx';
+import { t } from '../../i18n/index.jsx';
+import { LanguageList } from '../../i18n/LanguagePicker.jsx';
 import { DEFAULT_AVATAR } from '../../utils/avatar';
 import {
   PageHeader, Section, SettingToggle, RadioList, Slider, ResetButton, Divider, Segmented
@@ -35,7 +36,6 @@ const DISPLAY_MODES = () => [
 export default function AppearanceTab() {
   const { prefs, update, reset } = useUserSettings();
   const appearance = prefs.appearance;
-  const { locale, setLocale } = useI18n();
   const set = (patch) => update('appearance', patch);
 
   return (
@@ -176,24 +176,7 @@ export default function AppearanceTab() {
 
       {/* Language lives here, as it does in Discord's redesigned settings. */}
       <Section title={t('appearance.language')} description={t('appearance.languageHint')}>
-        <div className="flex flex-wrap gap-2">
-          {LOCALES.map((entry) => (
-            <button
-              key={entry.code}
-              type="button"
-              onClick={() => setLocale(entry.code)}
-              aria-pressed={locale === entry.code}
-              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors
-                ${locale === entry.code
-                  ? 'border-d-brand bg-d-brand/10 text-d-strong'
-                  : 'border-d-divider bg-d-surface text-d-text2 hover:border-d-control hover:text-d-strong'}`}
-            >
-              <span aria-hidden="true">{entry.flag}</span>
-              {entry.label}
-              {locale === entry.code && <Check className="h-3.5 w-3.5 text-d-brand" />}
-            </button>
-          ))}
-        </div>
+        <LanguageList />
       </Section>
 
       <ResetButton onClick={() => reset('appearance')}>{t('appearance.resetDefaults')}</ResetButton>
