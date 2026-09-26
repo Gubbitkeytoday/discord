@@ -63,7 +63,7 @@ export default function InviteModal({ server, channelId = null, hideLink = false
       >
         <header className="flex items-start justify-between gap-4 px-4 pt-4">
           <div className="min-w-0">
-            <h2 id="invite-title" className="text-base font-bold text-d-strong truncate">
+            <h2 id="invite-title" className="text-base font-bold text-d-strong line-clamp-2 break-words">
               {t('invite.title', { server: server.name })}
             </h2>
             <p className="text-xs text-d-text3 mt-0.5">{t('invite.hint')}</p>
@@ -81,7 +81,8 @@ export default function InviteModal({ server, channelId = null, hideLink = false
                 id="invite-link"
                 readOnly
                 value={busy && !invite ? t('common.loading') : hideLink ? '•'.repeat(24) : link}
-                onFocus={(e) => e.target.select()}
+                onFocus={(e) => { e.target.select(); e.target.scrollLeft = e.target.scrollWidth; }}
+                ref={(el) => { if (el) el.scrollLeft = el.scrollWidth; }}
                 className="flex-1 min-w-0 bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge font-mono"
               />
               <button

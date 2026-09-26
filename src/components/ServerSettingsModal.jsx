@@ -3,7 +3,7 @@ import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
   ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3,
-  ChevronUp, ChevronDown
+  ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ShieldCheck, LogOut, Filter, Hash, Folder
 } from 'lucide-react';
 
 import { useDialog, UnsavedBar, useReportDirty, SettingToggle } from './settings/primitives';
@@ -14,11 +14,14 @@ import WebhooksTab from './settings/WebhooksTab';
 import ChannelPermissionsTab from './settings/ChannelPermissionsTab';
 import OnboardingTab from './settings/OnboardingTab';
 import InsightsTab from './settings/InsightsTab';
-import { t, localeTag, useLocaleCode } from '../i18n/index.jsx';
+import SafetyTab from './admin/SafetyTab';
+import ModerationDialog from './admin/ModerationDialog';
+import TypeToConfirmDialog from './admin/TypeToConfirmDialog';
+import { t, localeTag, useLocaleCode, formatDate, formatRelative } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
 import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
-  permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
+  permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS, ROLE_PRESETS
 } from '../utils/permissionCatalog';
 import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
 
@@ -54,6 +57,7 @@ const tabGroups = () => [
     key: 'moderation',
     title: t('settings.groupModeration'),
     tabs: [
+      { key: 'safety', label: t('adm.safetySetup'), icon: ShieldCheck, perm: 'MANAGE_GUILD' },
       { key: 'automod', label: t('settings.automod'), icon: ShieldAlert, perm: 'MANAGE_GUILD' },
       { key: 'reports', label: t('settings.reports'), icon: Flag, perm: 'MANAGE_MESSAGES' },
       { key: 'audit', label: t('settings.auditLog'), icon: ScrollText, perm: 'VIEW_AUDIT_LOG' },
@@ -81,13 +85,38 @@ const tabGroups = () => [
 const auditLabels = () => ({
   SERVER_CREATE: t('audit.SERVER_CREATE'), SERVER_UPDATE: t('audit.SERVER_UPDATE'),
   SERVER_OWNER_TRANSFER: t('audit.SERVER_OWNER_TRANSFER'),
-  CHANNEL_CREATE: t('server.createChannel'), CHANNEL_UPDATE: t('audit.CHANNEL_UPDATE'), CHANNEL_DELETE: t('audit.CHANNEL_DELETE'),
+  CHANNEL_CREATE: t('adm.audit.CHANNEL_CREATE'), CHANNEL_UPDATE: t('audit.CHANNEL_UPDATE'), CHANNEL_DELETE: t('audit.CHANNEL_DELETE'),
   ROLE_CREATE: t('audit.ROLE_CREATE'), ROLE_UPDATE: t('audit.ROLE_UPDATE'), ROLE_DELETE: t('audit.ROLE_DELETE'),
   MEMBER_ROLE_UPDATE: t('audit.MEMBER_ROLE_UPDATE'), MEMBER_KICK: t('audit.MEMBER_KICK'),
   MEMBER_BAN_ADD: t('audit.MEMBER_BAN_ADD'), MEMBER_BAN_REMOVE: t('bans.unban'),
   MEMBER_TIMEOUT: t('audit.MEMBER_TIMEOUT'), MEMBER_UPDATE: t('audit.MEMBER_UPDATE'),
-  EMOJI_CREATE: t('audit.EMOJI_CREATE'), EMOJI_DELETE: t('audit.EMOJI_DELETE'), INVITE_DELETE: t('invites.revoke')
+  EMOJI_CREATE: t('audit.EMOJI_CREATE'), EMOJI_DELETE: t('audit.EMOJI_DELETE'), INVITE_DELETE: t('invites.revoke'),
+  LOCKDOWN_START: t('adm.audit.LOCKDOWN_START'), LOCKDOWN_LIFT: t('adm.audit.LOCKDOWN_LIFT'),
+  AUTOMOD_BLOCK: t('adm.audit.AUTOMOD_BLOCK'), AUTOMOD_ALERT: t('adm.audit.AUTOMOD_ALERT'),
+  RAID_DETECTED: t('adm.audit.RAID_DETECTED'),
+  CHANNEL_OVERWRITE_UPDATE: t('adm.audit.CHANNEL_OVERWRITE_UPDATE'),
+  CHANNEL_OVERWRITE_DELETE: t('adm.audit.CHANNEL_OVERWRITE_DELETE'),
+  MEMBER_MOVE: t('adm.audit.MEMBER_MOVE'), MEMBER_DISCONNECT: t('adm.audit.MEMBER_DISCONNECT'),
+  TEMPLATE_CREATE: t('adm.audit.TEMPLATE_CREATE'),
+  STICKER_CREATE: t('adm.audit.STICKER_CREATE'), STICKER_DELETE: t('adm.audit.STICKER_DELETE')
 });
+
+/** Audit filter groups, Discord-style ("All actions", "Members", …). */
+const AUDIT_FILTERS = () => [
+  { value: '', label: t('adm.auditAllActions') },
+  { value: 'MEMBER_*', label: t('adm.auditMembers') },
+  { value: 'CHANNEL_*', label: t('adm.auditChannels') },
+  { value: 'ROLE_*', label: t('adm.auditRoles') },
+  { value: 'AUTOMOD_*', label: t('settings.automod') },
+  { value: 'SERVER_*', label: t('adm.auditServer') },
+  { value: 'LOCKDOWN_*', label: t('adm.auditSafety') }
+];
+
+/** When an account was created, from its snowflake id (null for other ids). */
+function accountCreatedAt(id) {
+  if (!/^\d{15,20}$/.test(String(id ?? ''))) return null;
+  try { return new Date(Number((BigInt(id) >> 22n) + 1420070400000n)); } catch { return null; }
+}
 
 /**
  * Server Settings. Each tab fetches only what it needs, on first open, so
@@ -131,13 +160,17 @@ export default function ServerSettingsModal({
   );
   const visibleKeys = groups.flatMap((group) => group.tabs.map((entry) => entry.key));
   const [tab, setTab] = useState(() => (visibleKeys.includes(initialTab) ? initialTab : visibleKeys[0] ?? 'members'));
+  // Phones get Discord's drill-down: the tab list first, then one page with a
+  // back button. A deep link (Manage roles, Safety) opens straight on its page.
+  const [mobilePage, setMobilePage] = useState(() => (initialTab && initialTab !== 'overview' ? 'content' : 'nav'));
+  const currentTabLabel = groups.flatMap((g) => g.tabs).find((entry) => entry.key === tab)?.label ?? '';
 
   /** Run `fn` unless a tab is holding unsaved edits, in which case say so. */
   const guarded = (fn) => {
     if (dirty) { setNudge((n) => n + 1); return; }
     fn();
   };
-  const switchTab = (key) => guarded(() => { setTab(key); setDirty(false); });
+  const switchTab = (key) => guarded(() => { setTab(key); setDirty(false); setMobilePage('content'); });
   const requestClose = () => guarded(onClose);
 
   // One wrapper for every server-scoped call: the shared client sends the
@@ -182,12 +215,40 @@ export default function ServerSettingsModal({
   const dirtyProps = { onDirtyChange: setDirty, nudge };
 
   return (
-    <div ref={dialogRef} className="fixed inset-0 z-[80] bg-d-canvas flex max-md:flex-col max-md:overflow-y-auto" role="dialog" aria-modal="true" aria-label={t('server.settings')}>
-      {/* Left nav */}
-      <nav aria-label={t('server.settings')} className="w-56 max-md:w-full bg-d-surface shrink-0 overflow-y-auto py-14 max-md:py-3 px-3 max-md:flex max-md:gap-1 max-md:overflow-x-auto max-md:pr-14">
+    <div ref={dialogRef} className="fixed inset-0 z-[80] bg-d-canvas flex max-md:flex-col" role="dialog" aria-modal="true" aria-label={t('server.settings')}>
+      {/* Phone header: back (on a page), title, close — never over the content. */}
+      <div className="md:hidden h-14 shrink-0 flex items-center gap-2 px-2 border-b border-d-edge bg-d-surface">
+        {mobilePage === 'content' ? (
+          <button
+            type="button"
+            onClick={() => guarded(() => setMobilePage('nav'))}
+            className="w-11 h-11 flex items-center justify-center rounded-full text-d-text2 hover:text-d-strong"
+            aria-label={t('adm.backToSettings')}
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+        ) : <span className="w-2" />}
+        <h2 className="flex-1 min-w-0 truncate text-base font-bold text-d-strong">
+          {mobilePage === 'content' ? currentTabLabel : server.name}
+        </h2>
+        <button
+          type="button"
+          onClick={requestClose}
+          aria-label={t('common.close')}
+          className="w-11 h-11 rounded-full text-d-text2 hover:text-d-strong flex items-center justify-center"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Left nav (on phones: the first page of the drill-down) */}
+      <nav
+        aria-label={t('server.settings')}
+        className={`w-56 max-md:w-full bg-d-surface shrink-0 overflow-y-auto py-14 max-md:py-2 px-3 max-md:flex-1 ${mobilePage === 'content' ? 'max-md:hidden' : ''}`}
+      >
         {groups.map((group, index) => (
-          <div key={group.key} className={`max-md:contents ${index > 0 ? 'mt-4' : ''}`}>
-            <h2 className="px-2 mb-1 text-[11px] font-bold text-d-text3 uppercase tracking-wide truncate max-md:hidden">
+          <div key={group.key} className={index > 0 ? 'mt-4' : ''}>
+            <h2 className="px-2 mb-1 text-[11px] font-bold text-d-text2 uppercase tracking-wide truncate">
               {group.title ?? server.name}
             </h2>
             {group.tabs.map((entry) => (
@@ -195,12 +256,13 @@ export default function ServerSettingsModal({
                 key={entry.key}
                 onClick={() => switchTab(entry.key)}
                 aria-current={tab === entry.key ? 'page' : undefined}
-                className={`w-full max-md:w-auto max-md:shrink-0 flex items-center gap-2 px-2 py-1.5 rounded text-sm mb-0.5 transition-colors ${
-                  tab === entry.key ? 'bg-d-active text-d-strong' : 'text-d-text2 hover:bg-d-hover hover:text-d-strong'
+                className={`w-full flex items-center gap-2 px-2 py-1.5 max-md:py-3 max-md:min-h-[44px] rounded text-sm mb-0.5 transition-colors ${
+                  tab === entry.key ? 'bg-d-active text-d-strong md:bg-d-active' : 'text-d-text2 hover:bg-d-hover hover:text-d-strong'
                 }`}
               >
                 <entry.icon className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span className="truncate">{entry.label}</span>
+                <span className="truncate flex-1 text-left">{entry.label}</span>
+                <ChevronRight className="w-4 h-4 shrink-0 md:hidden text-d-text3" aria-hidden="true" />
               </button>
             ))}
           </div>
@@ -208,7 +270,10 @@ export default function ServerSettingsModal({
       </nav>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto px-10 max-md:px-4 py-14 max-md:py-6 max-w-4xl">
+      {/* No top padding on the scroller itself: sticky headers inside a tab
+          (role name, permission target) must stick to its very top edge. */}
+      <div className={`flex-1 overflow-y-auto px-10 max-md:px-4 pb-14 max-md:pb-6 max-w-4xl min-w-0 ${mobilePage === 'nav' ? 'max-md:hidden' : ''}`}>
+        <div className="h-14 max-md:h-4" aria-hidden="true" />
         {loading && <p className="text-xs text-d-text3 mb-3" role="status">{t('common.loading')}</p>}
 
         {tab === 'overview' && (
@@ -258,7 +323,13 @@ export default function ServerSettingsModal({
           />
         )}
         {tab === 'insights' && (
-          <InsightsTab server={server} channels={channels} onToast={onToast} />
+          <InsightsTab server={server} channels={channels} onToast={onToast} onOpenSafety={() => switchTab('safety')} />
+        )}
+        {tab === 'safety' && (
+          <SafetyTab
+            server={server} channels={channels} onToast={onToast}
+            onServerUpdated={onServerUpdated} onOpenAutoMod={() => switchTab('automod')}
+          />
         )}
         {tab === 'onboarding' && (
           <OnboardingTab server={server} channels={channels} roles={roles} onToast={onToast} {...dirtyProps} />
@@ -269,7 +340,7 @@ export default function ServerSettingsModal({
         {tab === 'reports' && (
           <ReportsTab reports={reports} reload={() => load('reports')} onToast={onToast} />
         )}
-        {tab === 'audit' && <AuditTab entries={auditLog} />}
+        {tab === 'audit' && <AuditTab entries={auditLog} api={api} members={members} onLoadMembers={() => load('members')} onToast={onToast} />}
       </div>
 
       {/* Close */}
@@ -283,14 +354,6 @@ export default function ServerSettingsModal({
         </button>
         <span className="block text-[11px] font-bold text-d-text2 mt-1 text-center">ESC</span>
       </div>
-      {/* Phones have no gutter for the ESC button, and no Escape key. */}
-      <button
-        onClick={requestClose}
-        aria-label={t('common.close')}
-        className="md:hidden fixed top-2 right-2 z-10 w-10 h-10 rounded-full bg-d-surface text-d-text2 hover:text-d-strong flex items-center justify-center shadow"
-      >
-        <X className="w-5 h-5" />
-      </button>
     </div>
   );
 }
@@ -324,8 +387,6 @@ function OverviewTab({
   const [saving, setSaving] = useState(false);
   const [uploadingIcon, setUploadingIcon] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleteName, setDeleteName] = useState('');
-  const [deleting, setDeleting] = useState(false);
   const dirty = Object.keys(baseline).some((key) => form[key] !== baseline[key]);
   useReportDirty(dirty, onDirtyChange);
 
@@ -338,15 +399,10 @@ function OverviewTab({
     setForm((current) => (Object.keys(previous).every((key) => current[key] === previous[key]) ? baseline : current));
   }, [baseline]);
 
+  // Throws on failure so the confirm dialog stays open and shows why.
   const deleteServer = async () => {
-    setDeleting(true);
-    try {
-      await api('', { method: 'DELETE' });
-      onServerDeleted?.();
-    } catch (err) {
-      onToast?.(err.message, { type: 'error' });
-      setDeleting(false);
-    }
+    await api('', { method: 'DELETE' });
+    onServerDeleted?.();
   };
 
   const uploadIcon = async (input) => {
@@ -534,38 +590,21 @@ function OverviewTab({
         <div className="border border-d-danger/40 rounded-lg p-4 mb-6">
           <h2 className="text-sm font-bold text-d-danger mb-1">{t('settings.dangerZone')}</h2>
           <p className="text-xs text-d-text3 mb-3">{t('settings.deleteServerHint')}</p>
-          {confirmDelete ? (
-            <div className="space-y-2">
-              <label className="block">
-                <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">
-                  {t('settings.typeServerName', { name: server.name })}
-                </span>
-                <input
-                  value={deleteName}
-                  onChange={(e) => setDeleteName(e.target.value)}
-                  className="w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-danger"
-                />
-              </label>
-              <div className="flex gap-2">
-                <button
-                  onClick={deleteServer}
-                  disabled={deleteName.trim() !== server.name || deleting}
-                  className="bg-d-danger hover:bg-red-600 disabled:opacity-40 text-white text-xs font-semibold px-4 py-2 rounded"
-                >
-                  {deleting ? t('common.saving') : t('server.delete')}
-                </button>
-                <button onClick={() => setConfirmDelete(false)} className="text-xs text-d-text3 hover:underline">
-                  {t('common.cancel')}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              className="bg-d-danger/10 hover:bg-d-danger hover:text-white text-d-danger text-xs font-semibold px-4 py-2 rounded flex items-center gap-2 transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> {t('server.delete')}
-            </button>
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="min-h-[36px] bg-d-danger/10 hover:bg-d-danger hover:text-white text-d-danger text-xs font-semibold px-4 py-2 rounded flex items-center gap-2 transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" /> {t('server.delete')}
+          </button>
+          {confirmDelete && (
+            <TypeToConfirmDialog
+              title={t('server.deleteTitle', { name: server.name })}
+              body={t('adm.deleteServerBody')}
+              expected={server.name}
+              confirmLabel={t('server.delete')}
+              onConfirm={deleteServer}
+              onClose={() => setConfirmDelete(false)}
+            />
           )}
         </div>
       )}
@@ -757,6 +796,8 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
   const [saving, setSaving] = useState(false);
   const [dragId, setDragId] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmAdmin, setConfirmAdmin] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
   // Switching to another role with edits pending is refused the same way
   // leaving the tab is: the save bar shakes.
   const [localNudge, setLocalNudge] = useState(0);
@@ -821,12 +862,16 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
     setSelectedId(id);
   };
 
-  const createRole = async () => {
+  // New roles land at the bottom (just above @everyone), as on Discord.
+  const createRole = async (preset = null) => {
     if (dirty) { setLocalNudge((n) => n + 1); return; }
+    setShowPresets(false);
     try {
       const created = await api('/roles', {
         method: 'POST',
-        body: { name: t('roles.newRoleName'), color: '#99aab5', permissions: '0' }
+        body: preset
+          ? { name: t(`adm.rolePreset.${preset.key}`), color: preset.color, permissions: preset.permissions, hoist: preset.hoist }
+          : { name: t('roles.newRoleName'), color: '#99aab5', permissions: '0' }
       });
       await reload();
       // Land on the new role, ready to be named — as Discord does.
@@ -861,21 +906,58 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
 
   const isAdmin = draft && hasBit(draft.permissions, 'ADMINISTRATOR');
 
+  /** Turning ADMINISTRATOR on is confirmed; turning it off is not. */
+  const toggleAdministrator = () => {
+    if (!hasBit(draft.permissions, 'ADMINISTRATOR')) { setConfirmAdmin(true); return; }
+    setDraft({ ...draft, permissions: toggleBit(draft.permissions, 'ADMINISTRATOR') });
+  };
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <h1 className="text-xl font-bold text-d-strong">{t('settings.roles')}</h1>
-        <button
-          onClick={createRole}
-          className="flex items-center gap-1 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-1.5 rounded transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" /> {t('roles.create')}
-        </button>
+        <div className="relative flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowPresets((v) => !v)}
+            aria-expanded={showPresets}
+            aria-controls="role-presets"
+            className="min-h-[32px] flex items-center gap-1 bg-d-surface hover:bg-d-hover text-d-strong text-xs font-semibold px-3 py-1.5 rounded border border-d-divider"
+          >
+            {t('adm.rolePresets')} <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+          <button
+            onClick={() => createRole()}
+            className="min-h-[32px] flex items-center gap-1 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-1.5 rounded transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" aria-hidden="true" /> {t('roles.create')}
+          </button>
+          {showPresets && (
+            <ul id="role-presets" className="absolute right-0 top-full mt-1 z-20 w-64 bg-d-sunken border border-d-divider rounded-md shadow-xl p-1">
+              {ROLE_PRESETS.map((preset) => (
+                <li key={preset.key}>
+                  <button
+                    type="button"
+                    onClick={() => createRole(preset)}
+                    className="w-full text-left px-2 py-2 rounded hover:bg-d-brand hover:text-white text-d-text group/preset"
+                  >
+                    <span className="flex items-center gap-2 text-sm font-semibold">
+                      <span className="w-3 h-3 rounded-full" style={{ backgroundColor: preset.color }} aria-hidden="true" />
+                      {t(`adm.rolePreset.${preset.key}`)}
+                    </span>
+                    <span className="block text-[11px] text-d-text2 group-hover/preset:text-white">{t(`adm.rolePreset.${preset.key}Hint`)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
+      <p className="text-xs text-d-text2 mb-4">{t('adm.rolesOrderHint')}</p>
 
-      <div className="flex gap-6">
+      <div className="flex max-md:flex-col gap-6">
         {/* Role list, highest first — the same order that decides hierarchy. */}
-        <div className="w-52 shrink-0 space-y-0.5">
+        <div className="md:w-52 w-full shrink-0 space-y-0.5 max-md:max-h-56 max-md:overflow-y-auto">
           {roles.map((role, index) => {
             const movable = !role.is_everyone;
             const lastMovable = roles.filter((r) => !r.is_everyone).length - 1;
@@ -940,6 +1022,11 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
         {/* Editor */}
         {draft && (
           <div className="flex-1 min-w-0">
+            {/* Which role you are editing stays in view while you scroll. */}
+            <div className="sticky top-0 z-10 bg-d-canvas py-2 mb-2 border-b border-d-divider flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: draft.color || '#99aab5' }} aria-hidden="true" />
+              <span className="text-sm font-bold text-d-strong truncate">{t('adm.editingRole', { name: draft.name || selected?.name || '' })}</span>
+            </div>
             {Boolean(draft.is_everyone) && (
               <p className="text-xs text-d-text3 bg-d-surface rounded p-2.5 mb-4">
                 {t('roles.everyoneNote')}
@@ -975,7 +1062,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                   </div>
                 </div>
 
-                <div className="flex gap-6 mt-4">
+                <div className="flex max-sm:flex-col gap-3 sm:gap-6 mt-4">
                   <Toggle
                     label={t('roles.displaySeparately')}
                     checked={Boolean(draft.hoist)}
@@ -1001,7 +1088,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                   onClick={() => setConfirmDelete(draft)}
                   className="flex items-center gap-1 text-xs text-d-danger hover:underline"
                 >
-                  <Trash2 className="w-3.5 h-3.5" /> {t('audit.ROLE_DELETE')}
+                  <Trash2 className="w-3.5 h-3.5" aria-hidden="true" /> {t('roles.delete')}
                 </button>
               )}
             </div>
@@ -1037,14 +1124,21 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
               ))}
 
               <div>
-                <h4 className="text-[11px] font-bold text-d-text3 uppercase mb-2">{t('roles.advanced')}</h4>
+                <h4 className="text-[11px] font-bold text-d-text2 uppercase mb-2">{t('roles.advanced')}</h4>
                 <PermissionRow
                   label={t('roles.administrator')}
                   description={t('roles.administratorHint')}
                   checked={hasBit(draft.permissions, 'ADMINISTRATOR')}
                   danger
-                  onToggle={() => setDraft({ ...draft, permissions: toggleBit(draft.permissions, 'ADMINISTRATOR') })}
+                  onToggle={toggleAdministrator}
                 />
+                {isAdmin && (
+                  <div role="alert" className="flex items-start gap-2 bg-d-danger/10 border border-d-danger/50 rounded p-2.5 mt-2">
+                    <AlertTriangle className="w-4 h-4 text-d-danger shrink-0 mt-0.5" aria-hidden="true" />
+                    <p className="text-xs text-d-text">{t('adm.adminWarningStrong')}</p>
+                  </div>
+                )}
+                <p className="text-[11px] text-d-text2 mt-3">{t('adm.mutedRoleTip')}</p>
               </div>
             </div>
 
@@ -1061,11 +1155,21 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
         )}
       </div>
 
+      {confirmAdmin && (
+        <ConfirmModal
+          title={t('adm.adminConfirmTitle', { name: draft?.name ?? '' })}
+          body={t('adm.adminConfirmBody')}
+          confirmLabel={t('adm.adminConfirm')}
+          onConfirm={() => setDraft((d) => ({ ...d, permissions: toggleBit(d.permissions, 'ADMINISTRATOR') }))}
+          onClose={() => setConfirmAdmin(false)}
+        />
+      )}
+
       {confirmDelete && (
         <ConfirmModal
           title={t('roles.deleteTitle', { name: confirmDelete.name })}
           body={t('roles.deleteBody', { count: confirmDelete.member_count ?? 0 })}
-          confirmLabel={t('audit.ROLE_DELETE')}
+          confirmLabel={t('roles.delete')}
           onConfirm={() => remove(confirmDelete)}
           onClose={() => setConfirmDelete(null)}
         />
@@ -1075,17 +1179,19 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
 }
 
 function PermissionRow({ label, description, checked, onToggle, danger, forced }) {
-  const on = checked || forced;
+  const on = Boolean(checked || forced);
+  const descId = useMemo(() => `perm-desc-${Math.random().toString(36).slice(2, 9)}`, []);
   return (
     <div className="flex items-start justify-between gap-4 py-2 border-b border-d-divider/40">
       <div className="min-w-0">
         <p className={`text-sm ${danger ? 'text-d-danger font-semibold' : 'text-d-strong'}`}>{label}</p>
-        <p className="text-[11px] text-d-text3">{description}</p>
+        <p id={descId} className="text-[11px] text-d-text2">{description}</p>
       </div>
       <button
         role="switch"
         aria-checked={on}
         aria-label={label}
+        aria-describedby={descId}
         disabled={forced}
         onClick={onToggle}
         className={`shrink-0 w-10 h-6 rounded-full transition-colors relative ${
@@ -1104,8 +1210,9 @@ function Toggle({ label, checked, onChange }) {
   return (
     <label className="flex items-center gap-2 cursor-pointer">
       <button
-        role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
-        className={`w-10 h-6 rounded-full transition-colors relative ${checked ? 'bg-d-online' : 'bg-d-text4'}`}
+        type="button"
+        role="switch" aria-checked={Boolean(checked)} aria-label={label} onClick={() => onChange(!checked)}
+        className={`w-10 h-6 shrink-0 rounded-full transition-colors relative ${checked ? 'bg-d-online' : 'bg-d-text4'}`}
       >
         <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${checked ? 'left-5' : 'left-1'}`} />
       </button>
@@ -1122,7 +1229,12 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
   const [nicknameFor, setNicknameFor] = useState(null);
   const [nickname, setNickname] = useState('');
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState(null);   // { kind: 'kick' | 'ban' | 'transfer', member }
+  const [confirm, setConfirm] = useState(null);   // { kind: 'transfer', member }
+  const [modAction, setModAction] = useState(null);   // { kind: 'ban'|'kick'|'timeout', targets }
+  const [selected, setSelected] = useState(() => new Set());
+  const [joinedWithin, setJoinedWithin] = useState('');   // '' | minutes
+  const [sort, setSort] = useState('oldest');
+  const nameOf = (m) => m.nickname || m.display_name || m.username;
 
   const saveNickname = async (member) => {
     setBusy(true);
@@ -1165,13 +1277,37 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return members;
-    return members.filter((m) =>
-      (m.display_name ?? '').toLowerCase().includes(q) ||
-      (m.username ?? '').toLowerCase().includes(q) ||
-      (m.nickname ?? '').toLowerCase().includes(q)
-    );
-  }, [members, search]);
+    let list = members;
+    if (q) {
+      list = list.filter((m) =>
+        (m.display_name ?? '').toLowerCase().includes(q) ||
+        (m.username ?? '').toLowerCase().includes(q) ||
+        (m.nickname ?? '').toLowerCase().includes(q)
+      );
+    }
+    if (joinedWithin === 'timedout') {
+      const now = new Date().toISOString();
+      list = list.filter((m) => m.timeout_until && m.timeout_until > now);
+    } else if (joinedWithin) {
+      const since = Date.now() - Number(joinedWithin) * 60_000;
+      list = list.filter((m) => Date.parse(m.joined_at) >= since);
+    }
+    const byJoin = (a, b) => Date.parse(a.joined_at) - Date.parse(b.joined_at);
+    return [...list].sort(sort === 'newest' ? (a, b) => byJoin(b, a) : byJoin);
+  }, [members, search, joinedWithin, sort]);
+
+  /** Who a moderator may select: never the owner, never themselves. */
+  const selectable = (m) => server.owner_id !== m.id && m.id !== currentUserId;
+  const selectableVisible = filtered.filter(selectable);
+  const allSelected = selectableVisible.length > 0 && selectableVisible.every((m) => selected.has(m.id));
+  const toggleSelected = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectedMembers = members.filter((m) => selected.has(m.id));
+  const openBulk = (kind) => setModAction({ kind, targets: selectedMembers.map((m) => ({ id: m.id, name: nameOf(m) })) });
+  const canBulk = can('BAN_MEMBERS') || can('KICK_MEMBERS') || can('MODERATE_MEMBERS');
 
   const toggleRole = async (member, role) => {
     const has = member.roles.some((r) => r.id === role.id);
@@ -1183,35 +1319,114 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
     finally { setBusy(false); }
   };
 
-  const kick = async (member, reason) => {
-    await api(`/kicks/${member.id}`, { method: 'POST', body: { reason: reason || t('audit.reasonFromSettings') } });
+  const afterModeration = async ({ done, kind, minutes }) => {
+    setSelected(new Set());
     await reload();
-    onToast?.(t('members.kicked', { name: member.display_name }), { type: 'success', ttl: 2500 });
-  };
-
-  const ban = async (member, reason) => {
-    await api(`/bans/${member.id}`, { method: 'POST', body: { reason: reason || t('audit.reasonFromSettings') } });
-    await reload();
-    onToast?.(t('members.banned', { name: member.display_name }), { type: 'success', ttl: 2500 });
+    if (done.length === 0) return;
+    const message = done.length === 1
+      ? (kind === 'ban' ? t('members.banned', { name: done[0].name })
+        : kind === 'kick' ? t('members.kicked', { name: done[0].name })
+        : t('members.timedOut', { name: done[0].name, minutes }))
+      : t(`adm.${kind}Done`, { count: done.length });
+    onToast?.(message, { type: 'success', ttl: 3000 });
   };
 
   return (
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-1">{t('members.count', { count: members.length })}</h1>
-      <div className="relative mb-4 mt-4">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t('members.searchMembers')}
-          className="w-full bg-d-base text-sm text-d-strong px-3 py-2 pr-8 rounded border border-d-edge focus:outline-none focus:border-d-brand"
-        />
-        <Search className="w-4 h-4 text-d-text4 absolute right-2.5 top-2.5" />
+      <div className="flex max-sm:flex-col gap-2 mb-3 mt-4">
+        <div className="relative flex-1">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t('members.searchMembers')}
+            aria-label={t('members.searchMembers')}
+            className="w-full min-h-[40px] bg-d-base text-sm text-d-strong px-3 py-2 pr-8 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+          />
+          <Search className="w-4 h-4 text-d-text3 absolute right-2.5 top-3" aria-hidden="true" />
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-d-text2">
+          <Filter className="w-3.5 h-3.5" aria-hidden="true" />
+          <span className="sr-only">{t('adm.memberFilter')}</span>
+          <select
+            value={joinedWithin}
+            onChange={(e) => setJoinedWithin(e.target.value)}
+            className="min-h-[40px] bg-d-base text-sm text-d-strong px-2 py-2 rounded border border-d-edge focus:outline-none"
+          >
+            <option value="">{t('adm.filterAll')}</option>
+            <option value="10">{t('adm.filterJoined10m')}</option>
+            <option value="60">{t('adm.filterJoined1h')}</option>
+            <option value="1440">{t('adm.filterJoined24h')}</option>
+            <option value="timedout">{t('adm.filterTimedOut')}</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-d-text2">
+          <span className="sr-only">{t('adm.sortBy')}</span>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+            className="min-h-[40px] bg-d-base text-sm text-d-strong px-2 py-2 rounded border border-d-edge focus:outline-none"
+          >
+            <option value="oldest">{t('adm.sortOldest')}</option>
+            <option value="newest">{t('adm.sortNewest')}</option>
+          </select>
+        </label>
       </div>
 
+      {canBulk && selectableVisible.length > 0 && (
+        <div className={`sticky top-0 z-10 flex flex-wrap items-center gap-2 mb-2 px-3 py-2 rounded-lg ${selected.size ? 'bg-d-brand/15 border border-d-brand/50' : 'bg-d-surface'}`}>
+          <label className="flex items-center gap-2 text-sm text-d-text min-h-[32px]">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => setSelected(allSelected ? new Set() : new Set(selectableVisible.map((m) => m.id)))}
+              className="w-4 h-4 accent-[var(--color-d-brand)]"
+            />
+            {selected.size ? t('adm.selectedCount', { count: selected.size }) : t('adm.selectAll')}
+          </label>
+          {selected.size > 0 && (
+            <div className="flex flex-wrap gap-2 ml-auto">
+              {can('MODERATE_MEMBERS') && (
+                <button type="button" onClick={() => openBulk('timeout')} className="min-h-[32px] flex items-center gap-1 px-3 py-1 rounded bg-d-canvas text-d-strong text-xs font-semibold border border-d-divider hover:bg-d-hover">
+                  <Clock className="w-3.5 h-3.5" aria-hidden="true" /> {t('members.timeout')}
+                </button>
+              )}
+              {can('KICK_MEMBERS') && (
+                <button type="button" onClick={() => openBulk('kick')} className="min-h-[32px] flex items-center gap-1 px-3 py-1 rounded bg-d-canvas text-d-strong text-xs font-semibold border border-d-divider hover:bg-d-hover">
+                  <LogOut className="w-3.5 h-3.5" aria-hidden="true" /> {t('members.kick')}
+                </button>
+              )}
+              {can('BAN_MEMBERS') && (
+                <button type="button" onClick={() => openBulk('ban')} className="min-h-[32px] flex items-center gap-1 px-3 py-1 rounded bg-d-danger text-white text-xs font-semibold hover:bg-d-dangerhover">
+                  <Ban className="w-3.5 h-3.5" aria-hidden="true" /> {t('members.ban')}
+                </button>
+              )}
+              <button type="button" onClick={() => setSelected(new Set())} className="min-h-[32px] px-2 text-xs text-d-text2 hover:underline">
+                {t('adm.clearSelection')}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="space-y-1">
-        {filtered.map((member) => (
-          <div key={member.id} className="bg-d-surface rounded-lg p-3">
+        {filtered.map((member) => {
+          const created = accountCreatedAt(member.id);
+          const newAccount = created && Date.now() - created.getTime() < 24 * 3600_000;
+          return (
+          <div key={member.id} className={`bg-d-surface rounded-lg p-3 ${selected.has(member.id) ? 'ring-2 ring-d-brand' : ''}`}>
             <div className="flex items-center gap-3">
+              {canBulk && (
+                selectable(member) ? (
+                  <input
+                    type="checkbox"
+                    checked={selected.has(member.id)}
+                    onChange={() => toggleSelected(member.id)}
+                    aria-label={t('adm.selectMember', { name: nameOf(member) })}
+                    className="w-4 h-4 shrink-0 accent-[var(--color-d-brand)]"
+                  />
+                ) : <span className="w-4 shrink-0" />
+              )}
               <img src={proxiedImageUrl(member.avatar_url || defaultAvatar(member.id))} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-d-strong truncate flex items-center gap-1.5">
@@ -1225,9 +1440,17 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                     </span>
                   )}
                 </p>
-                <p className="text-[11px] text-d-text3 truncate">
-                  @{member.username} · {t('members.joinedOn', { date: new Date(member.joined_at).toLocaleDateString(localeTag()) })}
+                <p className="text-[11px] text-d-text2 truncate">
+                  @{member.username} · {t('adm.joinedAt', { date: formatDate(member.joined_at, { dateStyle: 'medium', timeStyle: 'short' }) })}
                 </p>
+                {created && (
+                  <p className="text-[11px] text-d-text2 truncate flex items-center gap-1.5">
+                    {t('adm.accountCreated', { when: formatRelative(created) })}
+                    {newAccount && (
+                      <span className="bg-d-idle text-black text-[9px] font-bold px-1 rounded">{t('adm.newAccount')}</span>
+                    )}
+                  </p>
+                )}
               </div>
               <button
                 onClick={() => setOpenMenuFor(openMenuFor === member.id ? null : member.id)}
@@ -1324,6 +1547,7 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                             className="bg-d-base text-[11px] text-d-strong px-1.5 py-1 rounded border border-d-edge focus:outline-none"
                           >
                             <option value="">{t('members.timeout')}</option>
+                            <option value="1">{t('adm.timeout60s')}</option>
                             <option value="5">{t('members.timeout5m')}</option>
                             <option value="10">{t('members.timeout10m')}</option>
                             <option value="60">{t('members.timeout60m')}</option>
@@ -1334,10 +1558,10 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                       )
                     )}
                     {can('KICK_MEMBERS') && (
-                      <button onClick={() => setConfirm({ kind: 'kick', member })} className="text-[11px] text-d-idle hover:underline">{t('members.kick')}</button>
+                      <button onClick={() => setModAction({ kind: 'kick', targets: [{ id: member.id, name: nameOf(member) }] })} className="min-h-[28px] text-[11px] text-d-text hover:underline">{t('members.kick')}</button>
                     )}
                     {can('BAN_MEMBERS') && (
-                      <button onClick={() => setConfirm({ kind: 'ban', member })} className="text-[11px] text-d-danger hover:underline">{t('members.ban')}</button>
+                      <button onClick={() => setModAction({ kind: 'ban', targets: [{ id: member.id, name: nameOf(member) }] })} className="min-h-[28px] text-[11px] text-d-danger hover:underline">{t('members.ban')}</button>
                     )}
                     {isOwner && !member.is_bot && (
                       <button
@@ -1352,25 +1576,28 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
         {filtered.length === 0 && members.length > 0 && (
-          <p className="text-sm text-d-text3 py-4">{t('members.noMatch', { query: search.trim() })}</p>
+          <p className="text-sm text-d-text2 py-4">
+            {search.trim() ? t('members.noMatch', { query: search.trim() }) : t('adm.noMembersInFilter')}
+          </p>
         )}
       </div>
+
+      {modAction && (
+        <ModerationDialog
+          kind={modAction.kind}
+          serverId={server.id}
+          targets={modAction.targets}
+          onDone={afterModeration}
+          onClose={() => setModAction(null)}
+        />
+      )}
 
       {confirm && (() => {
         const name = confirm.member.nickname || confirm.member.display_name;
         const props = {
-          kick: {
-            title: t('members.kickTitle', { name }), body: t('members.kickBody'),
-            confirmLabel: t('members.kick'), withReason: true,
-            onConfirm: (reason) => kick(confirm.member, reason)
-          },
-          ban: {
-            title: t('members.banTitle', { name }), body: t('members.banBody'),
-            confirmLabel: t('members.ban'), withReason: true,
-            onConfirm: (reason) => ban(confirm.member, reason)
-          },
           transfer: {
             title: t('members.transferTitle', { name }), body: t('members.transferBody', { name }),
             confirmLabel: t('members.transferOwnership'),
@@ -1620,40 +1847,117 @@ function BansTab({ bans, api, reload, onToast }) {
 
 // --- Audit log ---------------------------------------------------------------
 
-function AuditTab({ entries }) {
+function AuditTab({ entries, api, onToast }) {
+  const [extra, setExtra] = useState([]);
+  const [action, setAction] = useState('');
+  const [actor, setActor] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
+  useEffect(() => { setExtra([]); setExhausted(false); }, [entries]);
+
+  const all = useMemo(() => [...entries, ...extra], [entries, extra]);
+  const actors = useMemo(() => {
+    const map = new Map();
+    for (const e of all) if (e.user_id && !map.has(e.user_id)) map.set(e.user_id, e.display_name || e.username || e.user_id);
+    return [...map.entries()];
+  }, [all]);
+  const matchesAction = (type) => !action || (action.endsWith('*') ? type.startsWith(action.slice(0, -1)) : type === action);
+  const visible = all.filter((e) => matchesAction(e.action_type) && (!actor || e.user_id === actor));
+
+  const loadMore = async () => {
+    const last = all[all.length - 1];
+    if (!last) return;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ limit: '100', before: last.id });
+      if (action) params.set('action_type', action);
+      if (actor) params.set('user_id', actor);
+      const more = await api(`/audit-log?${params}`);
+      const list = Array.isArray(more) ? more : [];
+      setExtra((prev) => [...prev, ...list.filter((e) => !all.some((x) => x.id === e.id))]);
+      if (list.length < 100) setExhausted(true);
+    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    finally { setLoadingMore(false); }
+  };
+
+  const targetNode = (entry) => {
+    const target = entry.target;
+    if (!target) return null;
+    if (target.type === 'user') {
+      return <strong className="text-d-strong">{target.name ?? target.id}</strong>;
+    }
+    if (target.type === 'channel') {
+      const Icon = target.channel_type === 'category' ? Folder : Hash;
+      return (
+        <strong className="text-d-strong inline-flex items-center gap-0.5">
+          <Icon className="w-3.5 h-3.5" aria-hidden="true" />{target.name ?? t('adm.deletedChannel')}
+        </strong>
+      );
+    }
+    if (target.type === 'role') {
+      return <strong style={target.color ? { color: target.color } : undefined} className={target.color ? '' : 'text-d-strong'}>@{target.name ?? t('adm.deletedRole')}</strong>;
+    }
+    return null;
+  };
+
   return (
     <div>
-      <h1 className="text-xl font-bold text-d-strong mb-5">{t('settings.auditLog')}</h1>
-      {entries.length === 0 && <p className="text-sm text-d-text3">{t('audit.none')}</p>}
-      <div className="space-y-1">
-        {entries.map((entry) => (
-          <div key={entry.id} className="bg-d-surface rounded-lg p-3 flex gap-3">
-            <img src={proxiedImageUrl(entry.avatar_url || defaultAvatar(entry.id))} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+      <h1 className="text-xl font-bold text-d-strong mb-3">{t('settings.auditLog')}</h1>
+      <div className="flex max-sm:flex-col gap-2 mb-4">
+        <label className="flex-1">
+          <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1">{t('adm.filterByAction')}</span>
+          <select value={action} onChange={(e) => setAction(e.target.value)}
+            className="w-full min-h-[40px] bg-d-base text-sm text-d-strong px-2 py-2 rounded border border-d-edge focus:outline-none">
+            {AUDIT_FILTERS().map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+          </select>
+        </label>
+        <label className="flex-1">
+          <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1">{t('adm.filterByUser')}</span>
+          <select value={actor} onChange={(e) => setActor(e.target.value)}
+            className="w-full min-h-[40px] bg-d-base text-sm text-d-strong px-2 py-2 rounded border border-d-edge focus:outline-none">
+            <option value="">{t('adm.allUsers')}</option>
+            {actors.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </label>
+      </div>
+      {visible.length === 0 && <p className="text-sm text-d-text2">{t('audit.none')}</p>}
+      {/* Focusable so the list can be scrolled with the keyboard. */}
+      <ol className="space-y-1" tabIndex={0} aria-label={t('settings.auditLog')}>
+        {visible.map((entry) => (
+          <li key={entry.id} className="bg-d-surface rounded-lg p-3 flex gap-3">
+            <img src={proxiedImageUrl(entry.avatar_url || defaultAvatar(entry.user_id ?? 'system'))} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
             <div className="min-w-0">
-              <p className="text-sm text-d-strong">
-                <strong>{entry.display_name ?? t('audit.system')}</strong>{' '}
-                <span className="text-d-text2">
-                  {auditLabels()[entry.action_type] ?? entry.action_type}
-                </span>
+              <p className="text-sm text-d-text break-words">
+                <strong className="text-d-strong">{entry.display_name ?? entry.username ?? t('audit.system')}</strong>{' '}
+                <span className="text-d-text2">{auditLabels()[entry.action_type] ?? entry.action_type}</span>
+                {targetNode(entry) && <>{' · '}{targetNode(entry)}</>}
               </p>
               {entry.changes?.length > 0 && (
-                <ul className="text-[11px] text-d-text3 mt-0.5 space-y-0.5">
+                <ul className="text-[11px] text-d-text2 mt-0.5 space-y-0.5">
                   {entry.changes.slice(0, 4).map((change, i) => (
-                    <li key={i}>
-                      {change.key}: <span className="line-through opacity-60">{String(change.old ?? '—').slice(0, 30)}</span>
-                      {' → '}{String(change.new ?? '—').slice(0, 30)}
+                    <li key={i} className="break-words">
+                      {change.key}: {change.old !== undefined && change.old !== null && (
+                        <><span className="line-through opacity-75">{String(change.old).slice(0, 60)}</span>{' → '}</>
+                      )}
+                      {String(change.new ?? '—').slice(0, 120)}
                     </li>
                   ))}
                 </ul>
               )}
-              <p className="text-[10px] text-d-text4 mt-0.5">
-                {new Date(entry.created_at).toLocaleString(localeTag())}
-                {entry.reason ? ` · ${entry.reason}` : ''}
+              <p className="text-[11px] text-d-text2 mt-0.5">
+                <time dateTime={entry.created_at}>{formatDate(entry.created_at, { dateStyle: 'medium', timeStyle: 'short' })}</time>
+                {entry.reason ? ` · ${t('bans.reason', { reason: entry.reason })}` : ''}
               </p>
             </div>
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
+      {all.length >= 100 && !exhausted && (
+        <button type="button" onClick={loadMore} disabled={loadingMore}
+          className="mt-3 min-h-[36px] px-4 py-2 rounded bg-d-surface hover:bg-d-hover text-sm text-d-strong disabled:opacity-50">
+          {loadingMore ? t('common.loading') : t('search.loadMore')}
+        </button>
+      )}
     </div>
   );
 }

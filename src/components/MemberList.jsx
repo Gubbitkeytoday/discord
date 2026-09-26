@@ -1,18 +1,11 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
 import { t, useLocaleCode } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
-import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
+import StatusIndicator, { statusLabel } from './admin/StatusIndicator';
 
-const FALLBACK_AVATAR = DEFAULT_AVATAR;
-
-const STATUS_COLORS = {
-  online: 'bg-d-online',
-  idle: 'bg-d-idle',
-  dnd: 'bg-d-danger',
-  offline: 'bg-d-text4',
-  invisible: 'bg-d-text4'
-};
+const LONG_PRESS_MS = 500;
 
 /**
  * Group members the way Discord does: one section per *hoisted* role, ordered
@@ -60,6 +53,22 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
   const { prefs } = useUserSettings();
   const roleColorMode = prefs.accessibility.roleColors;
 
+  // Touch has no right-click (iOS Safari never fires contextmenu), so a long
+  // press opens the member menu — the same gesture messages already use.
+  const pressTimer = useRef(null);
+  const longPressed = useRef(false);
+  const startPress = (member) => (e) => {
+    if (!onMemberContextMenu) return;
+    longPressed.current = false;
+    const touch = e.touches?.[0];
+    clearTimeout(pressTimer.current);
+    pressTimer.current = setTimeout(() => {
+      longPressed.current = true;
+      onMemberContextMenu(member, touch?.clientX ?? 0, touch?.clientY ?? 0);
+    }, LONG_PRESS_MS);
+  };
+  const cancelPress = () => clearTimeout(pressTimer.current);
+
   if (!members?.length) return null;
 
   return (
@@ -79,27 +88,40 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
               return (
                 <button
                   key={member.id}
-                  onClick={() => onSelectMember(member.id)}
+                  onClick={(e) => {
+                    if (longPressed.current) { longPressed.current = false; e.preventDefault(); return; }
+                    onSelectMember(member.id);
+                  }}
                   onContextMenu={(e) => {
                     if (!onMemberContextMenu) return;
                     e.preventDefault();
                     onMemberContextMenu(member, e.clientX, e.clientY);
                   }}
-                  className={`w-full flex items-center gap-3 px-2 py-1.5 rounded-md hover:bg-d-hover/60 transition-colors group text-left ${
-                    section.dim ? 'opacity-60 hover:opacity-100' : ''
-                  }`}
+                  onKeyDown={(e) => {
+                    if (!onMemberContextMenu) return;
+                    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                      e.preventDefault();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      onMemberContextMenu(member, rect.left + 24, rect.bottom);
+                    }
+                  }}
+                  onTouchStart={startPress(member)}
+                  onTouchEnd={cancelPress}
+                  onTouchMove={cancelPress}
+                  onTouchCancel={cancelPress}
+                  aria-label={`${member.display_name || member.username}, ${statusLabel(member.status)}${timedOut ? `, ${t('members.timedOutBadge')}` : ''}`}
+                  className="w-full min-h-[40px] flex items-center gap-3 px-2 py-1.5 rounded-md hover:bg-d-hover/60 transition-colors group text-left"
                 >
                   <div className="relative shrink-0">
                     <img
                       src={proxiedImageUrl(member.avatar_url || defaultAvatar(member.id))}
                       alt=""
-                      className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale' : ''}`}
+                      className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale opacity-60 group-hover:opacity-100' : ''}`}
                     />
-                    <span
-                      className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-d-surface ${
-                        STATUS_COLORS[member.status] ?? STATUS_COLORS.offline
-                      }`}
-                    />
+                    {/* Shape as well as colour: dot, moon, bar, ring. */}
+                    <span className="absolute -bottom-0.5 -right-0.5">
+                      <StatusIndicator status={member.status} size={12} />
+                    </span>
                   </div>
 
                   <div className="flex flex-col min-w-0">
@@ -150,14 +172,14 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                         </span>
                       )}
                       {member.role === 'owner' && (
-                        <span className="text-[10px] shrink-0" title={t('members.owner')} aria-label={t('members.owner')}>👑</span>
+                        <span className="text-[10px] shrink-0" role="img" title={t('members.owner')} aria-label={t('members.owner')}>👑</span>
                       )}
                       {timedOut && (
-                        <span className="text-[10px] shrink-0" title={t('members.timedOutBadge')} aria-label={t('members.timedOutBadge')}>⏳</span>
+                        <span className="text-[10px] shrink-0" role="img" title={t('members.timedOutBadge')} aria-label={t('members.timedOutBadge')}>⏳</span>
                       )}
                     </div>
                     {(member.custom_status || member.bio) && (
-                      <span className="text-[11px] text-d-text3 truncate">
+                      <span className="text-[11px] text-d-text2 truncate">
                         {member.custom_status || member.bio}
                       </span>
                     )}
