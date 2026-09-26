@@ -37,6 +37,7 @@ export const SETTING_DEFAULTS = {
     seasonal: 'auto',              // auto | off
     soundPack: 'classic',          // classic | soft | retro | glass
     showSendButton: true,
+    showRoleIcons: true,           // role icons beside names
     syncAcrossDevices: true
   },
   accessibility: {

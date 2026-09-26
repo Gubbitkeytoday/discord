@@ -17,6 +17,7 @@ import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAudit
 import { publicStatus, currentViewerId } from '../lib/presence.js'; // safety
 import { canViewProfile } from './users.js'; // safety
 import { validateRoleStyle, assertRoleStyleComplete, isReservedVanity } from './serverAppearance.js'; // servers
+import { checkIdentityText, assertNotReservedName, cleanBio, LIMITS as PROFILE_LIMITS } from './profiles.js'; // profiles
 
 // --- guild profile -----------------------------------------------------------
 
@@ -475,11 +476,26 @@ export async function setGuildProfile({ serverId, userId, actorId, patch }) {
   }
   const sets = []; const params = [];
   const text = (value, max) => (value ? String(value).trim().slice(0, max) : null);
+  // The per-server profile gets the same rules as the account one: the
+  // shared bio limit and cleaning, the word filter plus this server's AutoMod
+  // keyword rules, and no nickname that passes for staff or a bot.
+  for (const [field, max] of [['bio', PROFILE_LIMITS.bio], ['pronouns', PROFILE_LIMITS.pronouns], ['nickname', 32]]) {
+    const value = patch[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string' || value.trim().length > max) {
+      throw new ApiError(`${field} must be text of at most ${max} characters`, { code: 'INVALID_FIELD' });
+    }
+  }
+  const bio = patch.bio !== undefined ? (cleanBio(text(patch.bio, PROFILE_LIMITS.bio)) || null) : undefined;
+  const pronouns = patch.pronouns !== undefined ? text(patch.pronouns, PROFILE_LIMITS.pronouns) : undefined;
+  const nickname = patch.nickname !== undefined ? text(patch.nickname, 32) : undefined;
+  await checkIdentityText({ nickname, bio, pronouns }, { serverId });
+  if (nickname) await assertNotReservedName('nickname', nickname, userId);
   if (patch.avatar_url !== undefined) { sets.push('avatar_url = ?'); params.push(patch.avatar_url || null); }
   if (patch.banner_url !== undefined) { sets.push('banner_url = ?'); params.push(patch.banner_url || null); }
-  if (patch.bio !== undefined) { sets.push('bio = ?'); params.push(text(patch.bio, 190)); }
-  if (patch.pronouns !== undefined) { sets.push('pronouns = ?'); params.push(text(patch.pronouns, 40)); }
-  if (patch.nickname !== undefined) { sets.push('nickname = ?'); params.push(text(patch.nickname, 32)); }
+  if (bio !== undefined) { sets.push('bio = ?'); params.push(bio); }
+  if (pronouns !== undefined) { sets.push('pronouns = ?'); params.push(pronouns); }
+  if (nickname !== undefined) { sets.push('nickname = ?'); params.push(nickname); }
   if (sets.length) {
     await runQuery(
       `UPDATE server_members SET ${sets.join(', ')} WHERE server_id = ? AND user_id = ?`,

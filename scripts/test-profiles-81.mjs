@@ -349,6 +349,49 @@ describe('bio, names and AutoMod on identity fields', () => {
     assert.equal(id.name_style.font, 'kanit');
     assert.deepEqual(id.theme_colors, ['#1e3a8a', '#9333ea']);
   });
+
+  test('server profile: 300-character bio, word filter, server AutoMod and reserved nicknames', async () => {
+    const owner = await makeUser('spo');
+    const me = await makeUser('spm');
+    const serverId = await makeServer(owner, 'Server profile rules');
+    await join(serverId, owner, me);
+    const patchMine = (body, who = me) => api('PATCH', `/api/servers/${serverId}/profile/@me`, body, as(who));
+
+    let res = await patchMine({ bio: 'ข'.repeat(300) });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.bio.length, 300, 'the server bio takes the account limit, not 190');
+    res = await patchMine({ bio: 'b'.repeat(301) });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'INVALID_FIELD');
+    res = await patchMine({ bio: '[click](javascript:alert(1)) hi‮' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.bio, 'click hi', 'the bio is cleaned like the account bio');
+
+    res = await patchMine({ bio: 'free nitro here' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'PROFILE_TEXT_BLOCKED');
+    res = await patchMine({ pronouns: 'f a g g o t' });
+    assert.equal(res.body.code, 'PROFILE_TEXT_BLOCKED');
+
+    res = await api('POST', `/api/servers/${serverId}/automod`, { name: 'no raid', trigger_type: 'keyword', trigger_metadata: { keywords: ['raid'] }, actions: ['block'] }, as(owner));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    res = await patchMine({ nickname: 'raid leader' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'PROFILE_TEXT_BLOCKED', "the server's own rules apply to its profiles");
+
+    res = await patchMine({ nickname: 'M0derator' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'NAME_RESERVED');
+    res = await patchMine({ nickname: 'ผู้ดูแล' });
+    assert.equal(res.body.code, 'NAME_RESERVED');
+    res = await patchMine({ nickname: 'Modest Mouse', pronouns: 'she/her' });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.nickname, 'Modest Mouse');
+    const staff = await makeUser('sps', { admin: true });
+    await join(serverId, owner, staff);
+    res = await patchMine({ nickname: 'Admin' }, staff);
+    assert.equal(res.status, 200, 'instance staff may use a reserved name');
+  });
 });
 
 // ---------------------------------------------------------------------------
