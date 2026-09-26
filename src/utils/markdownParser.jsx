@@ -76,6 +76,9 @@ function renderTimestamp(unix, style = 'f') {
 // carries `lastIndex` between those nested calls — which corrupts the outer
 // scan and can spin forever.
 const INLINE_SOURCE = [
+  // A backslash escapes one markdown character, as in Discord: `\*not italic\*`,
+  // and what /shrug sends (¯\\\_(ツ)\_/¯) so its arms are not italics.
+  '\\\\[\\\\*_~`|<>#:\\[\\]()-]',
   '\\|\\|[\\s\\S]+?\\|\\|',                 // spoiler
   '`[^`\\n]+`',                             // inline code
   // Lazy [\s\S]+? rather than [^*]+ so a nested span survives:
@@ -124,6 +127,8 @@ function renderInline(text, keyPrefix, context) {
 function renderToken(token, key, context) {
   const inner = (open, close = open) =>
     renderInline(token.slice(open.length, -close.length), `${key}i`, context);
+
+  if (token.length === 2 && token[0] === '\\') return token[1];
 
   if (token.startsWith('||')) return <SpoilerText key={key}>{token.slice(2, -2)}</SpoilerText>;
 
@@ -213,7 +218,7 @@ function renderToken(token, key, context) {
   if (link) {
     return (
       <a key={key} href={link[2]} target="_blank" rel="noreferrer noopener"
-         className="text-d-link hover:underline">
+         className="text-d-link underline decoration-1 underline-offset-2 hover:decoration-2">
         {link[1]}
       </a>
     );
@@ -222,7 +227,7 @@ function renderToken(token, key, context) {
   if (token.startsWith('http')) {
     return (
       <a key={key} href={token} target="_blank" rel="noreferrer noopener"
-         className="text-d-link hover:underline break-all">
+         className="text-d-link underline decoration-1 underline-offset-2 hover:decoration-2 break-all">
         {token}
       </a>
     );

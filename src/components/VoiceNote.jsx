@@ -231,7 +231,7 @@ export function VoiceNoteRecorder({ onSend, onCancel, onToast }) {
 }
 
 /** The button that starts a recording; hidden entirely where it cannot work. */
-export function VoiceNoteButton({ onStart, disabled }) {
+export function VoiceNoteButton({ onStart, disabled, className = '' }) {
   if (!isVoiceNoteSupported()) return null;
   return (
     <button
@@ -240,9 +240,9 @@ export function VoiceNoteButton({ onStart, disabled }) {
       disabled={disabled}
       title={t('voiceNote.record')}
       aria-label={t('voiceNote.record')}
-      className="pb-0.5 text-d-text2 transition-colors hover:text-d-strong disabled:opacity-50"
+      className={className || 'w-9 h-9 pointer-coarse:w-11 pointer-coarse:h-11 inline-flex items-center justify-center rounded-md text-d-text2 transition-colors hover:text-d-strong disabled:opacity-50'}
     >
-      <Mic className="h-6 w-6" />
+      <Mic className="h-6 w-6" aria-hidden="true" />
     </button>
   );
 }
