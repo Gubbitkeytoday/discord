@@ -208,6 +208,64 @@ async function viewersOf({ serverId, permissionChannelId, userIds }) {
   return { visible, server, roles, rolesByUser };
 }
 
+/**
+ * Which of these guild channels may one user view? `rows` carry channel_id,
+ * server_id, channel_type and parent_id (a thread is judged by its parent).
+ * Three queries per guild, however many channels.
+ */
+export async function visibleChannelIds(userId, rows) {
+  const byServer = new Map();
+  for (const row of rows) {
+    if (!row.server_id) continue;
+    if (!byServer.has(row.server_id)) byServer.set(row.server_id, []);
+    byServer.get(row.server_id).push(row);
+  }
+  const visible = new Set();
+  for (const [serverId, list] of byServer) {
+    const [member, roles, overwrites] = await Promise.all([
+      getQuery(
+        `SELECT s.owner_id FROM server_members sm JOIN servers s ON s.id = sm.server_id
+          WHERE sm.server_id = ? AND sm.user_id = ? AND sm.left_at IS NULL AND s.deleted_at IS NULL`,
+        [serverId, userId]
+      ),
+      allQuery(
+        `SELECT r.id, r.permissions FROM roles r
+          WHERE r.server_id = ?
+            AND (r.id = ? OR r.id IN (SELECT role_id FROM member_roles WHERE server_id = ? AND user_id = ?))`,
+        [serverId, serverId, serverId, userId]
+      ),
+      allQuery(
+        `SELECT o.channel_id, o.target_type, o.target_id, o.allow, o.deny
+           FROM channel_overwrites o JOIN channels c ON c.id = o.channel_id
+          WHERE c.server_id = ?`,
+        [serverId]
+      )
+    ]);
+    if (!member) continue;
+    const isOwner = member.owner_id === userId;
+    const base = computeBasePermissions({ isOwner, rolePermissions: roles.map((r) => r.permissions) });
+    const roleIds = roles.map((r) => r.id);
+    const overwritesOf = new Map();
+    for (const o of overwrites) {
+      if (!overwritesOf.has(o.channel_id)) overwritesOf.set(o.channel_id, []);
+      overwritesOf.get(o.channel_id).push(o);
+    }
+    const verdict = new Map();
+    for (const row of list) {
+      const permissionChannelId = row.channel_type === 'thread' && row.parent_id ? row.parent_id : row.channel_id;
+      if (!verdict.has(permissionChannelId)) {
+        const perms = computeChannelPermissions({
+          base, overwrites: overwritesOf.get(permissionChannelId) ?? [],
+          everyoneRoleId: serverId, memberRoleIds: roleIds, userId
+        });
+        verdict.set(permissionChannelId, has(perms, 'VIEW_CHANNEL'));
+      }
+      if (verdict.get(permissionChannelId)) visible.add(row.channel_id);
+    }
+  }
+  return visible;
+}
+
 // --- fan-out -----------------------------------------------------------------
 
 async function loadChain(channelId) {

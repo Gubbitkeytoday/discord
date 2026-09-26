@@ -17,6 +17,7 @@ import * as automod from './automod.js';
 import { assertChannelAccess, canInChannel } from './access.js';
 import { validatePollInput, writePollRows, attachPolls } from './polls.js';
 import { parseSearchQuery, hasFilters, periodBounds } from '../lib/searchQuery.js';
+import { fanOutMessageNotifications, visibleChannelIds } from './notifications.js';
 
 const MENTION_USER    = /<@!?(\d+|user-[\w-]+)>/g;
 const MENTION_ROLE    = /<@&([\w-]+)>/g;
@@ -579,17 +580,18 @@ export async function createMessage({
     // channel row and retry.
   }, { isolation: 'read committed' });
 
-  // Everyone else in the channel gains an unread, and a mention if named.
+  // Everyone else in the channel gains an unread (lazily: last_message_id
+  // moved past their marker), a mention badge if named, and whatever their
+  // notification settings ask for — see services/notifications.js.
   //
-  // Deliberately outside the transaction above: resolving VIEW_CHANNEL for each
-  // member is several queries per person, and holding SQLite's single write
-  // lock for a 500-member guild would serialise every other write behind one
-  // message. A failure here must also not un-send a message that was accepted.
+  // Deliberately outside the transaction above: a failure here must not
+  // un-send a message that was accepted, and the send's write lock is not
+  // held while the audience is resolved. The fan-out itself is set-based: a
+  // fixed number of queries however large the guild.
   try {
-    notifications = await bumpUnreadCounters({
-      channelId, serverId: channel.server_id, authorId: userId, mentions,
-      messageId, preview: trimmed.slice(0, 200), authorPermissions: senderPermissions,
-      channelType: channel.channel_type
+    notifications = await fanOutMessageNotifications({
+      channelId, authorId: userId, mentions, messageId,
+      content: trimmed, authorPermissions: senderPermissions
     });
   } catch (err) {
     console.error('unread fan-out failed for', messageId, err.message);
@@ -601,120 +603,6 @@ export async function createMessage({
   // reaches a client: `audience` is the id list of everyone who can see the
   // channel, and `notifications` carries other people's ids and the preview.
   return withDelivery(message, { notifications, audience: notifications.reached ?? [] });
-}
-
-/**
- * Bump unread/mention counters and write a notification row per mentioned user.
- *
- * This lives in the service, not the socket layer, so a message created over
- * REST produces exactly the same side effects as one created over the gateway.
- * Returns the notification rows so the caller can push them to live clients.
- */
-async function bumpUnreadCounters({
-  channelId, serverId, authorId, mentions, messageId, preview, authorPermissions = '0',
-  channelType = 'text'
-}) {
-  // A thread notifies the people in it, not the whole guild — otherwise every
-  // member collects an unread for every thread anyone opens.
-  const isThread = channelType === 'thread';
-  const audience = isThread
-    ? await allQuery(
-        `SELECT cr.user_id, u.status FROM channel_recipients cr
-           JOIN users u ON u.id = cr.user_id
-          WHERE cr.channel_id = ?`,
-        [channelId]
-      )
-    : serverId
-    ? await allQuery(
-        `SELECT sm.user_id, u.status FROM server_members sm
-           JOIN users u ON u.id = sm.user_id
-          WHERE sm.server_id = ? AND sm.left_at IS NULL`,
-        [serverId]
-      )
-    : await allQuery(
-        `SELECT cr.user_id, u.status FROM channel_recipients cr
-           JOIN users u ON u.id = cr.user_id
-          WHERE cr.channel_id = ?`,
-        [channelId]
-      );
-
-  const mentionedUsers = new Set(mentions.users);
-  const mentionedRoles = new Set(mentions.roles);
-  // @everyone / @here are only mentions when the author may actually use them.
-  const canMentionEveryone = has(authorPermissions, 'MENTION_EVERYONE');
-  const notifications = [];
-  const reached = [];
-
-  for (const { user_id: uid, status } of audience) {
-    if (uid === authorId) continue;
-
-    // Nobody gets an unread for a channel they cannot see — the unread marker
-    // alone would leak the existence of a private channel, and the notification
-    // body would leak its content.
-    if (serverId && !(await canInChannel({ channelId, userId: uid, permission: 'VIEW_CHANNEL' }))) {
-      continue;
-    }
-    reached.push(uid);
-
-    let isMention = !serverId || mentionedUsers.has(uid);
-    if (!isMention && canMentionEveryone) {
-      if (mentions.everyone) isMention = true;
-      else if (mentions.here && status && status !== 'offline' && status !== 'invisible') isMention = true;
-    }
-    if (!isMention && mentionedRoles.size > 0 && serverId) {
-      const hit = await getQuery(
-        `SELECT 1 FROM member_roles
-          WHERE server_id = ? AND user_id = ? AND role_id IN (${[...mentionedRoles].map(() => '?').join(',')})
-          LIMIT 1`,
-        [serverId, uid, ...mentionedRoles]
-      );
-      if (hit) isMention = true;
-    }
-
-    await runQuery(
-      `INSERT INTO read_states (user_id, channel_id, mention_count)
-       VALUES (?, ?, ?)
-       ON CONFLICT(user_id, channel_id)
-       DO UPDATE SET mention_count = read_states.mention_count + ?`,
-      [uid, channelId, isMention ? 1 : 0, isMention ? 1 : 0]
-    );
-
-    if (!isMention) continue;
-
-    // Muting the channel or the whole server both suppress the notification.
-    const muted = await getQuery(
-      `SELECT 1 FROM channel_settings
-        WHERE user_id = ? AND channel_id = ? AND muted = 1
-          AND (muted_until IS NULL OR muted_until > ${sql.now})`,
-      [uid, channelId]
-    );
-    if (muted) continue;
-    if (serverId) {
-      const serverMuted = await getQuery(
-        `SELECT 1 FROM server_settings WHERE user_id = ? AND server_id = ? AND muted = 1`,
-        [uid, serverId]
-      );
-      if (serverMuted) continue;
-    }
-
-    const id = generateId();
-    const type = serverId ? 'mention' : 'dm';
-    await runQuery(
-      `INSERT INTO notifications (id, user_id, type, server_id, channel_id, message_id, actor_id, body)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, uid, type, serverId, channelId, messageId, authorId, preview]
-    );
-    notifications.push({
-      id, user_id: uid, type, server_id: serverId, channel_id: channelId,
-      message_id: messageId, actor_id: authorId, body: preview, preview
-    });
-  }
-
-  // `reached` is who may see the channel — the gateway uses it so a private
-  // channel's activity ping does not go to the whole guild. Non-enumerable so
-  // it cannot be mistaken for a notification row by anything iterating this.
-  Object.defineProperty(notifications, 'reached', { value: reached, enumerable: false });
-  return notifications;
 }
 
 export async function editMessage({ messageId, userId, content, embeds = undefined, components = undefined }) {
@@ -1211,7 +1099,7 @@ export async function markUnread({ userId, channelId, beforeMessageId = null }) 
 /** Unread counts for every channel the user can see — drives the sidebar badges. */
 export async function getUnreadSummary(userId) {
   const rows = await allQuery(
-    `SELECT c.id AS channel_id, c.server_id,
+    `SELECT c.id AS channel_id, c.server_id, c.type AS channel_type, c.parent_id,
             rs.last_read_message_id, rs.mention_count,
             c.last_message_id,
             CASE WHEN c.last_message_id IS NOT NULL
@@ -1237,15 +1125,12 @@ export async function getUnreadSummary(userId) {
   );
 
   // Filter to what the member may actually view, so the sidebar cannot reveal
-  // the existence of a private channel through an unread badge.
-  const visible = [];
-  for (const row of rows) {
-    if (!row.server_id) { visible.push(row); continue; }
-    if (await canInChannel({ channelId: row.channel_id, userId, permission: 'VIEW_CHANNEL' })) {
-      visible.push(row);
-    }
-  }
-  return visible;
+  // the existence of a private channel through an unread badge. Resolved per
+  // guild in bulk (a few queries per server, not per channel).
+  const viewable = await visibleChannelIds(userId, rows);
+  return rows
+    .filter((row) => !row.server_id || viewable.has(row.channel_id))
+    .map(({ channel_type: _type, parent_id: _parent, ...row }) => row);
 }
 
 /**
