@@ -13,6 +13,10 @@ import {
   decorateMessages, formatDateDivider, formatTime, formatFullTimestamp, formatTypingText
 } from '../utils/messageGrouping';
 
+// Message list windowing (see `hiddenOlder` in ChatArea).
+const RENDER_WINDOW = 150;
+const RENDER_STEP = 100;
+
 /** "3:42 PM" today, "Mar 3, 3:42 PM" otherwise — the unread bar's "since". */
 function formatUnreadSince(date, use24Hour) {
   const d = new Date(date);
@@ -22,21 +26,24 @@ function formatUnreadSince(date, use24Hour) {
   return `${d.toLocaleDateString(localeTag(), { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
-import ImageLightboxModal from './ImageLightboxModal';
 import LinkEmbed from './LinkEmbed';
 import { RichEmbed, MessageComponents } from './RichEmbed';
 import PinnedMessagesPopover from './PinnedMessagesPopover';
 import MessageContextMenu from './MessageContextMenu';
-import EmojiPicker from './EmojiPicker';
-import StickerPicker from './StickerPicker';
 import PollCard from './PollCard';
-import CreatePollModal from './CreatePollModal';
 import { VoiceNotePlayer, VoiceNoteRecorder, VoiceNoteButton } from './VoiceNote';
 import SuperReaction, { motionAllowed } from './SuperReaction';
 import { runSlashCommand, parseSlashInput } from '../utils/slashCommands';
 import { t, localeTag } from '../i18n/index.jsx';
 import { convertEmoticons } from '../utils/emoticons';
 import StillImage, { isAnimatedImage } from './StillImage';
+import { lazyComponent } from '../utils/lazyComponent';
+
+// Pickers and dialogs load on first use.
+const ImageLightboxModal = lazyComponent(() => import('./ImageLightboxModal'));
+const EmojiPicker = lazyComponent(() => import('./EmojiPicker'));
+const StickerPicker = lazyComponent(() => import('./StickerPicker'));
+const CreatePollModal = lazyComponent(() => import('./CreatePollModal'));
 import { useUserSettings } from '../hooks/useUserSettings';
 import ComposerAutocomplete, { detectTrigger, buildOptions } from './ComposerAutocomplete';
 
@@ -214,6 +221,20 @@ export default function ChatArea({
     return { id: decorated[index].id, count, more: index === 0 && hasMoreHistory, since: decorated[index].created_at };
   }, [decorated, hasMoreHistory, currentUser?.id]);
   const [unreadBarDismissed, setUnreadBarDismissed] = useState(false);
+
+  // Windowing: a long-lived channel (or a long read back through history)
+  // must not keep thousands of rows in the DOM. The oldest `hiddenOlder`
+  // loaded messages are not rendered; scrolling to the top reveals them a
+  // page at a time before any network fetch, and returning to the bottom
+  // trims the window back down.
+  const [hiddenOlder, setHiddenOlder] = useState(0);
+  const hidden = Math.min(hiddenOlder, Math.max(0, decorated.length - 1));
+  const visibleMessages = useMemo(() => {
+    if (!hidden) return decorated;
+    const rest = decorated.slice(hidden);
+    // The first rendered row always shows its author.
+    return rest.length && rest[0].isGrouped ? [{ ...rest[0], isGrouped: false }, ...rest.slice(1)] : rest;
+  }, [decorated, hidden]);
   // On opening a channel, land on the first unread message instead of the
   // bottom, once its history has arrived.
   const unreadScrollPendingRef = useRef(true);
@@ -274,11 +295,24 @@ export default function ChatArea({
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     setIsAtBottom(distanceFromBottom < AUTOSCROLL_THRESHOLD_PX);
 
+    if (el.scrollTop < 80 && hiddenOlder > 0) {
+      prependAnchorRef.current = el.scrollHeight;
+      setHiddenOlder((n) => Math.max(0, n - RENDER_STEP));
+      return;
+    }
     if (el.scrollTop < 80 && hasMoreHistory && !isLoadingHistory && onLoadMore) {
       prependAnchorRef.current = el.scrollHeight;
       onLoadMore();
     }
-  }, [hasMoreHistory, isLoadingHistory, onLoadMore]);
+  }, [hasMoreHistory, isLoadingHistory, onLoadMore, hiddenOlder]);
+
+  // Back at the bottom with a big DOM: trim the window (hysteresis of one
+  // step, so it does not trim and reveal on every new message).
+  useEffect(() => {
+    if (!isAtBottom) return;
+    const rendered = decorated.length - hiddenOlder;
+    if (rendered > RENDER_WINDOW + RENDER_STEP) setHiddenOlder(decorated.length - RENDER_WINDOW);
+  }, [isAtBottom, decorated.length, hiddenOlder]);
 
   // Only auto-scroll when the user is already at the bottom. Being yanked back
   // down while reading history is the single worst chat bug.
@@ -304,7 +338,7 @@ export default function ChatArea({
       }
     }
     if (isAtBottom) el.scrollTop = el.scrollHeight;
-  }, [decorated, isAtBottom, isLoadingMessages]);
+  }, [decorated, isAtBottom, isLoadingMessages, hidden]);
 
   // Keep the latest text in a ref so the channel-switch cleanup below can
   // stash the draft of the channel being left.
@@ -322,6 +356,7 @@ export default function ChatArea({
     setReactTarget(null);
     setTouchActionsId(null);
     setUnreadBarDismissed(false);
+    setHiddenOlder(0);
     unreadScrollPendingRef.current = true;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -620,9 +655,17 @@ export default function ChatArea({
   };
 
   /** Scroll a message into view and flash it, like Discord's jump. */
-  const jumpToMessage = (messageId) => {
+  const jumpToMessage = (messageId, retried = false) => {
     const node = document.getElementById(`message-${messageId}`);
-    if (!node) return;
+    if (!node) {
+      // Loaded but outside the render window: widen it, then try again.
+      const index = decorated.findIndex((m) => String(m.id) === String(messageId));
+      if (index !== -1 && index < hidden && !retried) {
+        setHiddenOlder(Math.max(0, index - 10));
+        setTimeout(() => jumpToMessage(messageId, true), 60);
+      }
+      return;
+    }
     node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     node.classList.remove('message-flash');
     void node.offsetWidth; // restart the animation on a repeat jump
@@ -999,7 +1042,7 @@ export default function ChatArea({
           </div>
         )}
 
-        {decorated.map((msg) => {
+        {visibleMessages.map((msg) => {
           const isOwn = msg.user_id === currentUser?.id;
           const isBlockedAuthor = blockedIds?.has(msg.user_id) && !isOwn;
           const revealed = revealedBlocked.has(msg.id);

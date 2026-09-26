@@ -5,34 +5,15 @@ import { Volume2, Pin, Bell, Users } from 'lucide-react';
 import ServerRail from './components/ServerRail';
 import ChannelSidebar from './components/ChannelSidebar';
 import ChatArea from './components/ChatArea';
-import VoiceRoom from './components/VoiceRoom';
-import ForumView from './components/ForumView';
-import OnboardingModal from './components/OnboardingModal';
-import FollowChannelModal from './components/FollowChannelModal';
 import MemberList from './components/MemberList';
 import HomeDirectMessages from './components/HomeDirectMessages';
-import UserSettingsModal from './components/UserSettingsModal';
-import EventsPanel from './components/EventsPanel';
-import CreateServerModal from './components/CreateServerModal';
-import CreateChannelModal from './components/CreateChannelModal';
-import UserProfileModal from './components/UserProfileModal';
-import SearchResultsPanel from './components/SearchResultsPanel';
-import QuickSwitcher from './components/QuickSwitcher';
 import ToastStack, { useToasts } from './components/ToastStack';
-import ServerSettingsModal from './components/ServerSettingsModal';
-import LoginScreen from './components/LoginScreen';
 import ConfirmModal from './components/ConfirmModal';
 import InputModal from './components/InputModal';
-import InviteJoinScreen from './components/InviteJoinScreen';
-import ChannelSettingsModal from './components/ChannelSettingsModal';
 import NotificationSettingsPopover from './components/NotificationSettingsPopover';
 import MemberContextMenu from './components/MemberContextMenu';
-import ForwardMessageModal from './components/ForwardMessageModal';
-import CreateGroupDmModal from './components/CreateGroupDmModal';
-import NotificationsInbox from './components/NotificationsInbox';
 import { IncomingCall, CallBar } from './components/CallPanel';
 import ChannelGate from './components/ChannelGate';
-import EditHistoryModal from './components/EditHistoryModal';
 import { api, get, post, put, patch, del, upload, setApiIdentity, localizeError } from './api';
 import { maskOf } from './utils/permissionCatalog';
 import {
@@ -42,6 +23,29 @@ import {
 import { useKeybinds } from './hooks/useKeybinds';
 import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
 import { t } from './i18n/index.jsx';
+import { lazyComponent, preloadWhenIdle } from './utils/lazyComponent';
+
+// Code-split: each of these is a separate chunk, fetched on first use (and
+// warmed on idle after sign-in), so the first paint only pays for the chat.
+const VoiceRoom = lazyComponent(() => import('./components/VoiceRoom'));
+const ForumView = lazyComponent(() => import('./components/ForumView'));
+const OnboardingModal = lazyComponent(() => import('./components/OnboardingModal'));
+const FollowChannelModal = lazyComponent(() => import('./components/FollowChannelModal'));
+const UserSettingsModal = lazyComponent(() => import('./components/UserSettingsModal'));
+const EventsPanel = lazyComponent(() => import('./components/EventsPanel'));
+const CreateServerModal = lazyComponent(() => import('./components/CreateServerModal'));
+const UserProfileModal = lazyComponent(() => import('./components/UserProfileModal'));
+const ServerSettingsModal = lazyComponent(() => import('./components/ServerSettingsModal'));
+const InviteJoinScreen = lazyComponent(() => import('./components/InviteJoinScreen'));
+const ChannelSettingsModal = lazyComponent(() => import('./components/ChannelSettingsModal'));
+const ForwardMessageModal = lazyComponent(() => import('./components/ForwardMessageModal'));
+const CreateGroupDmModal = lazyComponent(() => import('./components/CreateGroupDmModal'));
+const EditHistoryModal = lazyComponent(() => import('./components/EditHistoryModal'));
+const SearchResultsPanel = lazyComponent(() => import('./components/SearchResultsPanel'));
+const CreateChannelModal = lazyComponent(() => import('./components/CreateChannelModal'));
+const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
+const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
+const NotificationsInbox = lazyComponent(() => import('./components/NotificationsInbox'));
 
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
@@ -330,6 +334,7 @@ export default function App() {
 
   useEffect(() => {
     if (!currentUserId) return;
+    preloadWhenIdle([UserSettingsModal, ServerSettingsModal, UserProfileModal, VoiceRoom, ForumView, EventsPanel, QuickSwitcher, CreateChannelModal]);
     loadInitialData(currentUserId);
     identifiedRef.current = false;
     socket.emit('identify', { userId: currentUserId, token: authToken });
