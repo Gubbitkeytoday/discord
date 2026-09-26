@@ -4,6 +4,7 @@ import App from './App.jsx';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';
 import { DEFAULT_AVATAR } from './utils/avatar';
+import './utils/telemetry'; // Web Vitals + optional error reporting (lazy, off unless configured)
 // Self-hosted fonts: no request to a font CDN (privacy, offline installs).
 // Each weight file declares per-script @font-face rules with unicode-range,
 // so a browser only downloads the subsets a page actually uses.
