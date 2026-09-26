@@ -474,7 +474,8 @@ export default function ChannelSidebar({
           className="md:hidden fixed inset-0 bg-black/60 z-30"
         />
       )}
-      <nav
+      <div
+        role="navigation"
         aria-label={t('adm.channelsOf', { name: currentServer.name })}
         className={`w-60 bg-d-surface flex flex-col shrink-0 select-none z-20 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:z-40 max-md:w-[min(20rem,calc(100vw-72px-3rem))] max-md:shadow-2xl max-md:transition-transform ${mobileOpen ? '' : 'max-md:-translate-x-[calc(100%+72px)] max-md:invisible'}`}
       >
@@ -891,7 +892,7 @@ export default function ChannelSidebar({
           onClose={() => setChannelMenu(null)}
         />
       )}
-      </nav>
+      </div>
 
       {dialog?.kind === 'createCategory' && (
         <InputModal
