@@ -31,6 +31,17 @@ jobs:
           languages: javascript-typescript
           build-mode: none
           queries: security-extended
+          # Test harnesses, E2E drivers and security PoCs are not shipped and
+          # use throwaway credentials by design; scan the application code.
+          config: |
+            paths-ignore:
+              - scripts/test*.mjs
+              - scripts/testHarness.mjs
+              - scripts/e2e/**
+              - scripts/security/**
+              - scripts/load/**
+              - scripts/perf/**
+              - scripts/a11y/**
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:javascript-typescript
