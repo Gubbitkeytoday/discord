@@ -8,6 +8,10 @@ import ChatArea from './components/ChatArea';
 import MemberList from './components/MemberList';
 import HomeDirectMessages from './components/HomeDirectMessages';
 import ToastStack, { useToasts } from './components/ToastStack';
+import ErrorBoundary from './components/ErrorBoundary';
+import ConnectionBanner from './components/ConnectionBanner';
+import { useRealtimeConnection } from './hooks/useRealtimeConnection';
+import { readSyncState, writeSyncState, clearSyncState, compareIds } from './utils/syncCursor';
 import ConfirmModal from './components/ConfirmModal';
 import InputModal from './components/InputModal';
 import NotificationSettingsPopover from './components/NotificationSettingsPopover';
@@ -60,6 +64,11 @@ const socket = io({ withCredentials: true, autoConnect: true });
 const session = { user: null, token: null };
 
 const PAGE_SIZE = 50;
+
+// Error fallbacks for the narrow columns keep the column's width so the rest
+// of the layout does not jump when one of them fails.
+const RAIL_FALLBACK = 'w-[72px] shrink-0 bg-d-canvas flex items-center justify-center p-1 text-center text-[10px] [&_h2]:text-xs [&_p]:hidden [&_button]:px-2 max-md:hidden';
+const SIDE_FALLBACK = 'w-60 shrink-0 bg-d-surface flex items-center justify-center p-4 text-center max-md:hidden';
 
 /** Initial-layout hint only; never throws where matchMedia is missing. */
 function isNarrowViewport(query) {
@@ -144,6 +153,9 @@ export default function App() {
   // Search
   const [searchResults, setSearchResults] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  // Search paging: the server hands back X-Next-Cursor while more pages exist;
+  // "Load more" re-runs the same query with ?before=<cursor>.
+  const [searchPaging, setSearchPaging] = useState({ params: null, cursor: null, loading: false });
 
   // Voice
   const [currentVoiceChannel, setCurrentVoiceChannel] = useState(null);
@@ -319,13 +331,14 @@ export default function App() {
     // module scope — belongs to the old session too. A full reload is the only
     // reset that cannot miss one; the login screen is what it lands on.
     try { localStorage.removeItem(LAST_SERVER_KEY); } catch { /* private mode */ }
+    clearSyncState();
     window.location.replace('/');
   }, []);
 
   // --- data loading --------------------------------------------------------------
 
   const loadReadStates = useCallback((userId) => {
-    get(`/api/read-states/${userId}`)
+    return get(`/api/read-states/${userId}`)
       .then((rows) => {
         const map = {};
         for (const row of rows || []) map[row.channel_id] = row;
@@ -504,6 +517,134 @@ export default function App() {
       [channelId]: { ...prev[channelId], channel_id: channelId, unread: 0, mention_count: 0, last_read_message_id: messageId }
     }));
   }, []);
+
+  // --- catch-up after a reconnect (see routes/sync.js) ---------------------------
+
+  const messagesRef = useRef([]);
+  messagesRef.current = messages;
+  const serversRef = useRef([]);
+  serversRef.current = servers;
+  const dmChannelsRef = useRef([]);
+  dmChannelsRef.current = dmChannels;
+
+  /** A fresh cursor on sign-in: everything before it is in the initial load. */
+  useEffect(() => {
+    if (!currentUserId) return;
+    get('/api/sync')
+      .then((data) => writeSyncState(currentUserId, { cursor: data?.cursor, hashes: {} }))
+      .catch(() => {});
+  }, [currentUserId]);
+
+  /** Replace the open channel's history with its newest page. */
+  const reloadOpenChannel = useCallback(async (channelId) => {
+    const list = await get(`/api/channels/${channelId}/messages?limit=${PAGE_SIZE}`);
+    if (activeChannelIdRef.current !== channelId || !Array.isArray(list)) return null;
+    setMessages((prev) => [...list, ...prev.filter((m) => m.pending || m.failed)]);
+    setHasMoreHistory(list.length >= PAGE_SIZE);
+    return list[list.length - 1]?.id ?? null;
+  }, []);
+
+  /** Page forward from the newest message we hold until we are level. */
+  const fetchMissedMessages = useCallback(async (channelId) => {
+    const held = messagesRef.current.filter((m) => !m.pending && !m.failed);
+    let after = held[held.length - 1]?.id;
+    if (!after) return reloadOpenChannel(channelId);
+    const missed = [];
+    for (let page = 0; page < 10; page += 1) {
+      const rows = await get(`/api/channels/${channelId}/messages?after=${encodeURIComponent(after)}&limit=100`);
+      if (activeChannelIdRef.current !== channelId) return null;
+      const list = Array.isArray(rows) ? rows : [];
+      missed.push(...list);
+      if (list.length < 100) break;
+      after = list[list.length - 1].id;
+    }
+    if (missed.length) {
+      setMessages((prev) => {
+        const next = [...prev];
+        const known = new Set(prev.map((m) => m.id));
+        for (const msg of missed) {
+          if (known.has(msg.id)) continue;
+          const pendingIdx = msg.nonce ? next.findIndex((m) => m.pending && m.nonce === msg.nonce) : -1;
+          if (pendingIdx !== -1) next[pendingIdx] = msg;
+          else next.push(msg);
+          known.add(msg.id);
+        }
+        const settled = next.filter((m) => !m.pending && !m.failed).sort((a, b) => compareIds(a.id, b.id));
+        return [...settled, ...next.filter((m) => m.pending || m.failed)];
+      });
+    }
+    return missed[missed.length - 1]?.id ?? null;
+  }, [reloadOpenChannel]);
+
+  /**
+   * The reconnect did not recover the missed events: ask the server what
+   * changed since our cursor and refetch only that.
+   */
+  const catchUp = useCallback(async () => {
+    const userId = currentUserRef.current?.id;
+    if (!userId) return;
+    const stored = readSyncState(userId);
+    const data = await get(`/api/sync?since=${encodeURIComponent(stored.cursor ?? '')}`);
+    if (!data?.cursor) return;
+    const serverId = activeServerIdRef.current;
+    const channelId = activeChannelIdRef.current;
+
+    if (data.reset) {
+      // Too long away (or no cursor): reload everything, as on sign-in.
+      writeSyncState(userId, { cursor: data.cursor, hashes: {} });
+      await loadInitialData(userId);
+      if (serverId && serverId !== 'home') await loadServer(serverId, { keepChannel: true });
+      await loadReadStates(userId);
+      if (channelId) {
+        const last = await reloadOpenChannel(channelId);
+        if (last && document.visibilityState === 'visible') markChannelRead(channelId, last);
+      }
+      return;
+    }
+
+    const hashes = Object.fromEntries((data.guilds ?? []).map((g) => [g.server_id, g.state_hash]));
+    writeSyncState(userId, { cursor: data.cursor, hashes });
+
+    // Guild membership changed (joined, left, kicked): refresh the list.
+    const known = new Set(serversRef.current.map((sv) => sv.id));
+    const now = new Set(Object.keys(hashes));
+    if (known.size !== now.size || [...now].some((id) => !known.has(id))) {
+      get(`/api/initial-data/${userId}`).then((fresh) => {
+        setServers(fresh.servers || []);
+        setDmChannels(fresh.dms || []);
+      }).catch(() => {});
+    }
+    // Structure of the open guild changed (or there is no hash to compare).
+    if (serverId && serverId !== 'home' && now.has(serverId) && stored.hashes[serverId] !== hashes[serverId]) {
+      loadServer(serverId, { keepChannel: true });
+    }
+    // A DM we do not list yet had activity.
+    const dmIds = new Set(dmChannelsRef.current.map((d) => d.id));
+    if ((data.channels ?? []).some((c) => !c.server_id && !dmIds.has(c.channel_id))) {
+      get(`/api/dms/${userId}`).then((rows) => setDmChannels(Array.isArray(rows) ? rows : [])).catch(() => {});
+    }
+
+    // The open channel: fetch what was missed; edits/deletions (or a flood)
+    // re-read the newest page instead of patching.
+    const open = channelId ? (data.channels ?? []).find((c) => c.channel_id === channelId) : null;
+    let last = null;
+    if (open) {
+      last = (open.edited_messages > 0 || open.deleted_messages > 0 || open.new_messages > 500)
+        ? await reloadOpenChannel(channelId)
+        : await fetchMissedMessages(channelId);
+    }
+    // Unread badges everywhere else come straight from the server.
+    if ((data.channels ?? []).length) await loadReadStates(userId);
+    if (last && document.visibilityState === 'visible' && activeChannelIdRef.current === channelId) {
+      markChannelRead(channelId, last);
+    }
+  }, [loadInitialData, loadServer, loadReadStates, reloadOpenChannel, fetchMissedMessages, markChannelRead]);
+
+  const connection = useRealtimeConnection(socket, {
+    enabled: Boolean(currentUserId),
+    onResync: catchUp,
+    onRateLimited: () => pushToast(t('connection.rateLimited'), { type: 'error', ttl: 6000 })
+  });
 
   const loadPins = useCallback((channelId) => {
     get(`/api/messages/${channelId}/pins`)
@@ -1399,11 +1540,36 @@ export default function App() {
       if (filters.channelId) params.set('channelId', filters.channelId);
       if (filters.authorId) params.set('authorId', filters.authorId);
       if (filters.hasAttachment) params.set('hasAttachment', 'true');
-      const rows = await get(`/api/search/messages?${params}`);
+      const { data: rows, headers } = await api(`/api/search/messages?${params}`, { withHeaders: true });
       setSearchResults(Array.isArray(rows) ? rows : []);
+      setSearchPaging({ params: params.toString(), cursor: headers.get('X-Next-Cursor'), loading: false });
     } catch (err) {
       pushToast(err.message, { type: 'error' });
       setSearchResults([]);
+      setSearchPaging({ params: null, cursor: null, loading: false });
+    }
+  };
+
+  const loadMoreSearch = async () => {
+    const { params: base, cursor, loading } = searchPaging;
+    if (!base || !cursor || loading) return;
+    setSearchPaging((p) => ({ ...p, loading: true }));
+    try {
+      const params = new URLSearchParams(base);
+      params.set('before', cursor);
+      const { data: rows, headers } = await api(`/api/search/messages?${params}`, { withHeaders: true });
+      const page = Array.isArray(rows) ? rows : [];
+      setSearchResults((prev) => {
+        const seen = new Set((prev ?? []).map((r) => r.id));
+        return [...(prev ?? []), ...page.filter((r) => !seen.has(r.id))];
+      });
+      // A stale response (the query changed meanwhile) must not clobber paging.
+      setSearchPaging((p) => (p.params === base
+        ? { params: base, cursor: page.length ? headers.get('X-Next-Cursor') : null, loading: false }
+        : p));
+    } catch (err) {
+      pushToast(err.message, { type: 'error' });
+      setSearchPaging((p) => ({ ...p, loading: false }));
     }
   };
 
@@ -2077,6 +2243,16 @@ export default function App() {
     voiceHost
   ) : null;
 
+  /** What a crashed dialog's "Close" does: drop every dialog that could be it. */
+  const closeAllModals = () => {
+    setShowCreateServerModal(false); setShowCreateChannelModal(false); setShowEvents(false);
+    setShowUserSettingsModal(false); setShowQuickSwitcher(false); setServerSettingsTab(null);
+    setOnboardingFor(null); setConfirm(null); setInputModal(null); setChannelSettingsFor(null);
+    setNotifPopover(null); setMemberMenu(null); setForwardMessage(null); setFollowSource(null);
+    setEditHistoryFor(null); setShowGroupDmModal(false); setShowInbox(false); setInviteFor(null);
+    setShowShortcuts(false); setSelectedProfileUser(null);
+  };
+
   const openJoinWithInvite = () => setInputModal({
     title: t('server.joinTitle'),
     label: t('server.inviteLink'),
@@ -2123,26 +2299,30 @@ export default function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-d-base text-d-text font-sans antialiased">
       {/* Skip links (WCAG 2.4.1): straight to the composer or the channel
           list instead of tabbing through the rail and every message. */}
+      {connection.showBanner && <ConnectionBanner status={connection.status} onRetry={connection.retry} />}
       <nav aria-label={t('a11y.skipLinks')} className="contents">
         <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>
         <a href="#channel-list" className="skip-link">{t('a11y.skipToChannels')}</a>
       </nav>
-      <ServerRail
-        servers={servers}
-        serverSettings={serverSettings}
-        readStates={readStates}
-        channels={channels}
-        activeServerId={activeServerId}
-        onSelectServer={(id) => setActiveServerId(id)}
-        mobileOpen={mobileSidebarOpen}
-        onOpenCreateServerModal={() => setShowCreateServerModal(true)}
-        onSelectHome={() => setActiveServerId('home')}
-        onJoinWithInvite={openJoinWithInvite}
-        onServerContextMenu={(server, x, y) => setNotifPopover({ kind: 'server', id: server.id, x, y })}
-        pendingFriendCount={friends.filter((f) => f.friend_status === 'pending' && f.direction === 'incoming').length}
-      />
+      <ErrorBoundary region="rail" className={RAIL_FALLBACK}>
+        <ServerRail
+          servers={servers}
+          serverSettings={serverSettings}
+          readStates={readStates}
+          channels={channels}
+          activeServerId={activeServerId}
+          onSelectServer={(id) => setActiveServerId(id)}
+          mobileOpen={mobileSidebarOpen}
+          onOpenCreateServerModal={() => setShowCreateServerModal(true)}
+          onSelectHome={() => setActiveServerId('home')}
+          onJoinWithInvite={openJoinWithInvite}
+          onServerContextMenu={(server, x, y) => setNotifPopover({ kind: 'server', id: server.id, x, y })}
+          pendingFriendCount={friends.filter((f) => f.friend_status === 'pending' && f.direction === 'incoming').length}
+        />
+      </ErrorBoundary>
 
       {activeServerId === 'home' ? (
+        <ErrorBoundary region="home">
         <HomeDirectMessages
           friends={friends}
           dms={dmChannels}
@@ -2178,11 +2358,14 @@ export default function App() {
           onLeaveVoice={handleLeaveVoice}
         >
           <>
-            {chatArea}
+            <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{chatArea}</ErrorBoundary>
             {searchResults !== null && (
               <SearchResultsPanel
                 query={searchQuery}
                 results={searchResults}
+                hasMore={Boolean(searchPaging.cursor)}
+                loadingMore={searchPaging.loading}
+                onLoadMore={loadMoreSearch}
                 channels={allChannels}
                 onJumpToMessage={handleJumpToMessage}
                 onClose={() => setSearchResults(null)}
@@ -2190,54 +2373,57 @@ export default function App() {
             )}
           </>
         </HomeDirectMessages>
+        </ErrorBoundary>
       ) : (
         <div className="flex-1 flex overflow-hidden min-w-0">
-          <ChannelSidebar
-            currentServer={currentServer}
-            channels={channels}
-            activeChannelId={activeChannelId}
-            onSelectChannel={pickChannel}
-            onOpenCreateChannelModal={(type) => {
-              setCreateChannelDefaultType(type);
-              setShowCreateChannelModal(true);
-            }}
-            readStates={readStates}
-            channelSettings={channelSettings}
-            mobileOpen={mobileSidebarOpen}
-            onCloseMobile={() => setMobileSidebarOpen(false)}
-            serverSettings={serverSettings[activeServerId]}
-            viewerPermissions={viewerPermissions}
-            isOwner={isOwner}
-            onOpenServerSettings={(tab) => setServerSettingsTab(typeof tab === 'string' ? tab : 'overview')}
-            onOpenEvents={() => setShowEvents(true)}
-            onCreateInvite={handleCreateInvite}
-            onLeaveServer={handleLeaveServer}
-            onDeleteServer={handleDeleteServer}
-            onOpenServerNotifications={(x, y) => setNotifPopover({ kind: 'server', id: activeServerId, x, y })}
-            onOpenChannelNotifications={(channel, x, y) => setNotifPopover({ kind: 'channel', id: channel.id, x, y })}
-            onEditChannel={(channel) => setChannelSettingsFor(channel)}
-            onDeleteChannel={handleDeleteChannel}
-            onMarkChannelRead={handleMarkChannelRead}
-            onMuteChannel={(channel, muted, until) => handleUpdateChannelSettings(channel.id, { muted, muted_until: until ?? null })}
-            onToast={pushToast}
-            currentUser={currentUser}
-            onOpenUserSettingsModal={() => setShowUserSettingsModal(true)}
-            onSetStatus={handleSetStatus}
-            currentVoiceChannel={currentVoiceChannel}
-            activeVoiceParticipants={activeVoiceParticipants}
-            onLeaveVoice={handleLeaveVoice}
-            isMuted={isMuted}
-            onToggleMute={handleToggleMute}
-            isDeafened={isDeafened}
-            onToggleDeafen={handleToggleDeafen}
-            onCreateInviteFor={async (channel) => {
-              try {
-                const invite = await post(`/api/servers/${activeServerId}/invites`, { channelId: channel.id, maxAge: 86400 });
-                await navigator.clipboard?.writeText(`${window.location.origin}/invite/${invite.code}`).catch(() => {});
-                pushToast(t('server.inviteCopied', { code: invite.code }), { type: 'success' });
-              } catch (err) { toastError(err); }
-            }}
-          />
+          <ErrorBoundary region="sidebar" resetKeys={[activeServerId]} className={SIDE_FALLBACK}>
+            <ChannelSidebar
+              currentServer={currentServer}
+              channels={channels}
+              activeChannelId={activeChannelId}
+              onSelectChannel={pickChannel}
+              onOpenCreateChannelModal={(type) => {
+                setCreateChannelDefaultType(type);
+                setShowCreateChannelModal(true);
+              }}
+              readStates={readStates}
+              channelSettings={channelSettings}
+              mobileOpen={mobileSidebarOpen}
+              onCloseMobile={() => setMobileSidebarOpen(false)}
+              serverSettings={serverSettings[activeServerId]}
+              viewerPermissions={viewerPermissions}
+              isOwner={isOwner}
+              onOpenServerSettings={(tab) => setServerSettingsTab(typeof tab === 'string' ? tab : 'overview')}
+              onOpenEvents={() => setShowEvents(true)}
+              onCreateInvite={handleCreateInvite}
+              onLeaveServer={handleLeaveServer}
+              onDeleteServer={handleDeleteServer}
+              onOpenServerNotifications={(x, y) => setNotifPopover({ kind: 'server', id: activeServerId, x, y })}
+              onOpenChannelNotifications={(channel, x, y) => setNotifPopover({ kind: 'channel', id: channel.id, x, y })}
+              onEditChannel={(channel) => setChannelSettingsFor(channel)}
+              onDeleteChannel={handleDeleteChannel}
+              onMarkChannelRead={handleMarkChannelRead}
+              onMuteChannel={(channel, muted, until) => handleUpdateChannelSettings(channel.id, { muted, muted_until: until ?? null })}
+              onToast={pushToast}
+              currentUser={currentUser}
+              onOpenUserSettingsModal={() => setShowUserSettingsModal(true)}
+              onSetStatus={handleSetStatus}
+              currentVoiceChannel={currentVoiceChannel}
+              activeVoiceParticipants={activeVoiceParticipants}
+              onLeaveVoice={handleLeaveVoice}
+              isMuted={isMuted}
+              onToggleMute={handleToggleMute}
+              isDeafened={isDeafened}
+              onToggleDeafen={handleToggleDeafen}
+              onCreateInviteFor={async (channel) => {
+                try {
+                  const invite = await post(`/api/servers/${activeServerId}/invites`, { channelId: channel.id, maxAge: 86400 });
+                  await navigator.clipboard?.writeText(`${window.location.origin}/invite/${invite.code}`).catch(() => {});
+                  pushToast(t('server.inviteCopied', { code: invite.code }), { type: 'success' });
+                } catch (err) { toastError(err); }
+              }}
+            />
+          </ErrorBoundary>
 
           {isVoiceChannel ? (
             // A voice channel is two panes: the room on top, its own text chat
@@ -2270,7 +2456,7 @@ export default function App() {
                 </div>
               )}
               <div className={`${isConnectedHere ? 'flex-[2] min-h-[10rem] border-t border-d-edge' : 'flex-1'} flex flex-col min-h-0`}>
-                {voiceChatArea}
+                <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{voiceChatArea}</ErrorBoundary>
               </div>
             </div>
             </ChannelGate>
@@ -2282,7 +2468,7 @@ export default function App() {
               channel={activeChannel}
               onLeave={() => setActiveChannelId(null)}
             >
-              {chatArea}
+              <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{chatArea}</ErrorBoundary>
             </ChannelGate>
           )}
 
@@ -2290,6 +2476,9 @@ export default function App() {
             <SearchResultsPanel
               query={searchQuery}
               results={searchResults}
+              hasMore={Boolean(searchPaging.cursor)}
+              loadingMore={searchPaging.loading}
+              onLoadMore={loadMoreSearch}
               channels={allChannels}
               onJumpToMessage={handleJumpToMessage}
               onClose={() => setSearchResults(null)}
@@ -2306,16 +2495,19 @@ export default function App() {
                 onClick={() => setShowMemberList(false)}
                 className="lg:hidden fixed inset-0 bg-black/50 z-20"
               />
-              <MemberList
-                members={members}
-                onSelectMember={openProfile}
-                onMemberContextMenu={(member, x, y) => openMemberMenu(member, x, y)}
-              />
+              <ErrorBoundary region="members" resetKeys={[activeServerId]} className={SIDE_FALLBACK}>
+                <MemberList
+                  members={members}
+                  onSelectMember={openProfile}
+                  onMemberContextMenu={(member, x, y) => openMemberMenu(member, x, y)}
+                />
+              </ErrorBoundary>
             </>
           )}
         </div>
       )}
 
+      <ErrorBoundary region="modals" variant="modal" onDismiss={closeAllModals}>
       {showCreateServerModal && (
         <CreateServerModal
           initialTemplateCode={showCreateServerModal?.templateCode ?? null}
@@ -2556,6 +2748,7 @@ export default function App() {
 
       {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
+      </ErrorBoundary>
 
       {/* Where the voice room waits, still connected, while its pane is not
           on screen. */}
@@ -2563,6 +2756,8 @@ export default function App() {
       {voiceRoomPortal}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      <ErrorBoundary region="dialogs" variant="modal" onDismiss={closeAllModals}>
 
       {showShortcuts && (
         <ShortcutsModal
@@ -2615,6 +2810,7 @@ export default function App() {
           onEditProfile={() => { setSelectedProfileUser(null); setShowUserSettingsModal(true); }}
         />
       )}
+      </ErrorBoundary>
     </div>
   );
 }
