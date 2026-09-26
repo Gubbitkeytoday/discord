@@ -2722,7 +2722,7 @@ export default function App() {
       {prefs.streamerMode.enabled && (
         // Streamer mode hides things; the bar makes sure you know it is on and
         // can switch it off in one click (Discord's red strip).
-        <div role="status" className="fixed top-0 left-1/2 -translate-x-1/2 z-[85] flex items-center gap-2 px-3 py-0.5 rounded-b-md shadow bg-d-danger text-white text-xs font-semibold whitespace-nowrap">
+        <div role="status" className="fixed top-0 left-1/2 -translate-x-1/2 z-[85] flex items-center gap-2 px-3 py-0.5 rounded-b-md shadow bg-d-dangerhover text-white text-xs font-semibold whitespace-nowrap">
           <span>{t('streamer.turnedOn')}</span>
           <span aria-hidden="true">·</span>
           <button

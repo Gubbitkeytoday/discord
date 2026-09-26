@@ -462,7 +462,7 @@ export default function ChatArea(props) {
           showMemberList={showMemberList}
           inboxCount={inboxCount}
           onOpenMobileSidebar={onOpenMobileSidebar}
-          onStartCall={onStartCall}
+          onStartCall={youBlocked ? null : onStartCall}
           onFollowChannel={onFollowChannel}
           onArchiveThread={onArchiveThread}
           onAddGroupRecipients={onAddGroupRecipients}

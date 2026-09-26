@@ -618,7 +618,7 @@ export default function ChannelSidebar({
                       onDrop={draggable ? (e) => { e.preventDefault(); onDropOnChannel(channel); } : undefined}
                     >
                       {hasUnread && (
-                        <span aria-hidden="true" className="absolute -left-2 top-1/2 -translate-y-1/2 w-1 h-2 bg-d-strong rounded-r-full" />
+                        <span aria-hidden="true" className="absolute -left-2 top-4 -translate-y-1/2 w-1 h-2 bg-d-strong rounded-r-full" />
                       )}
 
                       <button
@@ -684,7 +684,7 @@ export default function ChannelSidebar({
 
                       {/* Discord's hover actions: invite, and settings for staff. */}
                       {mentions === 0 && !isConnectedVoice && (
-                        <span className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center opacity-0 group-hover/channel:opacity-100 group-focus-within/channel:opacity-100 max-md:opacity-100">
+                        <span className="absolute right-1 top-4 -translate-y-1/2 flex items-center opacity-0 group-hover/channel:opacity-100 group-focus-within/channel:opacity-100 max-md:opacity-100">
                           {can('CREATE_INSTANT_INVITE') && (
                             <button
                               type="button"
