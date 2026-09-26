@@ -6,26 +6,46 @@
 //  preferences say how *other people's* profiles are shown on this device:
 //  decorations (animate / hover / off), profile effects, name styles (and
 //  whether they show in dense lists), custom profile colours.
+//
+//  Both hooks run in every message row and member row, so they are external
+//  stores (useSyncExternalStore): no per-row state, effect, media-query
+//  listener or copy of the settings — a row re-renders only when the value
+//  it reads actually changes.
 // ============================================================================
 
-import { useEffect, useState } from 'react';
-import { useUserSettings, prefersReducedMotion } from '../hooks/useUserSettings';
+import { useSyncExternalStore } from 'react';
+import { getPreferences, subscribePreferences } from '../hooks/useUserSettings';
+
+// --- motion ---------------------------------------------------------------------
+
+let osQuery = null;
+function reduceQuery() {
+  if (osQuery === null) {
+    try { osQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? false; } catch { osQuery = false; }
+  }
+  return osQuery || null;
+}
+
+/** Same rule as useUserSettings' prefersReducedMotion, with one shared query. */
+function motionAllowedNow() {
+  const a11y = getPreferences()?.accessibility ?? {};
+  if (a11y.syncReducedMotion !== false) return !(reduceQuery()?.matches ?? false);
+  return !a11y.reducedMotion;
+}
+
+function subscribeMotion(fn) {
+  const unsubscribe = subscribePreferences(fn);
+  const mq = reduceQuery();
+  mq?.addEventListener?.('change', fn);
+  return () => { unsubscribe(); mq?.removeEventListener?.('change', fn); };
+}
 
 /** True when cosmetics may animate right now. */
 export function useMotionAllowed() {
-  const { prefs } = useUserSettings();
-  const [osTick, setOsTick] = useState(0);
-  useEffect(() => {
-    let mq;
-    try { mq = window.matchMedia?.('(prefers-reduced-motion: reduce)'); } catch { mq = null; }
-    if (!mq) return undefined;
-    const onChange = () => setOsTick((n) => n + 1);
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
-  }, []);
-  void osTick;
-  return !prefersReducedMotion(prefs);
+  return useSyncExternalStore(subscribeMotion, motionAllowedNow, () => true);
 }
+
+// --- viewer preferences ------------------------------------------------------------
 
 export const VIEWER_DEFAULTS = Object.freeze({
   decorations: 'animate',   // animate (in profiles; hover in lists) | hover | off
@@ -56,21 +76,34 @@ export function setViewerPrefs(patch) {
   for (const fn of listeners) fn(current);
 }
 
-export function useViewerPrefs() {
-  const [prefs, setPrefs] = useState(current);
-  useEffect(() => {
-    listeners.add(setPrefs);
-    return () => { listeners.delete(setPrefs); };
-  }, []);
+function subscribeViewer(fn) {
+  listeners.add(fn);
+  const unsubscribe = subscribePreferences(fn);
+  return () => { listeners.delete(fn); unsubscribe(); };
+}
+
+// The effective view, rebuilt only when one of its inputs changes so every
+// caller gets the same object (a stable snapshot for useSyncExternalStore).
+let effective = null;
+function effectiveViewerPrefs() {
+  const app = getPreferences();
   // High contrast and streamer mode switch the decorative layers off.
-  const { prefs: app } = useUserSettings();
   const highContrast = Boolean(app?.accessibility?.highContrast);
   const streamer = Boolean(app?.streamerMode?.enabled);
-  return {
-    ...prefs,
-    profileColors: prefs.profileColors && !highContrast,
-    decorations: streamer ? 'off' : prefs.decorations,
-    effects: prefs.effects && !streamer,
+  if (effective && effective.base === current && effective.highContrast === highContrast && effective.streamer === streamer) {
+    return effective.value;
+  }
+  const value = {
+    ...current,
+    profileColors: current.profileColors && !highContrast,
+    decorations: streamer ? 'off' : current.decorations,
+    effects: current.effects && !streamer,
     highContrast
   };
+  effective = { base: current, highContrast, streamer, value };
+  return value;
+}
+
+export function useViewerPrefs() {
+  return useSyncExternalStore(subscribeViewer, effectiveViewerPrefs, effectiveViewerPrefs);
 }

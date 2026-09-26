@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { get, patch, del } from '../api';
 import { setSoundVolumeSource, setSoundPackSource } from '../utils/soundEffects';
 import { applyThemeLayer, writeBootCache } from '../theme/engine.js';
@@ -53,6 +53,8 @@ export const PREFERENCE_DEFAULTS = {
     // Notification sound pack (theme/soundPacks.js).
     soundPack: 'classic',
     showSendButton: true,
+    // Role icons beside names in chat and the member list.
+    showRoleIcons: true,
     syncAcrossDevices: true
   },
   accessibility: {
@@ -493,6 +495,25 @@ export function useUserSettings() {
     update: useCallback((category, patchValue) => updatePreferences(category, patchValue), []),
     reset: useCallback((category) => resetPreferences(category), [])
   };
+}
+
+/** Subscribe to preference changes outside React (or for useSyncExternalStore). */
+export function subscribePreferences(fn) {
+  const listener = () => fn();
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/**
+ * One value out of the preferences, for components that render many times
+ * over (message rows, member rows): no state, no effect, no derived copy —
+ * the component re-renders only when the selected value changes. `select`
+ * must return a primitive (or a stable reference).
+ *
+ *   const showIcons = usePreference((p) => p.appearance?.showRoleIcons !== false);
+ */
+export function usePreference(select) {
+  return useSyncExternalStore(subscribePreferences, () => select(current), () => select(current));
 }
 
 /** Load the account's saved preferences. Called once the user is known. */

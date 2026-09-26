@@ -49,10 +49,17 @@ export default function DisplayName({
   );
 }
 
+// One formatter per language: the mark renders in every row of a busy chat.
+const relativeFormats = new Map();
+function relativeFormat(locale) {
+  if (!relativeFormats.has(locale)) relativeFormats.set(locale, new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }));
+  return relativeFormats.get(locale);
+}
+
 export function NewMemberMark({ joinedAt, interactive = false }) {
   const days = joinedAt ? Math.max(0, Math.floor((Date.now() - new Date(joinedAt).getTime()) / 86400e3)) : 0;
   let when = '';
-  try { when = new Intl.RelativeTimeFormat(localeTag(), { numeric: 'auto' }).format(-days, 'day'); } catch { when = ''; }
+  try { when = relativeFormat(localeTag()).format(-days, 'day'); } catch { when = ''; }
   const label = t('profiles.newMember', { when });
   return (
     <Tooltip label={label}>

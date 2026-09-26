@@ -75,10 +75,23 @@ export function roleStops(role) {
  * background the contrast guard measures against. Returns an empty style for
  * a role without a colour (callers fall back to the normal text colour).
  */
+// role object -> Map("surface|background" -> result). A busy chat renders
+// the same few roles hundreds of times; the contrast maths runs once each.
+const styleCache = new WeakMap();
+
 export function roleNameStyle(role, { surface = 'chat', background } = {}) {
+  const bg = background ?? (role ? themeBackground(SURFACES[surface] ?? surface) : null);
+  if (!role || typeof role !== 'object') return computeRoleNameStyle(role, bg);
+  let byKey = styleCache.get(role);
+  if (!byKey) { byKey = new Map(); styleCache.set(role, byKey); }
+  const key = `${surface}|${bg}`;
+  if (!byKey.has(key)) byKey.set(key, computeRoleNameStyle(role, bg));
+  return byKey.get(key);
+}
+
+function computeRoleNameStyle(role, bg) {
   const stops = roleStops(role);
   if (!stops.length) return { className: '', style: {}, colour: null };
-  const bg = background ?? themeBackground(SURFACES[surface] ?? surface);
   const readable = stops.map((c) => readableRoleColor(c, bg) ?? c);
   const style = styleOf(role);
   if (readable.length === 1) {

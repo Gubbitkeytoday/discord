@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import RoleIcon from './RoleIcon.jsx';
 import { roleNameStyle, memberRoleLook } from './roleStyle';
-import { useUserSettings } from '../../hooks/useUserSettings';
+import { usePreference } from '../../hooks/useUserSettings';
 import './server.css';
 
 /**
@@ -33,8 +33,8 @@ export default function RoleName({
   surface = 'chat', showIcon = true, iconSize = 16, as = 'span', className = '', children, ...rest
 }) {
   const Tag = as;
-  const { prefs } = useUserSettings();
-  const theme = prefs.appearance?.theme;
+  // Rendered in every message and member row: read just the theme.
+  const theme = usePreference((p) => p.appearance?.theme);
   const look = useMemo(() => memberRoleLook(member, rolesById), [member, rolesById]);
   const styleRole = role ?? look.styleRole;
   const icon = iconRole ?? (role ? (role.icon_url || role.unicode_emoji ? role : null) : look.iconRole);

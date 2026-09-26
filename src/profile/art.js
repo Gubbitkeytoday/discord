@@ -9,7 +9,13 @@
 // ============================================================================
 
 const stills = new Map(); // url#delay -> Promise<string|null>
+const ready = new Map();  // url#delay -> string|null, once resolved
 export const POSTER_DELAY = 1400;
+
+/** The captured still if it is already done (so a row can paint it at once). */
+export function peekStill(url, delay = 0) {
+  return url ? ready.get(`${url}#${delay}`) : undefined;
+}
 
 /**
  * `delay` (ms) captures a later frame instead of the first — a profile
@@ -54,6 +60,7 @@ export function captureStill(url, size = 240, delay = 0) {
     img.onerror = () => { host?.remove(); resolve(null); };
     img.src = url;
   });
+  job.then((value) => ready.set(key, value));
   stills.set(key, job);
   return job;
 }
