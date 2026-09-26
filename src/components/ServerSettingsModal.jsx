@@ -6,7 +6,8 @@ import {
   ChevronUp, ChevronDown
 } from 'lucide-react';
 
-import { useDialog, UnsavedBar, useReportDirty } from './settings/primitives';
+import { useDialog, UnsavedBar, useReportDirty, SettingToggle } from './settings/primitives';
+import { getTranslationConfig, resetTranslationConfig } from '../translation';
 import ConfirmModal from './ConfirmModal';
 import AutoModTab from './settings/AutoModTab';
 import WebhooksTab from './settings/WebhooksTab';
@@ -525,6 +526,8 @@ function OverviewTab({
         </Field>
       </div>
 
+      <TranslationSection server={server} onToast={onToast} />
+
       <TemplateSection server={server} onToast={onToast} />
 
       {isOwner && (
@@ -625,6 +628,61 @@ function ChannelSelect({ value, options, onChange, label = t('settings.selectCha
  * Server Template: one per server. Anyone with the code can spin up a server
  * with the same roles/channels. Members and messages are never included.
  */
+/**
+ * Server-side message translation switch (MANAGE_GUILD, which the Overview
+ * tab already requires). Saves on toggle, like Discord's switches. Hidden
+ * when the instance has no translation provider configured, since the
+ * switch would do nothing.
+ */
+function TranslationSection({ server, onToast }) {
+  const [state, setState] = useState(null);   // null = loading/hidden, else { disabled }
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const cfg = await getTranslationConfig();
+        if (!cfg?.server?.enabled) return;
+        const data = await httpApi(`/api/servers/${server.id}/translation`);
+        if (alive) setState({ disabled: Boolean(data?.translation_disabled) });
+      } catch { /* leave hidden */ }
+    })();
+    return () => { alive = false; };
+  }, [server.id]);
+
+  if (!state) return null;
+
+  const toggle = async (allowed) => {
+    setSaving(true);
+    const previous = state;
+    setState({ disabled: !allowed });
+    try {
+      const data = await httpApi(`/api/servers/${server.id}/translation`, { method: 'PUT', body: { disabled: !allowed } });
+      setState({ disabled: Boolean(data?.translation_disabled) });
+      resetTranslationConfig();
+    } catch (err) {
+      setState(previous);
+      onToast?.(err.message, { type: 'error' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-6" data-testid="server-translation">
+      <SettingToggle
+        label={t('translate.serverDisabled')}
+        hint={t('translate.serverDisabledHint')}
+        checked={!state.disabled}
+        onChange={toggle}
+        disabled={saving}
+        last
+      />
+    </div>
+  );
+}
+
 function TemplateSection({ server, onToast }) {
   const [template, setTemplate] = useState(undefined);   // undefined = loading, null = none
   const [name, setName] = useState('');

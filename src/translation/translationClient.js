@@ -15,14 +15,26 @@
 import { useSyncExternalStore } from 'react';
 import { get, post } from '../api';
 import { currentLocaleCode } from '../i18n/index.jsx';
+import { getPreferences } from '../hooks/useUserSettings';
 import {
   segmentMessage, translateSegments, guessLanguage, primaryLang, normalizeLang
 } from '../../lib/translationMarkup.js';
 
 // --- target language ------------------------------------------------------------
 
-/** The reader's language as a translation target ('th', 'en', 'zh-Hant', 'pt-BR'). */
-export function targetLanguage(locale = currentLocaleCode()) {
+/** Settings › Chat › "Translate messages to"; '' means the app language. */
+function preferredTarget() {
+  try {
+    const value = getPreferences()?.chat?.translateTarget;
+    return typeof value === 'string' && value ? value : null;
+  } catch { return null; }
+}
+
+/**
+ * The reader's language as a translation target ('th', 'en', 'zh-Hant',
+ * 'pt-BR'): the user's chosen target, else the UI language.
+ */
+export function targetLanguage(locale = preferredTarget() ?? currentLocaleCode()) {
   const tag = normalizeLang(locale) ?? 'en';
   if (/^zh-(TW|HK|MO|Hant)$/.test(tag)) return 'zh-Hant';
   if (tag.startsWith('zh')) return 'zh';
