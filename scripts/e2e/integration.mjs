@@ -299,8 +299,16 @@ try {
     const banner = page.getByTestId('connection-banner');
     await visible(banner.getByText(/Connection lost/), '"Connection lost" banner', 8000);
     expect(await banner.getAttribute('data-status') === 'reconnecting', 'status is reconnecting');
+    // Hold the client in "reconnecting" while the server is down, then press
+    // Retry the moment it is back. The automatic backoff may win the race and
+    // reconnect first — that is correct behaviour too, so either way the
+    // banner must disappear.
+    const retry = banner.getByRole('button', { name: 'Retry now' });
+    await visible(retry, '"Retry now" button', 5000);
     await bootServer();
-    await banner.getByRole('button', { name: 'Retry now' }).click();
+    await retry.click({ timeout: 3000 }).catch(async () => {
+      expect(!(await banner.isVisible().catch(() => false)), 'Retry now clickable or already reconnected');
+    });
     await hidden(banner, 'banner gone after retry', 10_000);
   });
 } catch (err) {
