@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 
 // Derive a stable-but-distinct port from the entry file name, so part 1 and
 // part 2 never collide.
@@ -23,6 +24,55 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-test-'));
 const DB_PATH = path.join(TMP, 'test.db');
 const STORAGE_ROOT = path.join(TMP, 'uploads');
 
+// ---------------------------------------------------------------------------
+// Database selection.
+//
+//   TEST_DATABASE_URL unset → SQLite file in TMP (the default).
+//   TEST_DATABASE_URL=postgres://user@host:port/postgres → this file gets a
+//     brand-new database on that server (CREATE DATABASE test_…), which is
+//     dropped again in stopServer. The URL's own database is only used as the
+//     maintenance connection for CREATE/DROP.
+//
+// A DATABASE_URL inherited from the shell is always ignored, so `npm test`
+// can never touch a real database.
+// ---------------------------------------------------------------------------
+export const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || '';
+if (!TEST_DATABASE_URL && process.env.npm_lifecycle_event === 'test:pg') {
+  throw new Error('npm run test:pg needs TEST_DATABASE_URL=postgres://user@host:port/postgres');
+}
+export const PG_DB_NAME = TEST_DATABASE_URL
+  ? `test_${suffix}_${process.pid}_${crypto.randomBytes(4).toString('hex')}`
+  : null;
+if (PG_DB_NAME) {
+  const url = new URL(TEST_DATABASE_URL);
+  url.pathname = `/${PG_DB_NAME}`;
+  process.env.DATABASE_URL = url.toString();
+} else {
+  delete process.env.DATABASE_URL;
+}
+
+async function withAdminClient(fn) {
+  const { default: pg } = await import('pg');
+  const client = new pg.Client({ connectionString: TEST_DATABASE_URL });
+  await client.connect();
+  try { return await fn(client); } finally { await client.end(); }
+}
+
+async function createTestDatabase() {
+  if (!PG_DB_NAME) return;
+  await withAdminClient((c) => c.query(`CREATE DATABASE "${PG_DB_NAME}"`));
+}
+
+async function dropTestDatabase() {
+  if (!PG_DB_NAME) return;
+  // The test process itself may have opened a pool through db.js.
+  try {
+    const { closeDB } = await import('../db.js');
+    await closeDB();
+  } catch { /* never imported, or already closed */ }
+  await withAdminClient((c) => c.query(`DROP DATABASE IF EXISTS "${PG_DB_NAME}" WITH (FORCE)`));
+}
+
 // Some test files import services directly (media probing, storage, S3). Those
 // modules open db.js on import, which would otherwise attach to the real
 // discord.db in the project root. Point the *test process itself* at the
@@ -35,9 +85,12 @@ process.env.ALLOW_DEV_IDENTITY ??= '1';
 let server;
 
 export async function startServer() {
+  await createTestDatabase();
+  const env = { ...process.env };
+  if (!PG_DB_NAME) delete env.DATABASE_URL;
   server = spawn(process.execPath, ['server.js'], {
     env: {
-      ...process.env,
+      ...env,
       PORT: String(PORT),
       DB_PATH,
       STORAGE_ROOT,
@@ -51,7 +104,10 @@ export async function startServer() {
   server.stdout.on('data', () => {});
   server.stderr.on('data', (chunk) => {
     const line = String(chunk);
-    if (/Error|error:/i.test(line)) process.stderr.write(`[server] ${line}`);
+    // TEST_SERVER_LOG=1 shows everything the server writes to stderr.
+    if (process.env.TEST_SERVER_LOG === '1' || /Error|error:/i.test(line)) {
+      process.stderr.write(`[server] ${line}`);
+    }
   });
 
   const deadline = Date.now() + 40_000;
@@ -66,8 +122,19 @@ export async function startServer() {
 }
 
 export async function stopServer() {
-  server?.kill();
-  await new Promise((r) => setTimeout(r, 300));
+  if (server && server.exitCode === null && server.signalCode === null) {
+    const exited = new Promise((r) => server.once('exit', r));
+    server.kill();
+    // Graceful shutdown closes the pool; don't wait forever for it.
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    if (server.exitCode === null && server.signalCode === null) server.kill('SIGKILL');
+  }
+  await new Promise((r) => setTimeout(r, PG_DB_NAME ? 0 : 300));
+  try {
+    await dropTestDatabase();
+  } catch (err) {
+    process.stderr.write(`[harness] could not drop ${PG_DB_NAME}: ${err.message}\n`);
+  }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* windows file lock */ }
 }
 

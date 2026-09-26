@@ -1226,7 +1226,7 @@ describe('role icons', () => {
 
 describe('AFK sweep', () => {
   test('idle users are moved to the AFK channel; fresh and unknown users are not', async () => {
-    const { runQuery, getQuery } = await import('../db.js');
+    const { runQuery, getQuery, sql } = await import('../db.js');
     const { sweepAfk, __markIdle } = await import('../realtime.js');
     const emitted = [];
     const fakeIo = {
@@ -1235,8 +1235,9 @@ describe('AFK sweep', () => {
     };
 
     // server-1: chan-104 is a voice channel; create a dedicated AFK channel.
-    await runQuery(`INSERT OR IGNORE INTO channels (id, server_id, name, type, position, created_at)
-                    VALUES ('chan-afk', 'server-1', 'AFK', 'voice', 99, datetime('now'))`);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position, created_at)
+                    VALUES ('chan-afk', 'server-1', 'AFK', 'voice', 99, ${sql.now})
+                    ON CONFLICT DO NOTHING`);
     await runQuery(`UPDATE servers SET afk_channel_id = 'chan-afk', afk_timeout = 60 WHERE id = 'server-1'`);
     await runQuery(`DELETE FROM voice_states WHERE user_id IN ('user-2', 'user-3')`);
     await runQuery(`INSERT INTO voice_states (user_id, server_id, channel_id, session_id) VALUES ('user-2', 'server-1', 'chan-104', 's2')`);

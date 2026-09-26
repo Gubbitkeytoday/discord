@@ -428,17 +428,38 @@ const driver = isPostgres
 
 // --- promise helpers ---------------------------------------------------------
 
+// In-flight operations, so closeDB() can let work that is already running
+// (a socket's disconnect handler marking its user offline, say) finish before
+// the connection goes away, instead of failing it half-way.
+let inflight = 0;
+let lastSettled = Date.now();
+let closed = false;
+function track(promise) {
+  inflight += 1;
+  return promise.finally(() => {
+    inflight -= 1;
+    lastSettled = Date.now();
+  });
+}
+function guard() {
+  if (closed) {
+    const err = new Error('Database is closed (the server is shutting down)');
+    err.code = 'DB_CLOSED';
+    throw err;
+  }
+}
+
 /** Execute a statement. Resolves to { changes, lastID } (plus `rows` on Postgres). */
-export const runQuery = (text, params = []) => driver.run(text, params);
+export const runQuery = async (text, params = []) => { guard(); return track(driver.run(text, params)); };
 
 /** First row, or undefined. */
-export const getQuery = (text, params = []) => driver.get(text, params);
+export const getQuery = async (text, params = []) => { guard(); return track(driver.get(text, params)); };
 
 /** All rows (never null). */
-export const allQuery = (text, params = []) => driver.all(text, params);
+export const allQuery = async (text, params = []) => { guard(); return track(driver.all(text, params)); };
 
 /** Several statements, no parameters (schema scripts). */
-export const execScript = (text) => driver.exec(text);
+export const execScript = async (text) => { guard(); return track(driver.exec(text)); };
 
 /**
  * Run `fn` inside a transaction, rolling back on any throw.
@@ -456,7 +477,7 @@ export const execScript = (text) => driver.exec(text);
  * `opts` (Postgres only): { isolation: 'read committed' | 'repeatable read' |
  * 'serializable', retries }.
  */
-export const transaction = (fn, opts) => driver.transaction(fn, opts);
+export const transaction = async (fn, opts) => { guard(); return track(driver.transaction(fn, opts)); };
 
 /** True when the caller is inside a transaction(). */
 export const inTransaction = () => driver.inTransaction();
@@ -657,9 +678,23 @@ export async function initDB({ seed = shouldSeed() } = {}) {
   return driver.handle;
 }
 
-/** Drain and close: flushes the SQLite WAL, or ends the Postgres pool. */
-export function closeDB() {
-  return driver.close();
+/**
+ * Drain and close: waits (up to `drainMs`) until nothing has touched the
+ * database for `quietMs` — so a chain of queries is not cut between two
+ * statements — then flushes the SQLite WAL or ends the Postgres pool. Later
+ * calls fail fast with code DB_CLOSED.
+ */
+let closing = null;
+export function closeDB({ drainMs = 5000, quietMs = 150 } = {}) {
+  closing ??= (async () => {
+    const deadline = Date.now() + drainMs;
+    while (Date.now() < deadline && (inflight > 0 || Date.now() - lastSettled < quietMs)) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    closed = true;
+    await driver.close();
+  })();
+  return closing;
 }
 
 export default driver.handle;

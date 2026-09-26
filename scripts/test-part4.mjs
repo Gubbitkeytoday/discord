@@ -310,16 +310,19 @@ describe('message hardening', () => {
   });
 
   test('search never returns someone else\'s ephemeral message', async () => {
-    const { runQuery } = await import('../db.js');
+    const { runQuery, isPostgres } = await import('../db.js');
     const { generateId } = await import('../lib/snowflake.js');
     const id = generateId();
     await runQuery(
       `INSERT INTO messages (id, channel_id, server_id, user_id, content, ephemeral_user_id)
        VALUES (?, 'chan-102', 'server-1', 'user-3', 'ephemeralsecretxyz', 'user-2')`, [id]
     );
-    await runQuery(
-      `INSERT INTO messages_fts (content, message_id, channel_id) VALUES ('ephemeralsecretxyz', ?, 'chan-102')`, [id]
-    );
+    // SQLite searches a separate FTS table; Postgres indexes messages.content.
+    if (!isPostgres) {
+      await runQuery(
+        `INSERT INTO messages_fts (content, message_id, channel_id) VALUES ('ephemeralsecretxyz', ?, 'chan-102')`, [id]
+      );
+    }
     const mine = await get('/api/search/messages?q=ephemeralsecretxyz');
     assert.ok(!mine.body.some((m) => m.id === id), 'ephemeral reply leaked through search');
     const theirs = await get('/api/search/messages?q=ephemeralsecretxyz', as('user-2'));
