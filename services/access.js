@@ -100,14 +100,24 @@ export async function assertChannelAccess({ channelId, userId, permission = null
     const WRITE_ACTIONS = ['SEND_MESSAGES', 'ADD_REACTIONS', 'MANAGE_MESSAGES', 'ATTACH_FILES'];
     if (channel.type === 'dm' && WRITE_ACTIONS.includes(permission)) {
       const blocked = await getQuery(
-        `SELECT 1 FROM blocks b
+        `SELECT b.user_id AS blocker FROM blocks b
            JOIN channel_recipients cr ON cr.channel_id = ?
           WHERE (b.user_id = cr.user_id AND b.blocked_id = ?)
              OR (b.user_id = ? AND b.blocked_id = cr.user_id)
+          ORDER BY CASE WHEN b.user_id = ? THEN 0 ELSE 1 END
           LIMIT 1`,
-        [channelId, userId, userId]
+        [channelId, userId, userId, userId]
       );
-      if (blocked) throw ApiError.forbidden('You cannot message this user');
+      // The person who blocked may be told so (their client offers Unblock).
+      // The blocked person gets the same words as every other privacy
+      // refusal, so a block cannot be told apart from a DM setting.
+      if (blocked?.blocker === userId) {
+        throw new ApiError('You blocked this user. Unblock them to send messages.', { status: 403, code: 'YOU_BLOCKED_USER' });
+      }
+      if (blocked) {
+        throw new ApiError("This person isn't accepting messages or requests from you right now.",
+          { status: 403, code: 'USER_UNREACHABLE' });
+      }
     }
     // Everyone in a DM holds the full conversational permission set.
     return { channel, permissions: null, isDm: true };

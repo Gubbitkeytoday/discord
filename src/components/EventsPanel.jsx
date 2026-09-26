@@ -9,7 +9,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check
+  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat
 } from 'lucide-react';
 import { api, get } from '../api';
 import ConfirmModal from './ConfirmModal';
@@ -240,11 +240,16 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
             ) : over ? (
               <span className="text-d-text3">{t(`events.status_${event.status}`)}</span>
             ) : (
-              <span className="flex items-center gap-1 text-d-brand">
-                <Clock className="h-3.5 w-3.5" /> {relative(event.starts_at)}
+              <span className="flex items-center gap-1 text-d-link">
+                <Clock className="h-3.5 w-3.5" aria-hidden="true" /> {relative(event.starts_at)}
               </span>
             )}
             <span className="text-d-text3">· {fmtDate(event.starts_at)}</span>
+            {Boolean(event.recurrence) && (
+              <span className="flex items-center gap-1 text-d-text2">
+                · <Repeat className="h-3.5 w-3.5" aria-hidden="true" /> {t(`adm.repeat.${event.recurrence}`)}
+              </span>
+            )}
           </div>
 
           <h3 className="text-base font-semibold leading-snug text-d-strong">{event.name}</h3>
@@ -332,18 +337,24 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
   const [form, setForm] = useState({
     name: event?.name ?? '',
     description: event?.description ?? '',
-    where: event?.channel_id ? 'channel' : 'external',
+    // A new event defaults to the first voice channel when there is one.
+    where: event ? (event.channel_id ? 'channel' : 'external') : (voiceChannels.length ? 'channel' : 'external'),
     channel_id: event?.channel_id ?? voiceChannels[0]?.id ?? '',
     location: event?.location ?? '',
     starts_at: toLocalInput(event?.starts_at) || toLocalInput(new Date(Date.now() + 3600_000).toISOString()),
-    ends_at: toLocalInput(event?.ends_at)
+    ends_at: toLocalInput(event?.ends_at),
+    recurrence: event?.recurrence ?? '',
+    recurrence_until: event?.recurrence_until ? toLocalInput(event.recurrence_until).slice(0, 10) : '',
+    stage_topic: ''
   });
   const [busy, setBusy] = useState(false);
   const dialogRef = useDialog(onClose);
   const set = (patch) => setForm((c) => ({ ...c, ...patch }));
 
+  const isStage = form.where === 'channel' && voiceChannels.find((c) => c.id === form.channel_id)?.type === 'stage';
   const valid = form.name.trim() && form.starts_at
-    && (form.where === 'channel' ? form.channel_id : form.location.trim());
+    && (form.where === 'channel' ? form.channel_id : form.location.trim())
+    && (!form.recurrence || !form.recurrence_until || form.recurrence_until >= form.starts_at.slice(0, 10));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -355,12 +366,20 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
       channel_id: form.where === 'channel' ? form.channel_id : null,
       location: form.where === 'external' ? form.location.trim() : null,
       starts_at: new Date(form.starts_at).toISOString(),
-      ends_at: form.ends_at ? new Date(form.ends_at).toISOString() : null
+      ends_at: form.ends_at ? new Date(form.ends_at).toISOString() : null,
+      recurrence: form.recurrence || null,
+      // "Until" is a day: the series may run through the end of it.
+      recurrence_until: form.recurrence && form.recurrence_until
+        ? new Date(`${form.recurrence_until}T23:59:59`).toISOString() : null
     };
     try {
       const saved = event
         ? await api(`/api/events/${event.id}`, { method: 'PATCH', body: payload })
         : await api(`/api/servers/${server.id}/events`, { method: 'POST', body: payload });
+      // A stage event sets the stage's topic, so listeners see what is on.
+      if (isStage && form.stage_topic.trim()) {
+        await api(`/api/channels/${form.channel_id}`, { method: 'PATCH', body: { topic: form.stage_topic.trim() } }).catch(() => {});
+      }
       onSaved(saved);
     } catch (err) {
       onToast?.(err.message, { type: 'error' });
@@ -419,7 +438,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
               <span className={label}>{t('events.channel')}</span>
               <select value={form.channel_id} onChange={(e) => set({ channel_id: e.target.value })}
                 className={`${field} cursor-pointer`}>
-                {voiceChannels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {voiceChannels.map((c) => <option key={c.id} value={c.id}>{c.type === 'stage' ? '📢 ' : '🔊 '}{c.name}</option>)}
               </select>
             </label>
           ) : (
@@ -442,6 +461,38 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
                 className={field} />
             </label>
           </div>
+
+          {isStage && (
+            <label className="block">
+              <span className={label}>{t('adm.stageTopic')}</span>
+              <input value={form.stage_topic} maxLength={120} onChange={(e) => set({ stage_topic: e.target.value })}
+                placeholder={form.name || t('adm.stageTopicPlaceholder')} className={field} />
+              <span className="mt-1 block text-[11px] text-d-text2">{t('adm.stageTopicHint')}</span>
+            </label>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block">
+              <span className={label}>{t('adm.repeat')}</span>
+              <select value={form.recurrence} onChange={(e) => set({ recurrence: e.target.value })} className={`${field} cursor-pointer`}>
+                <option value="">{t('adm.repeat.none')}</option>
+                <option value="daily">{t('adm.repeat.daily')}</option>
+                <option value="weekly">{t('adm.repeat.weekly')}</option>
+                <option value="biweekly">{t('adm.repeat.biweekly')}</option>
+                <option value="monthly">{t('adm.repeat.monthly')}</option>
+              </select>
+            </label>
+            {Boolean(form.recurrence) && (
+              <label className="block">
+                <span className={label}>{t('adm.repeatUntil')} <span className="font-normal normal-case text-d-text3">({t('common.optional')})</span></span>
+                <input type="date" value={form.recurrence_until} min={form.starts_at.slice(0, 10)}
+                  onChange={(e) => set({ recurrence_until: e.target.value })} className={field} />
+              </label>
+            )}
+          </div>
+          {Boolean(form.recurrence) && (
+            <p className="-mt-2 text-[11px] text-d-text2">{t('adm.repeatHint')}</p>
+          )}
 
           <label className="block">
             <span className={label}>{t('events.description')}</span>

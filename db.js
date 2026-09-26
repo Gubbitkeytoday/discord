@@ -19,6 +19,8 @@ import { DISCORD_EPOCH } from './lib/snowflake.js';
 import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
 import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
+import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
+import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // admin polish (v41–v42)
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
 
@@ -665,6 +667,27 @@ const MIGRATIONS = [
       await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
     }
   }
+  // safety (v39–v40): age, instance admin, report routing, message requests,
+  // instance settings + audit log. See db/migrations/safety.js.
+  ,{
+    version: 39,
+    name: 'safety: age, instance admin, report routing, message requests',
+    up: () => safetyV39Sqlite({ runQuery, allQuery }),
+    postgres: () => safetyV39Postgres({ runQuery })
+  }
+  ,{
+    version: 40,
+    name: 'safety: instance settings and admin audit log',
+    up: () => safetyV40Sqlite({ runQuery }),
+    postgres: () => safetyV40Postgres({ runQuery })
+  }
+  // admin polish (v41–v42): recurring events, moderator alert channel.
+  ,...ADMIN_POLISH_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
 ];
 
 // Applied in array order, so the array order must be the version order — and

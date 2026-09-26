@@ -1,8 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Camera, Loader2, ArrowLeft, LayoutTemplate, Hash, Volume2, MessagesSquare } from 'lucide-react';
+import { X, Camera, Loader2, ArrowLeft, LayoutTemplate, Hash, Volume2, MessagesSquare, Gamepad2, GraduationCap, Heart, LifeBuoy } from 'lucide-react';
 import { upload, get } from '../api';
 import { useDialog } from './settings/primitives';
-import { t } from '../i18n/index.jsx';
+import { t, currentLocaleCode } from '../i18n/index.jsx';
+
+/**
+ * Built-in templates, served by the API under reserved codes
+ * (`builtin-<key>-<lang>`) and named in the viewer's language.
+ */
+const BUILTIN_TEMPLATES = () => [
+  { key: 'gaming', icon: Gamepad2, title: t('adm.tpl.gaming'), hint: t('adm.tpl.gamingHint') },
+  { key: 'club', icon: GraduationCap, title: t('adm.tpl.club'), hint: t('adm.tpl.clubHint') },
+  { key: 'friends', icon: Heart, title: t('adm.tpl.friends'), hint: t('adm.tpl.friendsHint') },
+  { key: 'support', icon: LifeBuoy, title: t('adm.tpl.support'), hint: t('adm.tpl.supportHint') }
+];
+const builtinCode = (key) => `builtin-${key}-${String(currentLocaleCode() || 'en').split('-')[0]}`;
 
 /**
  * Discord's create/join fork: choose to make a server or paste an invite.
@@ -43,9 +55,9 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
     onClose();
   };
 
-  const lookupTemplate = async (e) => {
+  const lookupTemplate = async (e, explicitCode = null) => {
     e.preventDefault();
-    const code = templateInput.trim().split('/').filter(Boolean).pop();
+    const code = explicitCode ?? templateInput.trim().split('/').filter(Boolean).pop();
     if (!code) { setError(t('server.invalidTemplate')); return; }
     setLoadingTemplate(true); setError(null);
     try {
@@ -110,13 +122,35 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
         {error && <p className="px-6 pb-2 text-xs text-d-danger text-center">{error}</p>}
 
         {mode === 'choose' && (
-          <div className="px-6 pb-6 space-y-3">
+          <div className="px-6 pb-6 space-y-3 max-h-[70vh] overflow-y-auto">
             <button
               onClick={() => setMode('create')}
               className="w-full bg-d-brand hover:bg-d-brandhover text-white font-semibold py-3 rounded-lg transition-colors"
             >
               {t('server.createOwn')}
             </button>
+            {onCreateFromTemplate && (
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-d-text2 mb-2 text-left">{t('adm.startFromTemplate')}</p>
+                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {BUILTIN_TEMPLATES().map((tpl) => (
+                    <li key={tpl.key}>
+                      <button
+                        type="button"
+                        onClick={(e) => { setMode('template'); setServerName(''); lookupTemplate(e, builtinCode(tpl.key)); }}
+                        className="w-full h-full min-h-[56px] flex items-start gap-2 text-left p-3 rounded-lg border border-d-divider bg-d-surface hover:bg-d-hover transition-colors"
+                      >
+                        <tpl.icon className="w-5 h-5 text-d-text2 shrink-0 mt-0.5" aria-hidden="true" />
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-d-strong">{tpl.title}</span>
+                          <span className="block text-[11px] text-d-text2">{tpl.hint}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {onCreateFromTemplate && (
               <button
                 onClick={() => setMode('template')}

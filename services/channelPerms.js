@@ -11,6 +11,49 @@ import { addReference, releaseReference, findFileByPublicUrl } from '../storageS
 
 // --- channel overwrites ------------------------------------------------------
 
+const overwriteKey = (o) => `${o.target_type}:${o.target_id}:${toBigInt(o.allow)}:${toBigInt(o.deny)}`;
+
+async function rawOverwrites(channelId) {
+  return allQuery(
+    `SELECT target_type, target_id, allow, deny FROM channel_overwrites WHERE channel_id = ?`, [channelId]
+  );
+}
+
+/**
+ * Children of a category that are currently "synced" — their overwrites
+ * equal the category's. Discord keeps exactly these in step when the
+ * category's permissions change; a child that was customised is left alone.
+ */
+async function syncedChildrenOf(categoryId) {
+  const parent = await rawOverwrites(categoryId);
+  const parentKeys = new Set(parent.map(overwriteKey));
+  const children = await allQuery(
+    `SELECT id FROM channels WHERE parent_id = ? AND type != 'thread' AND deleted_at IS NULL`, [categoryId]
+  );
+  const synced = [];
+  for (const child of children) {
+    const own = await rawOverwrites(child.id);
+    if (own.length === parent.length && own.every((o) => parentKeys.has(overwriteKey(o)))) synced.push(child.id);
+  }
+  return synced;
+}
+
+async function copyOverwrites(fromChannelId, toChannelIds) {
+  if (!toChannelIds.length) return;
+  const source = await rawOverwrites(fromChannelId);
+  await transaction(async () => {
+    for (const id of toChannelIds) {
+      await runQuery(`DELETE FROM channel_overwrites WHERE channel_id = ?`, [id]);
+      for (const o of source) {
+        await runQuery(
+          `INSERT INTO channel_overwrites (channel_id, target_type, target_id, allow, deny) VALUES (?, ?, ?, ?, ?)`,
+          [id, o.target_type, o.target_id, String(o.allow), String(o.deny)]
+        );
+      }
+    }
+  });
+}
+
 export async function listOverwrites(channelId) {
   const rows = await allQuery(
     `SELECT o.*,
@@ -40,10 +83,14 @@ export async function setOverwrite({
   }
 
   const channel = await getQuery(
-    `SELECT id, server_id FROM channels WHERE id = ? AND deleted_at IS NULL`, [channelId]
+    `SELECT id, server_id, type FROM channels WHERE id = ? AND deleted_at IS NULL`, [channelId]
   );
   if (!channel) throw ApiError.notFound('Channel');
   if (!channel.server_id) throw new ApiError('Permission overwrites exist only on server channels', { status: 409, code: 'NOT_A_GUILD_CHANNEL' });
+  if (targetType === 'role') {
+    const role = await getQuery(`SELECT id FROM roles WHERE id = ? AND server_id = ?`, [targetId, channel.server_id]);
+    if (!role) throw ApiError.notFound('Role');
+  }
 
   const actor = await assertPermission({
     userId: actorId, serverId: channel.server_id, permission: 'MANAGE_ROLES'
@@ -61,6 +108,7 @@ export async function setOverwrite({
     return deleteOverwrite({ channelId, actorId, targetType, targetId });
   }
 
+  const synced = channel.type === 'category' ? await syncedChildrenOf(channelId) : [];
   await runQuery(
     `INSERT INTO channel_overwrites (channel_id, target_type, target_id, allow, deny)
      VALUES (?, ?, ?, ?, ?)
@@ -68,6 +116,7 @@ export async function setOverwrite({
      DO UPDATE SET allow = excluded.allow, deny = excluded.deny`,
     [channelId, targetType, targetId, String(allow), String(deny)]
   );
+  await copyOverwrites(channelId, synced);
 
   await writeAuditLog({
     serverId: channel.server_id, userId: actorId, actionType: 'CHANNEL_OVERWRITE_UPDATE',
@@ -79,16 +128,18 @@ export async function setOverwrite({
 }
 
 export async function deleteOverwrite({ channelId, actorId, targetType, targetId }) {
-  const channel = await getQuery(`SELECT server_id FROM channels WHERE id = ?`, [channelId]);
+  const channel = await getQuery(`SELECT server_id, type FROM channels WHERE id = ?`, [channelId]);
   if (!channel) throw ApiError.notFound('Channel');
   await assertPermission({
     userId: actorId, serverId: channel.server_id, permission: 'MANAGE_ROLES'
   });
 
+  const synced = channel.type === 'category' ? await syncedChildrenOf(channelId) : [];
   await runQuery(
     `DELETE FROM channel_overwrites WHERE channel_id = ? AND target_type = ? AND target_id = ?`,
     [channelId, targetType, targetId]
   );
+  await copyOverwrites(channelId, synced);
   await writeAuditLog({
     serverId: channel.server_id, userId: actorId, actionType: 'CHANNEL_OVERWRITE_DELETE',
     targetType: 'channel', targetId: channelId,

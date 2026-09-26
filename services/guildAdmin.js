@@ -14,6 +14,8 @@ import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { toBigInt, ALL_PERMISSIONS } from '../lib/permissions.js';
 import { addReference, releaseReference, findFileByPublicUrl } from '../storageService.js';
 import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAuditLog } from './guilds.js';
+import { publicStatus, currentViewerId } from '../lib/presence.js'; // safety
+import { canViewProfile } from './users.js'; // safety
 
 // --- guild profile -----------------------------------------------------------
 
@@ -329,7 +331,7 @@ export async function reorderRoles({ serverId, actorId, order }) {
 
 // --- members -----------------------------------------------------------------
 
-export async function listMembers(serverId, { limit = 200, search = null } = {}) {
+export async function listMembers(serverId, { limit = 200, search = null, viewerId = currentViewerId() } = {}) {
   const params = [serverId];
   let where = 'sm.server_id = ? AND sm.left_at IS NULL';
   if (search) {
@@ -344,6 +346,7 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
 
   const members = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url, u.status, u.is_bot,
+            u.profile_visibility,
             sm.nickname, sm.joined_at, sm.timeout_until, sm.pending,
             sm.avatar_url AS member_avatar_url, sm.pronouns AS member_pronouns
        FROM server_members sm JOIN users u ON u.id = sm.user_id
@@ -358,6 +361,14 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
     [serverId]
   );
 
+  // Pronouns follow profile visibility; only members with a restricted
+  // profile cost a (friend / mutual) lookup.
+  const hiddenProfiles = new Set();
+  for (const m of members) {
+    if ((m.profile_visibility ?? 'everyone') === 'everyone' || m.id === viewerId) continue;
+    if (!(await canViewProfile({ id: m.id, profile_visibility: m.profile_visibility }, viewerId))) hiddenProfiles.add(m.id);
+  }
+
   const byUser = new Map();
   for (const row of roleRows) {
     if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
@@ -370,9 +381,11 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
     const iconed = roles.find((r) => r.icon_url);
     return {
       ...m,
+      // "Invisible" is offline to everyone but its owner.
+      status: publicStatus(m.status, viewerId, m.id),
       // A per-server avatar wins over the account one, as it does in Discord.
       avatar_url: m.member_avatar_url || m.avatar_url,
-      pronouns: m.member_pronouns ?? null,
+      pronouns: hiddenProfiles.has(m.id) ? null : m.member_pronouns ?? null,
       pending: Boolean(m.pending),
       roles,
       role_icon: iconed ? { url: iconed.icon_url, name: iconed.name } : null
@@ -410,33 +423,45 @@ export async function setGuildProfile({ serverId, userId, actorId, patch }) {
   return getGuildProfile({ serverId, userId });
 }
 
-/** The per-server profile, with the global one filled in behind it. */
-export async function getGuildProfile({ serverId, userId }) {
+/**
+ * The per-server profile, with the global one filled in behind it.
+ *
+ * Profile visibility applies here exactly as on /api/users/:id: someone who
+ * keeps their profile to friends (or mutuals) shows a viewer outside that
+ * circle only their name and avatar — no bio, pronouns or banner, neither the
+ * per-server ones nor the global ones behind them. `viewerId` defaults to the
+ * requesting user; no viewer at all is treated as a stranger.
+ */
+export async function getGuildProfile({ serverId, userId, viewerId = currentViewerId() }) {
   const row = await getQuery(
     `SELECT sm.nickname, sm.avatar_url, sm.banner_url, sm.bio, sm.pronouns, sm.joined_at,
             u.username, u.display_name, u.avatar_url AS global_avatar_url, u.banner_url AS global_banner_url,
-            u.bio AS global_bio, u.pronouns AS global_pronouns
+            u.bio AS global_bio, u.pronouns AS global_pronouns, u.profile_visibility
        FROM server_members sm JOIN users u ON u.id = sm.user_id
       WHERE sm.server_id = ? AND sm.user_id = ? AND sm.left_at IS NULL`,
     [serverId, userId]
   );
   if (!row) throw ApiError.notFound('Member');
+  const hidden = viewerId !== userId
+    && !(await canViewProfile({ id: userId, profile_visibility: row.profile_visibility }, viewerId));
+  const pick = (value) => (hidden ? null : value ?? null);
   return {
     server_id: serverId,
     user_id: userId,
     nickname: row.nickname ?? null,
     avatar_url: row.avatar_url ?? null,
-    banner_url: row.banner_url ?? null,
-    bio: row.bio ?? null,
-    pronouns: row.pronouns ?? null,
+    banner_url: pick(row.banner_url),
+    bio: pick(row.bio),
+    pronouns: pick(row.pronouns),
     joined_at: row.joined_at,
+    ...(hidden ? { profile_hidden: true } : {}),
     // What the member actually looks like here, once the overrides are applied.
     effective: {
       display_name: row.nickname || row.display_name || row.username,
       avatar_url: row.avatar_url || row.global_avatar_url,
-      banner_url: row.banner_url || row.global_banner_url,
-      bio: row.bio ?? row.global_bio,
-      pronouns: row.pronouns ?? row.global_pronouns
+      banner_url: pick(row.banner_url || row.global_banner_url),
+      bio: pick(row.bio ?? row.global_bio),
+      pronouns: pick(row.pronouns ?? row.global_pronouns)
     }
   };
 }

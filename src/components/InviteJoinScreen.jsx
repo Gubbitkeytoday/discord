@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, Users, Circle, AlertTriangle } from 'lucide-react';
 import { get, post } from '../api';
 import { t } from '../i18n/index.jsx';
 import { serverIconOf } from '../utils/avatar';
+
+// Written by LoginScreen when "Sign up & join" / "Log in & join" succeeds.
+const AUTO_JOIN_KEY = 'antigravity.autoJoinInvite';
 
 /**
  * The screen behind /invite/:code — Discord shows the server, who invited you
@@ -16,7 +19,18 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
   useEffect(() => {
     let cancelled = false;
     get(`/api/invites/${encodeURIComponent(code)}`)
-      .then((data) => { if (!cancelled) setPreview(data); })
+      .then((data) => {
+        if (cancelled) return;
+        setPreview(data);
+        // "Sign up & join" on the login screen already said yes: accept at
+        // once instead of asking a second time.
+        let autoJoin = false;
+        try {
+          autoJoin = window.sessionStorage.getItem(AUTO_JOIN_KEY) === code;
+          window.sessionStorage.removeItem(AUTO_JOIN_KEY);
+        } catch { /* private window */ }
+        if (autoJoin) joinRef.current?.();
+      })
       .catch((err) => { if (!cancelled) setError(err.message); });
     return () => { cancelled = true; };
   }, [code]);
@@ -32,6 +46,8 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
       setBusy(false);
     }
   };
+  const joinRef = useRef(join);
+  joinRef.current = join;
 
   return (
     <div className="fixed inset-0 bg-d-base flex items-center justify-center overlay-center p-4">
@@ -94,7 +110,7 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
               className="w-full bg-d-brand hover:bg-d-brandhover disabled:opacity-60 text-white font-semibold py-2.5 rounded transition-colors flex items-center justify-center gap-2"
             >
               {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-              {preview.already_member ? t('invites.openServer') : t('invites.acceptInvite')}
+              {busy ? t('safety.joining') : preview.already_member ? t('invites.openServer') : t('invites.acceptInvite')}
             </button>
             <button onClick={onCancel} className="mt-3 text-xs text-d-text3 hover:underline">
               {t('invites.noThanks')}

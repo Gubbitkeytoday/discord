@@ -1724,9 +1724,18 @@ an example, not a default).
 | `RATE_LIMIT_LOGIN_PER_5MIN` | `10` | per IP + username |
 | `RATE_LIMIT_LOGIN_IP_PER_5MIN` | `60` | per IP |
 | `RATE_LIMIT_WRITE_PER_MIN` | `60` | message sends / edits over HTTP |
-| `RATE_LIMIT_REGISTER_PER_HOUR` | `10` | new accounts per IP |
+| `RATE_LIMIT_REGISTER_PER_HOUR` | `20` | new accounts per IP (no invite) |
+| `RATE_LIMIT_REGISTER_INVITE_PER_HOUR` | `100` | sign-ups carrying a valid invite (schools, clubs on one Wi-Fi) |
 | `SOCKET_FLOOD_MULTIPLIER` | `1` | Socket flood guard: multiply every per-event budget (load tests only). |
 | `PERM_CACHE_GUILDS` | `2000` | Guilds whose permission data is cached in memory (LRU). |
+
+**safety & instance administration**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `REGISTRATION_MODE` | `open` | Who may create accounts: open \| invite (valid invite required) \| closed. Instance admins can override this at runtime in the admin console. |
+| `ADMIN_EMAILS` |  | Comma-separated e-mails that are instance admins once verified (the first account on a fresh instance is admin automatically). |
+| `REQUIRE_BIRTHDATE` | `0` | Require a date of birth at sign-up (year + month only are stored; under-13 is refused, under-18 gets teen-safe defaults). |
 
 **passkeys (WebAuthn)**
 

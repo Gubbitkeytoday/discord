@@ -53,6 +53,12 @@ export default function StreamerModeTab() {
           onChange={(value) => set({ hidePersonalInformation: value })}
         />
         <SettingToggle
+          label={t('safety.hideUsernames')}
+          hint={t('safety.hideUsernamesHint')}
+          checked={streamer.hideUsernames !== false}
+          onChange={(value) => set({ hideUsernames: value })}
+        />
+        <SettingToggle
           label={t('streamer.hideInvites')}
           hint={t('streamer.hideInvitesHint')}
           checked={streamer.hideInviteLinks}
