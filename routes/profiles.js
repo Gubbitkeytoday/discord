@@ -9,6 +9,7 @@
 //    PUT    /api/profiles/@me/custom-status             { text, emoji, clear_after, expires_at }
 //    GET    /api/identities?ids=a,b[&server_id=]        compact identity for lists (≤ 200)
 //    POST   /api/profiles/:userId/report                { reason, details, server_id } — snapshot
+//    POST   /api/reports/:reportId/profile-snapshot     attach a snapshot to my own user report
 //
 //    GET    /api/servers/:serverId/tag                  the server's tag (members)
 //    PUT    /api/servers/:serverId/tag                  { tag, icon, color, enabled } (MANAGE_GUILD)
@@ -207,6 +208,23 @@ export default function createProfilesRouter({ io } = {}) {
     const context = { ...(report.context ?? {}), profile: snapshot };
     await runQuery(`UPDATE reports SET context = ? WHERE id = ?`, [JSON.stringify(context), report.id]);
     res.status(201).json({ ...report, context });
+  }));
+
+  // The generic report dialog files a 'user' report through /api/reports;
+  // the profile UI then attaches the snapshot to that report (its own only).
+  router.post('/reports/:reportId/profile-snapshot', reportLimit, asyncRoute(async (req, res) => {
+    const reporterId = requireUser(req);
+    const row = await getQuery(
+      `SELECT id, reporter_id, target_type, target_id, context FROM reports WHERE id = ?`, [req.params.reportId]
+    );
+    if (!row || row.reporter_id !== reporterId || row.target_type !== 'user') throw ApiError.notFound('Report');
+    let context = {};
+    try { context = row.context ? JSON.parse(row.context) : {}; } catch { context = {}; }
+    if (context?.profile) return res.json({ attached: false });
+    const serverId = req.body?.server_id ? String(req.body.server_id) : null;
+    context = { ...(context ?? {}), profile: await profiles.profileSnapshot(row.target_id, { serverId }) };
+    await runQuery(`UPDATE reports SET context = ? WHERE id = ?`, [JSON.stringify(context), row.id]);
+    res.json({ attached: true });
   }));
 
   // --- server tag --------------------------------------------------------------------

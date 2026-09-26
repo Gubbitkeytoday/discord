@@ -523,5 +523,17 @@ describe('badges, new members, full profile and reports', () => {
     assert.equal(JSON.parse(row.context).profile.user.id, b);
     res = await api('POST', `/api/profiles/${b}/report`, { reason: 'bogus' }, as(c));
     assert.equal(res.status, 400);
+
+    // A report filed by the generic dialog gets the snapshot attached — only by its reporter, once.
+    const generic = await api('POST', '/api/reports', { target_type: 'user', target_id: b, reason: 'harassment' }, as(c));
+    assert.equal(generic.status, 200, JSON.stringify(generic.body));
+    res = await api('POST', `/api/reports/${generic.body.id}/profile-snapshot`, {}, as(a));
+    assert.equal(res.status, 404, 'not your report');
+    res = await api('POST', `/api/reports/${generic.body.id}/profile-snapshot`, { server_id: serverId }, as(c));
+    assert.deepEqual(res.body, { attached: true });
+    res = await api('POST', `/api/reports/${generic.body.id}/profile-snapshot`, {}, as(c));
+    assert.deepEqual(res.body, { attached: false });
+    const snap = await getQuery(`SELECT context FROM reports WHERE id = ?`, [generic.body.id]);
+    assert.equal(JSON.parse(snap.context).profile.user.pronouns, 'they/them');
   });
 });

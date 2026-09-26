@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+<defs></defs>
+<style>.l{animation:ce-l 5s ease-in-out infinite;transform-origin:30px 30px}.r{animation:ce-r 5s ease-in-out infinite;transform-origin:90px 30px}@keyframes ce-l{0%,86%,100%{transform:rotate(0)}90%{transform:rotate(-10deg)}94%{transform:rotate(3deg)}}@keyframes ce-r{0%,70%,100%{transform:rotate(0)}74%{transform:rotate(10deg)}78%{transform:rotate(-3deg)}}@media (prefers-reduced-motion: reduce){*{animation:none!important}}</style>
+<g class="l"><path d="M16 36L20 4L44 20Z" fill="#334155" stroke="#0f172a" stroke-width="1.5" stroke-linejoin="round"/><path d="M22 30L24 12L37 21Z" fill="#f9a8d4"/></g>
+<g class="r"><path d="M104 36L100 4L76 20Z" fill="#334155" stroke="#0f172a" stroke-width="1.5" stroke-linejoin="round"/><path d="M98 30L96 12L83 21Z" fill="#f9a8d4"/></g>
+<path d="M50 112C54 116 66 116 70 112" fill="none" stroke="#f9a8d4" stroke-width="2" stroke-linecap="round"/>
+</svg>
