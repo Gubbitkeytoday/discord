@@ -12,7 +12,9 @@ import { Loader2, Check, Camera } from 'lucide-react';
 import { upload } from '../../api';
 import { t } from '../../i18n/index.jsx';
 import { DEFAULT_AVATAR } from '../../utils/avatar';
-import { PageHeader, Section, Field, Divider, inputClass, Button, Select } from './primitives';
+import {
+  PageHeader, Section, Field, Divider, inputClass, Button, Select, UnsavedBar, useReportDirty
+} from './primitives';
 
 const BLANK = {
   display_name: '', pronouns: '', bio: '',
@@ -32,7 +34,7 @@ const readProfile = (user) => ({
 const MAX_BYTES = { avatar: 10 * 1024 * 1024, banner: 15 * 1024 * 1024 };
 const ACCEPTED = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
 
-export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, onToast }) {
+export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, onToast, onDirtyChange, nudge = 0 }) {
   const [form, setForm] = useState(() => readProfile(currentUser) ?? BLANK);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -53,6 +55,7 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
   const original = readProfile(currentUser);
   const dirty = Object.keys(original).some((key) => form[key] !== original[key]);
   const set = (patch) => setForm((current) => ({ ...current, ...patch }));
+  useReportDirty(dirty, onDirtyChange);
 
   // Follow an external change (another device, a socket update) — but never
   // while there are local edits waiting to be saved.
@@ -111,6 +114,19 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
     }
   };
 
+  /** Drop the local previews; afterwards the form's URLs are what shows. */
+  const clearPreviews = () => setPreview((current) => {
+    Object.values(current).forEach((url) => url && URL.revokeObjectURL(url));
+    return { avatar: null, banner: null };
+  });
+
+  // Reset has to drop the previews too: they take precedence over the form's
+  // URL, so a reset used to leave the freshly picked picture on screen.
+  const reset = () => {
+    clearPreviews();
+    setForm(readProfile(currentUser));
+  };
+
   const clearImage = (kind) => {
     setPreview((current) => {
       if (current[kind]) URL.revokeObjectURL(current[kind]);
@@ -134,6 +150,7 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
         banner_url: form.banner_url || null,
         accent_color: form.accent_color
       });
+      clearPreviews();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -350,26 +367,19 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
 
       {/* --- unsaved changes bar --------------------------------------------- */}
       {dirty && (
-        <div
-          role="status"
-          className="sticky bottom-4 z-10 mt-8 flex items-center justify-between gap-4 rounded-lg
-            bg-d-base3 px-4 py-3 shadow-xl ring-1 ring-black/20
-            animate-[settingsBarIn_180ms_cubic-bezier(0.2,0.9,0.3,1.3)]"
-        >
-          <span className="text-sm font-medium text-d-strong">{t('common.unsavedChanges')}</span>
-          <div className="flex shrink-0 items-center gap-3">
-            <button
-              onClick={() => setForm(readProfile(currentUser))}
-              className="text-sm font-medium text-d-strong hover:underline"
-            >
-              {t('common.reset')}
-            </button>
-            <Button variant="primary" onClick={save} disabled={busy} className="bg-d-success hover:bg-d-successhover">
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : saved ? <Check className="h-4 w-4" /> : null}
-              {saved ? t('common.saved') : t('common.saveChanges')}
-            </Button>
-          </div>
-        </div>
+        <UnsavedBar
+          nudge={nudge}
+          onReset={reset}
+          onSave={save}
+          saving={busy}
+          // Saving mid-upload would send the old picture and drop the new one.
+          saveDisabled={Boolean(uploading)}
+        />
+      )}
+      {saved && !dirty && (
+        <p role="status" className="sticky bottom-4 mt-8 flex items-center gap-2 text-sm font-medium text-d-success">
+          <Check className="h-4 w-4" /> {t('common.saved')}
+        </p>
       )}
     </div>
   );

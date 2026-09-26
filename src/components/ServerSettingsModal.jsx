@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
   ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3
 } from 'lucide-react';
 
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog, UnsavedBar, useReportDirty } from './settings/primitives';
+import ConfirmModal from './ConfirmModal';
 import AutoModTab from './settings/AutoModTab';
 import WebhooksTab from './settings/WebhooksTab';
 import ChannelPermissionsTab from './settings/ChannelPermissionsTab';
@@ -20,22 +21,58 @@ import {
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
-const tabs = () => [
-  { key: 'overview', label: t('settings.overview'), icon: SettingsIcon },
-  { key: 'roles', label: t('settings.roles'), icon: Shield },
-  { key: 'members', label: t('autocomplete.members'), icon: Users },
-  { key: 'emojis', label: t('chat.emoji'), icon: Smile },
-  { key: 'invites', label: t('settings.invites'), icon: Link2 },
-  { key: 'bans', label: t('settings.bans'), icon: Ban },
-  { key: 'stickers', label: t('settings.stickers'), icon: Sticker },
-  { key: 'permissions', label: t('settings.channelPermissions'), icon: KeyRound },
-  { key: 'onboarding', label: t('settings.onboarding'), icon: Hand },
-  { key: 'insights', label: t('settings.insights'), icon: BarChart3 },
-  { key: 'automod', label: t('settings.automod'), icon: ShieldAlert },
-  { key: 'webhooks', label: t('settings.webhooks'), icon: Webhook },
-  { key: 'soundboard', label: t('settings.soundboard'), icon: Music },
-  { key: 'reports', label: t('settings.reports'), icon: Flag },
-  { key: 'audit', label: t('settings.auditLog'), icon: ScrollText }
+/**
+ * The nav, grouped the way Discord groups Server Settings. `perm` is the
+ * permission the tab's endpoints check: a tab the viewer cannot use is hidden
+ * rather than shown and left to fail with a 403 toast. Owners and
+ * administrators see everything.
+ */
+const tabGroups = () => [
+  {
+    key: 'server',
+    title: null,   // the server name is the heading of the first group
+    tabs: [
+      { key: 'overview', label: t('settings.overview'), icon: SettingsIcon, perm: 'MANAGE_GUILD' },
+      { key: 'roles', label: t('settings.roles'), icon: Shield, perm: 'MANAGE_ROLES' },
+      { key: 'permissions', label: t('settings.channelPermissions'), icon: KeyRound, perm: 'MANAGE_ROLES' },
+      { key: 'emojis', label: t('chat.emoji'), icon: Smile, perm: 'MANAGE_EMOJIS' },
+      { key: 'stickers', label: t('settings.stickers'), icon: Sticker, perm: 'MANAGE_EMOJIS' },
+      { key: 'soundboard', label: t('settings.soundboard'), icon: Music, perm: 'MANAGE_EMOJIS' }
+    ]
+  },
+  {
+    key: 'apps',
+    title: t('settings.groupApps'),
+    tabs: [
+      { key: 'webhooks', label: t('settings.webhooks'), icon: Webhook, perm: 'MANAGE_WEBHOOKS' }
+    ]
+  },
+  {
+    key: 'moderation',
+    title: t('settings.groupModeration'),
+    tabs: [
+      { key: 'automod', label: t('settings.automod'), icon: ShieldAlert, perm: 'MANAGE_GUILD' },
+      { key: 'reports', label: t('settings.reports'), icon: Flag, perm: 'MANAGE_MESSAGES' },
+      { key: 'audit', label: t('settings.auditLog'), icon: ScrollText, perm: 'VIEW_AUDIT_LOG' },
+      { key: 'bans', label: t('settings.bans'), icon: Ban, perm: 'BAN_MEMBERS' }
+    ]
+  },
+  {
+    key: 'community',
+    title: t('settings.groupCommunity'),
+    tabs: [
+      { key: 'onboarding', label: t('settings.onboarding'), icon: Hand, perm: 'MANAGE_GUILD' },
+      { key: 'insights', label: t('settings.insights'), icon: BarChart3, perm: 'MANAGE_GUILD' }
+    ]
+  },
+  {
+    key: 'people',
+    title: t('settings.groupPeople'),
+    tabs: [
+      { key: 'members', label: t('autocomplete.members'), icon: Users, perm: null },
+      { key: 'invites', label: t('settings.invites'), icon: Link2, perm: 'MANAGE_GUILD' }
+    ]
+  }
 ];
 
 const auditLabels = () => ({
@@ -57,7 +94,6 @@ export default function ServerSettingsModal({
   server, currentUserId, channels = [], initialTab = 'overview', viewerPermissions = [],
   onClose, onServerUpdated, onServerDeleted, onRefreshServer, onToast
 }) {
-  const [tab, setTab] = useState(initialTab);
   const [roles, setRoles] = useState([]);
   const [members, setMembers] = useState([]);
   const [emojis, setEmojis] = useState([]);
@@ -70,6 +106,11 @@ export default function ServerSettingsModal({
   const [sounds, setSounds] = useState([]);
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Discord will not let you leave a page with unsaved edits: the save bar
+  // turns red and shakes instead. Tabs with a save bar report `dirty` here;
+  // `nudge` counts refused navigations so the bar can react.
+  const [dirty, setDirty] = useState(false);
+  const [nudge, setNudge] = useState(0);
 
   const isOwner = server.owner_id === currentUserId;
   const can = useCallback(
@@ -77,17 +118,29 @@ export default function ServerSettingsModal({
     [viewerPermissions, isOwner]
   );
 
-  const authed = useMemo(
-    () => ({ 'Content-Type': 'application/json', 'x-user-id': currentUserId }),
-    [currentUserId]
+  const groups = useMemo(
+    () => tabGroups()
+      .map((group) => ({ ...group, tabs: group.tabs.filter((entry) => !entry.perm || can(entry.perm)) }))
+      .filter((group) => group.tabs.length > 0),
+    [can]
   );
+  const visibleKeys = groups.flatMap((group) => group.tabs.map((entry) => entry.key));
+  const [tab, setTab] = useState(() => (visibleKeys.includes(initialTab) ? initialTab : visibleKeys[0] ?? 'members'));
 
-  const api = useCallback(async (path, options = {}) => {
-    const res = await fetch(`/api/servers/${server.id}${path}`, { headers: authed, ...options });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-    return data;
-  }, [server.id, authed]);
+  /** Run `fn` unless a tab is holding unsaved edits, in which case say so. */
+  const guarded = (fn) => {
+    if (dirty) { setNudge((n) => n + 1); return; }
+    fn();
+  };
+  const switchTab = (key) => guarded(() => { setTab(key); setDirty(false); });
+  const requestClose = () => guarded(onClose);
+
+  // One wrapper for every server-scoped call: the shared client sends the
+  // session (cookie or bearer token) and turns error envelopes into throws.
+  const api = useCallback(
+    (path, { method = 'GET', body } = {}) => httpApi(`/api/servers/${server.id}${path}`, { method, body }),
+    [server.id]
+  );
 
   const load = useCallback(async (which) => {
     setLoading(true);
@@ -102,9 +155,9 @@ export default function ServerSettingsModal({
       if (which === 'webhooks') setWebhooks(await api('/webhooks'));
       if (which === 'stickers') setStickers(await api('/stickers'));
       if (which === 'soundboard') setSounds(await api('/sounds'));
-      if (which === 'reports') setReports(await httpApi(`/api/reports?status=open&serverId=${server.id}`).catch(() => []));
-      // The AutoMod and channel-permission editors both need the role list.
-      if (['automod', 'permissions'].includes(which)) setRoles(await api('/roles'));
+      if (which === 'reports') setReports(await httpApi(`/api/reports?status=open&serverId=${server.id}`));
+      // AutoMod, channel permissions and onboarding all pick from the role list.
+      if (['automod', 'permissions', 'onboarding'].includes(which)) setRoles(await api('/roles'));
       // The channel-permission editor also offers per-member overwrites.
       if (which === 'permissions') setMembers(await api('/members?limit=500'));
     } catch (err) {
@@ -116,46 +169,52 @@ export default function ServerSettingsModal({
 
   useEffect(() => { load(tab); }, [tab, load]);
 
-  // Roles is the only tab that needs to be loaded for another tab to work
-  // (members shows role chips), so fetch it up front.
+  // Members shows role chips and the role picker, so it needs the role list too.
   useEffect(() => { if (tab === 'members' && roles.length === 0) load('roles'); }, [tab, roles.length, load]);
 
   // Focus stays inside the dialog and returns to the trigger on close.
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(requestClose);
+  const dirtyProps = { onDirtyChange: setDirty, nudge };
 
   return (
     <div ref={dialogRef} className="fixed inset-0 z-[80] bg-d-canvas flex max-md:flex-col max-md:overflow-y-auto" role="dialog" aria-modal="true" aria-label={t('server.settings')}>
       {/* Left nav */}
-      <div className="w-56 max-md:w-full bg-d-surface shrink-0 overflow-y-auto py-14 max-md:py-4 px-3 max-md:flex max-md:gap-1 max-md:overflow-x-auto">
-        <h2 className="px-2 mb-2 text-[11px] font-bold text-d-text3 uppercase tracking-wide truncate">
-          {server.name}
-        </h2>
-        {tabs().map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm mb-0.5 transition-colors ${
-              tab === t.key ? 'bg-d-active text-d-strong' : 'text-d-text2 hover:bg-d-hover hover:text-d-strong'
-            }`}
-          >
-            <t.icon className="w-4 h-4 shrink-0" />
-            <span className="truncate">{t.label}</span>
-          </button>
+      <nav aria-label={t('server.settings')} className="w-56 max-md:w-full bg-d-surface shrink-0 overflow-y-auto py-14 max-md:py-3 px-3 max-md:flex max-md:gap-1 max-md:overflow-x-auto max-md:pr-14">
+        {groups.map((group, index) => (
+          <div key={group.key} className={`max-md:contents ${index > 0 ? 'mt-4' : ''}`}>
+            <h2 className="px-2 mb-1 text-[11px] font-bold text-d-text3 uppercase tracking-wide truncate max-md:hidden">
+              {group.title ?? server.name}
+            </h2>
+            {group.tabs.map((entry) => (
+              <button
+                key={entry.key}
+                onClick={() => switchTab(entry.key)}
+                aria-current={tab === entry.key ? 'page' : undefined}
+                className={`w-full max-md:w-auto max-md:shrink-0 flex items-center gap-2 px-2 py-1.5 rounded text-sm mb-0.5 transition-colors ${
+                  tab === entry.key ? 'bg-d-active text-d-strong' : 'text-d-text2 hover:bg-d-hover hover:text-d-strong'
+                }`}
+              >
+                <entry.icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span className="truncate">{entry.label}</span>
+              </button>
+            ))}
+          </div>
         ))}
-      </div>
+      </nav>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-10 max-md:px-4 py-14 max-md:py-6 max-w-4xl">
-        {loading && <p className="text-xs text-d-text3 mb-3">{t('common.loading')}</p>}
+        {loading && <p className="text-xs text-d-text3 mb-3" role="status">{t('common.loading')}</p>}
 
         {tab === 'overview' && (
           <OverviewTab
             server={server} api={api} channels={channels} isOwner={isOwner}
             onServerUpdated={onServerUpdated} onServerDeleted={onServerDeleted} onToast={onToast}
+            {...dirtyProps}
           />
         )}
         {tab === 'roles' && (
-          <RolesTab roles={roles} api={api} reload={() => load('roles')} onToast={onToast} />
+          <RolesTab roles={roles} api={api} reload={() => load('roles')} onToast={onToast} {...dirtyProps} />
         )}
         {tab === 'members' && (
           <MembersTab
@@ -165,7 +224,7 @@ export default function ServerSettingsModal({
           />
         )}
         {tab === 'emojis' && (
-          <EmojisTab emojis={emojis} api={api} reload={() => load('emojis')} currentUserId={currentUserId} onToast={onToast} />
+          <EmojisTab emojis={emojis} api={api} reload={() => load('emojis')} onToast={onToast} />
         )}
         {tab === 'invites' && (
           <InvitesTab invites={invites} api={api} reload={() => load('invites')} channels={channels} onToast={onToast} />
@@ -174,14 +233,11 @@ export default function ServerSettingsModal({
           <BansTab bans={bans} api={api} reload={() => load('bans')} onToast={onToast} />
         )}
         {tab === 'stickers' && (
-          <StickersTab
-            stickers={stickers} api={api} reload={() => load('stickers')}
-            currentUserId={currentUserId} onToast={onToast}
-          />
+          <StickersTab stickers={stickers} api={api} reload={() => load('stickers')} onToast={onToast} />
         )}
         {tab === 'permissions' && (
           <ChannelPermissionsTab
-            channels={channels} roles={roles} members={members} onToast={onToast}
+            channels={channels} roles={roles} members={members} onToast={onToast} {...dirtyProps}
           />
         )}
         {tab === 'automod' && (
@@ -192,7 +248,7 @@ export default function ServerSettingsModal({
         )}
         {tab === 'webhooks' && (
           <WebhooksTab
-            webhooks={webhooks} channels={channels} currentUserId={currentUserId}
+            webhooks={webhooks} channels={channels}
             reload={() => load('webhooks')} onToast={onToast}
           />
         )}
@@ -200,7 +256,7 @@ export default function ServerSettingsModal({
           <InsightsTab server={server} channels={channels} onToast={onToast} />
         )}
         {tab === 'onboarding' && (
-          <OnboardingTab server={server} channels={channels} roles={roles} onToast={onToast} />
+          <OnboardingTab server={server} channels={channels} roles={roles} onToast={onToast} {...dirtyProps} />
         )}
         {tab === 'soundboard' && (
           <SoundboardTab sounds={sounds} api={api} reload={() => load('soundboard')} onToast={onToast} />
@@ -214,7 +270,7 @@ export default function ServerSettingsModal({
       {/* Close */}
       <div className="w-20 pt-14 shrink-0 max-md:hidden">
         <button
-          onClick={onClose}
+          onClick={requestClose}
           className="w-9 h-9 rounded-full border-2 border-d-text2 text-d-text2 hover:bg-d-control hover:text-d-strong flex items-center justify-center transition-colors"
           aria-label={t('common.close')}
         >
@@ -222,30 +278,60 @@ export default function ServerSettingsModal({
         </button>
         <span className="block text-[11px] font-bold text-d-text2 mt-1 text-center">ESC</span>
       </div>
+      {/* Phones have no gutter for the ESC button, and no Escape key. */}
+      <button
+        onClick={requestClose}
+        aria-label={t('common.close')}
+        className="md:hidden fixed top-2 right-2 z-10 w-10 h-10 rounded-full bg-d-surface text-d-text2 hover:text-d-strong flex items-center justify-center shadow"
+      >
+        <X className="w-5 h-5" />
+      </button>
     </div>
   );
 }
 
 // --- Overview ----------------------------------------------------------------
 
-function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServerDeleted, onToast }) {
-  const [form, setForm] = useState({
-    name: server.name ?? '',
-    description: server.description ?? '',
-    icon_url: server.icon_url ?? '',
-    system_channel_id: server.system_channel_id ?? '',
-    afk_channel_id: server.afk_channel_id ?? '',
-    afk_timeout: server.afk_timeout ?? 300,
-    rules_channel_id: server.rules_channel_id ?? '',
-    vanity_url: server.vanity_url ?? '',
-    verification_level: server.verification_level ?? 0,
-    default_notifications: server.default_notifications ?? 'all_messages'
-  });
+/**
+ * The editable slice of a server row, with every null normalised to the value
+ * its control shows. Comparing against this — rather than against the raw row —
+ * is what keeps the save bar from appearing on a pristine form (a null
+ * `afk_timeout` used to compare unequal to the select's 300 forever).
+ */
+const overviewForm = (server) => ({
+  name: server.name ?? '',
+  description: server.description ?? '',
+  icon_url: server.icon_url ?? '',
+  system_channel_id: server.system_channel_id ?? '',
+  afk_channel_id: server.afk_channel_id ?? '',
+  afk_timeout: Number(server.afk_timeout ?? 300),
+  rules_channel_id: server.rules_channel_id ?? '',
+  vanity_url: server.vanity_url ?? '',
+  verification_level: Number(server.verification_level ?? 0),
+  default_notifications: server.default_notifications ?? 'all_messages'
+});
+
+function OverviewTab({
+  server, api, channels, isOwner, onServerUpdated, onServerDeleted, onToast, onDirtyChange, nudge
+}) {
+  const baseline = useMemo(() => overviewForm(server), [server]);
+  const [form, setForm] = useState(baseline);
   const [saving, setSaving] = useState(false);
+  const [uploadingIcon, setUploadingIcon] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteName, setDeleteName] = useState('');
   const [deleting, setDeleting] = useState(false);
-  const dirty = Object.entries(form).some(([k, v]) => (server[k] ?? '') !== v);
+  const dirty = Object.keys(baseline).some((key) => form[key] !== baseline[key]);
+  useReportDirty(dirty, onDirtyChange);
+
+  // Follow changes made elsewhere (a socket update, another admin) — but only
+  // while this form has no edits of its own.
+  const previousBaseline = useRef(baseline);
+  useEffect(() => {
+    const previous = previousBaseline.current;
+    previousBaseline.current = baseline;
+    setForm((current) => (Object.keys(previous).every((key) => current[key] === previous[key]) ? baseline : current));
+  }, [baseline]);
 
   const deleteServer = async () => {
     setDeleting(true);
@@ -258,29 +344,39 @@ function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServer
     }
   };
 
-  const uploadIcon = async (file) => {
+  const uploadIcon = async (input) => {
+    const file = input.files?.[0];
+    // Clear the picker so choosing the same file again after an error fires.
+    input.value = '';
+    if (!file) return;
+    setUploadingIcon(true);
     try {
       // Uploads act as the person clicking, not as the server owner.
       const data = await httpUpload('/api/upload/server-icon', 'icon', file);
       if (data.url) setForm((f) => ({ ...f, icon_url: data.url }));
     } catch (err) {
       onToast?.(err.message ?? t('chat.uploadFailed'), { type: 'error' });
+    } finally {
+      setUploadingIcon(false);
     }
   };
 
   const save = async () => {
+    if (!form.name.trim()) { onToast?.(t('settings.serverNameRequired'), { type: 'error' }); return; }
     setSaving(true);
     try {
-      const body = {
-        ...form,
-        vanity_url: form.vanity_url.trim() || null,
-        rules_channel_id: form.rules_channel_id || null,
-        afk_channel_id: form.afk_channel_id || null,
-        afk_timeout: Number(form.afk_timeout),
-        verification_level: Number(form.verification_level)
-      };
-      const updated = await api('', { method: 'PATCH', body: JSON.stringify(body) });
+      // Only what changed, with "none" sent as null rather than an empty
+      // string (which the server would store as a channel id of '').
+      const body = {};
+      for (const key of Object.keys(baseline)) {
+        if (form[key] === baseline[key]) continue;
+        const value = typeof form[key] === 'string' ? form[key].trim() : form[key];
+        body[key] = value === '' && key !== 'description' ? null : value;
+      }
+      if (body.name === null) delete body.name;
+      const updated = await api('', { method: 'PATCH', body });
       onServerUpdated?.(updated);
+      setForm(overviewForm({ ...server, ...updated }));
       onToast?.(t('settings.saved'), { type: 'success', ttl: 2500 });
     } catch (err) {
       onToast?.(err.message, { type: 'error' });
@@ -297,19 +393,27 @@ function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServer
       <h1 className="text-xl font-bold text-d-strong mb-6">{t('settings.serverOverview')}</h1>
 
       <div className="flex gap-6 mb-8">
-        <label className="shrink-0 cursor-pointer group">
-          <img
-            src={form.icon_url || FALLBACK_AVATAR}
-            alt=""
-            className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
-          />
+        <label className={`shrink-0 group ${uploadingIcon ? 'cursor-wait' : 'cursor-pointer'}`}>
+          <span className="relative block w-24 h-24">
+            <img
+              src={form.icon_url || FALLBACK_AVATAR}
+              alt=""
+              className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
+            />
+            {uploadingIcon && (
+              <span className="absolute inset-0 flex items-center justify-center rounded-full bg-black/55">
+                <Loader2 className="w-5 h-5 animate-spin text-white" aria-label={t('common.uploading')} />
+              </span>
+            )}
+          </span>
           <span className="flex items-center gap-1 justify-center text-[11px] text-d-link mt-2">
             <Upload className="w-3 h-3" /> {t('settings.changeIcon')}
           </span>
           <input
             type="file" accept="image/*" className="hidden"
             aria-label={t('server.iconAlt')}
-            onChange={(e) => e.target.files?.[0] && uploadIcon(e.target.files[0])}
+            disabled={uploadingIcon}
+            onChange={(e) => uploadIcon(e.target)}
           />
         </label>
 
@@ -318,6 +422,8 @@ function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServer
             <input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
+              maxLength={100}
+              aria-invalid={!form.name.trim()}
               className="w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
             />
           </Field>
@@ -369,7 +475,7 @@ function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServer
         </Field>
         <Field label={t('settings.vanityUrl')}>
           <div className="flex items-center gap-1">
-            <span className="shrink-0 text-xs text-d-text3">{window.location.origin}/join/</span>
+            <span className="shrink-0 text-xs text-d-text3">{window.location.origin}/invite/</span>
             <input
               value={form.vanity_url}
               onChange={(e) => setForm({ ...form, vanity_url: e.target.value.toLowerCase() })}
@@ -451,29 +557,13 @@ function OverviewTab({ server, api, channels, isOwner, onServerUpdated, onServer
       )}
 
       {dirty && (
-        <div className="sticky bottom-0 bg-d-surface border border-d-edge rounded-lg p-3 flex items-center justify-between">
-          <span className="text-xs text-d-text">{t('common.unsavedChanges')}</span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setForm({
-                name: server.name ?? '', description: server.description ?? '',
-                icon_url: server.icon_url ?? '', system_channel_id: server.system_channel_id ?? '',
-                afk_channel_id: server.afk_channel_id ?? '',
-                default_notifications: server.default_notifications ?? 'all_messages'
-              })}
-              className="text-xs text-d-strong px-3 py-1.5 hover:underline"
-            >
-              {t('common.cancel')}
-            </button>
-            <button
-              onClick={save}
-              disabled={saving}
-              className="bg-d-success hover:bg-d-successhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-1.5 rounded transition-colors"
-            >
-              {saving ? t('common.saving') : t('common.saveChanges')}
-            </button>
-          </div>
-        </div>
+        <UnsavedBar
+          nudge={nudge}
+          onReset={() => setForm(baseline)}
+          onSave={save}
+          saving={saving}
+          saveDisabled={uploadingIcon || !form.name.trim()}
+        />
       )}
     </div>
   );
@@ -528,6 +618,7 @@ function TemplateSection({ server, onToast }) {
   const [template, setTemplate] = useState(undefined);   // undefined = loading, null = none
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     if (!server?.id) return;
@@ -570,20 +661,36 @@ function TemplateSection({ server, onToast }) {
               className="text-xs font-semibold bg-d-surface hover:bg-d-hover text-d-strong px-3 py-1.5 rounded-md">{t('settings.templateCopy')}</button>
             <button type="button" disabled={busy} onClick={() => run(() => httpApi(`/api/servers/${server.id}/template/sync`, { method: 'PUT' }))}
               className="text-xs font-semibold bg-d-surface hover:bg-d-hover text-d-strong px-3 py-1.5 rounded-md disabled:opacity-50">{t('settings.templateSync')}</button>
-            <button type="button" disabled={busy} onClick={() => run(async () => { await httpApi(`/api/servers/${server.id}/template`, { method: 'DELETE' }); return null; })}
+            <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)}
               className="text-xs font-semibold text-d-danger hover:underline px-2 py-1.5 disabled:opacity-50">{t('common.delete')}</button>
           </div>
         </div>
+      )}
+      {confirmDelete && (
+        <ConfirmModal
+          title={t('settings.templateDeleteTitle')}
+          body={t('settings.templateDeleteBody')}
+          confirmLabel={t('common.delete')}
+          onConfirm={async () => {
+            await httpApi(`/api/servers/${server.id}/template`, { method: 'DELETE' });
+            setTemplate(null);
+          }}
+          onClose={() => setConfirmDelete(false)}
+        />
       )}
     </div>
   );
 }
 
-function RolesTab({ roles, api, reload, onToast }) {
+function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [dragId, setDragId] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  // Switching to another role with edits pending is refused the same way
+  // leaving the tab is: the save bar shakes.
+  const [localNudge, setLocalNudge] = useState(0);
 
   /**
    * Drop role A onto role B: rebuild the order and send it as a list, highest
@@ -599,7 +706,7 @@ function RolesTab({ roles, api, reload, onToast }) {
     ordered.splice(to, 0, ordered.splice(from, 1)[0]);
     setDragId(null);
     try {
-      await api('/roles/order', { method: 'PUT', body: JSON.stringify({ order: ordered }) });
+      await api('/roles/order', { method: 'PUT', body: { order: ordered } });
       await reload();
     } catch (err) { onToast?.(err.message, { type: 'error' }); }
   };
@@ -621,14 +728,24 @@ function RolesTab({ roles, api, reload, onToast }) {
     Boolean(draft.hoist) !== Boolean(selected.hoist) ||
     Boolean(draft.mentionable) !== Boolean(selected.mentionable)
   );
+  useReportDirty(dirty, onDirtyChange);
+
+  const selectRole = (id) => {
+    if (id === selectedId) return;
+    if (dirty) { setLocalNudge((n) => n + 1); return; }
+    setSelectedId(id);
+  };
 
   const createRole = async () => {
+    if (dirty) { setLocalNudge((n) => n + 1); return; }
     try {
-      await api('/roles', {
+      const created = await api('/roles', {
         method: 'POST',
-        body: JSON.stringify({ name: t('roles.newRoleName'), color: '#99aab5', permissions: '0' })
+        body: { name: t('roles.newRoleName'), color: '#99aab5', permissions: '0' }
       });
       await reload();
+      // Land on the new role, ready to be named — as Discord does.
+      if (created?.id) setSelectedId(created.id);
       onToast?.(t('roles.created'), { type: 'success', ttl: 2500 });
     } catch (err) { onToast?.(err.message, { type: 'error' }); }
   };
@@ -638,10 +755,10 @@ function RolesTab({ roles, api, reload, onToast }) {
     try {
       await api(`/roles/${draft.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({
+        body: {
           name: draft.name, color: draft.color, permissions: String(draft.permissions),
           hoist: Boolean(draft.hoist), mentionable: Boolean(draft.mentionable)
-        })
+        }
       });
       await reload();
       onToast?.(t('roles.savedRole'), { type: 'success', ttl: 2500 });
@@ -649,13 +766,12 @@ function RolesTab({ roles, api, reload, onToast }) {
     finally { setSaving(false); }
   };
 
+  // Throws on failure so the confirm dialog stays open and shows why.
   const remove = async (role) => {
-    try {
-      await api(`/roles/${role.id}`, { method: 'DELETE' });
-      setSelectedId(null);
-      await reload();
-      onToast?.(t('roles.deleted', { name: role.name }), { type: 'success', ttl: 2500 });
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    await api(`/roles/${role.id}`, { method: 'DELETE' });
+    setSelectedId(null);
+    await reload();
+    onToast?.(t('roles.deleted', { name: role.name }), { type: 'success', ttl: 2500 });
   };
 
   const isAdmin = draft && hasBit(draft.permissions, 'ADMINISTRATOR');
@@ -678,7 +794,8 @@ function RolesTab({ roles, api, reload, onToast }) {
           {roles.map((role) => (
             <button
               key={role.id}
-              onClick={() => setSelectedId(role.id)}
+              onClick={() => selectRole(role.id)}
+              aria-current={selectedId === role.id ? 'true' : undefined}
               draggable={!role.is_everyone}
               onDragStart={() => setDragId(role.id)}
               onDragOver={(e) => { if (dragId && !role.is_everyone) e.preventDefault(); }}
@@ -761,7 +878,7 @@ function RolesTab({ roles, api, reload, onToast }) {
               </h3>
               {!draft.is_everyone && !draft.managed && (
                 <button
-                  onClick={() => remove(draft)}
+                  onClick={() => setConfirmDelete(draft)}
                   className="flex items-center gap-1 text-xs text-d-danger hover:underline"
                 >
                   <Trash2 className="w-3.5 h-3.5" /> {t('audit.ROLE_DELETE')}
@@ -812,24 +929,27 @@ function RolesTab({ roles, api, reload, onToast }) {
             </div>
 
             {dirty && (
-              <div className="sticky bottom-0 mt-6 bg-d-surface border border-d-edge rounded-lg p-3 flex items-center justify-between">
-                <span className="text-xs text-d-text">{t('common.unsavedChanges')}</span>
-                <div className="flex gap-2">
-                  <button onClick={() => setDraft({ ...selected })} className="text-xs text-d-strong px-3 py-1.5 hover:underline">
-                    {t('common.cancel')}
-                  </button>
-                  <button
-                    onClick={save} disabled={saving}
-                    className="bg-d-success hover:bg-d-successhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-1.5 rounded transition-colors"
-                  >
-                    {saving ? t('common.saving') : t('common.save')}
-                  </button>
-                </div>
-              </div>
+              <UnsavedBar
+                nudge={nudge + localNudge}
+                onReset={() => setDraft({ ...selected })}
+                onSave={save}
+                saving={saving}
+                saveDisabled={!draft.name.trim()}
+              />
             )}
           </div>
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={t('roles.deleteTitle', { name: confirmDelete.name })}
+          body={t('roles.deleteBody', { count: confirmDelete.member_count ?? 0 })}
+          confirmLabel={t('audit.ROLE_DELETE')}
+          onConfirm={() => remove(confirmDelete)}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   );
 }
@@ -882,12 +1002,13 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
   const [nicknameFor, setNicknameFor] = useState(null);
   const [nickname, setNickname] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(null);   // { kind: 'kick' | 'ban' | 'transfer', member }
 
   const saveNickname = async (member) => {
     setBusy(true);
     try {
       await api(`/members/${member.id}`, {
-        method: 'PATCH', body: JSON.stringify({ nickname: nickname.trim() || null })
+        method: 'PATCH', body: { nickname: nickname.trim() || null }
       });
       setNicknameFor(null);
       await reload();
@@ -899,10 +1020,10 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
     try {
       await api(`/timeouts/${member.id}`, {
         method: 'POST',
-        body: JSON.stringify({
+        body: {
           until: new Date(Date.now() + minutes * 60_000).toISOString(),
           reason: t('audit.reasonFromSettings')
-        })
+        }
       });
       await reload();
       onToast?.(
@@ -914,12 +1035,12 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
     } catch (err) { onToast?.(err.message, { type: 'error' }); }
   };
 
+  // Kick, ban and ownership transfer go through a confirm dialog; these throw
+  // so the dialog stays open and shows the server's reason on failure.
   const transferOwnership = async (member) => {
-    try {
-      await api('/transfer-ownership', { method: 'POST', body: JSON.stringify({ userId: member.id }) });
-      await reload();
-      onToast?.(t('members.ownershipTransferred', { name: member.nickname || member.display_name }), { type: 'success' });
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    await api('/transfer-ownership', { method: 'POST', body: { userId: member.id } });
+    await reload();
+    onToast?.(t('members.ownershipTransferred', { name: member.nickname || member.display_name }), { type: 'success' });
   };
 
   const filtered = useMemo(() => {
@@ -934,30 +1055,24 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
 
   const toggleRole = async (member, role) => {
     const has = member.roles.some((r) => r.id === role.id);
+    setBusy(true);
     try {
-      const res = await fetch(`/api/servers/${server.id}/members/${member.id}/roles/${role.id}`, {
-        method: has ? 'DELETE' : 'PUT',
-        headers: { 'x-user-id': currentUserId, 'Content-Type': 'application/json' }
-      });
-      if (!res.ok) throw new Error((await res.json()).error);
+      await api(`/members/${member.id}/roles/${role.id}`, { method: has ? 'DELETE' : 'PUT' });
       await reload();
     } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    finally { setBusy(false); }
   };
 
-  const kick = async (member) => {
-    try {
-      await api(`/kicks/${member.id}`, { method: 'POST', body: JSON.stringify({ reason: t('audit.reasonFromSettings') }) });
-      await reload();
-      onToast?.(t('members.kicked', { name: member.display_name }), { type: 'success', ttl: 2500 });
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+  const kick = async (member, reason) => {
+    await api(`/kicks/${member.id}`, { method: 'POST', body: { reason: reason || t('audit.reasonFromSettings') } });
+    await reload();
+    onToast?.(t('members.kicked', { name: member.display_name }), { type: 'success', ttl: 2500 });
   };
 
-  const ban = async (member) => {
-    try {
-      await api(`/bans/${member.id}`, { method: 'POST', body: JSON.stringify({ reason: t('audit.reasonFromSettings') }) });
-      await reload();
-      onToast?.(t('members.banned', { name: member.display_name }), { type: 'success', ttl: 2500 });
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+  const ban = async (member, reason) => {
+    await api(`/bans/${member.id}`, { method: 'POST', body: { reason: reason || t('audit.reasonFromSettings') } });
+    await reload();
+    onToast?.(t('members.banned', { name: member.display_name }), { type: 'success', ttl: 2500 });
   };
 
   return (
@@ -982,7 +1097,7 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                 <p className="text-sm font-semibold text-d-strong truncate flex items-center gap-1.5">
                   {member.nickname || member.display_name}
                   {server.owner_id === member.id && <Crown className="w-3.5 h-3.5 text-d-idle" title={t('members.ownerTitle')} />}
-                  {member.is_bot && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
+                  {Boolean(member.is_bot) && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
                   {member.timeout_until && member.timeout_until > new Date().toISOString() && (
                     <span className="bg-d-idle/20 text-d-idle text-[9px] font-bold px-1 rounded flex items-center gap-0.5">
                       <Clock className="w-2.5 h-2.5" />
@@ -1025,6 +1140,8 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                       <button
                         key={role.id}
                         onClick={() => toggleRole(member, role)}
+                        disabled={busy}
+                        aria-pressed={has}
                         className={`text-[11px] px-2 py-1 rounded border transition-colors ${
                           has
                             ? 'border-transparent text-d-strong'
@@ -1097,14 +1214,14 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                       )
                     )}
                     {can('KICK_MEMBERS') && (
-                      <button onClick={() => kick(member)} className="text-[11px] text-d-idle hover:underline">{t('members.kick')}</button>
+                      <button onClick={() => setConfirm({ kind: 'kick', member })} className="text-[11px] text-d-idle hover:underline">{t('members.kick')}</button>
                     )}
                     {can('BAN_MEMBERS') && (
-                      <button onClick={() => ban(member)} className="text-[11px] text-d-danger hover:underline">{t('members.ban')}</button>
+                      <button onClick={() => setConfirm({ kind: 'ban', member })} className="text-[11px] text-d-danger hover:underline">{t('members.ban')}</button>
                     )}
                     {isOwner && !member.is_bot && (
                       <button
-                        onClick={() => transferOwnership(member)}
+                        onClick={() => setConfirm({ kind: 'transfer', member })}
                         className="text-[11px] text-d-idle hover:underline flex items-center gap-1"
                       >
                         <Crown className="w-3 h-3" /> {t('members.transferOwnership')}
@@ -1116,14 +1233,39 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
             )}
           </div>
         ))}
+        {filtered.length === 0 && members.length > 0 && (
+          <p className="text-sm text-d-text3 py-4">{t('members.noMatch', { query: search.trim() })}</p>
+        )}
       </div>
+
+      {confirm && (() => {
+        const name = confirm.member.nickname || confirm.member.display_name;
+        const props = {
+          kick: {
+            title: t('members.kickTitle', { name }), body: t('members.kickBody'),
+            confirmLabel: t('members.kick'), withReason: true,
+            onConfirm: (reason) => kick(confirm.member, reason)
+          },
+          ban: {
+            title: t('members.banTitle', { name }), body: t('members.banBody'),
+            confirmLabel: t('members.ban'), withReason: true,
+            onConfirm: (reason) => ban(confirm.member, reason)
+          },
+          transfer: {
+            title: t('members.transferTitle', { name }), body: t('members.transferBody', { name }),
+            confirmLabel: t('members.transferOwnership'),
+            onConfirm: () => transferOwnership(confirm.member)
+          }
+        }[confirm.kind];
+        return <ConfirmModal {...props} onClose={() => setConfirm(null)} />;
+      })()}
     </div>
   );
 }
 
 // --- Emojis ------------------------------------------------------------------
 
-function EmojisTab({ emojis, api, reload, currentUserId, onToast }) {
+function EmojisTab({ emojis, api, reload, onToast }) {
   const [name, setName] = useState('');
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1134,16 +1276,10 @@ function EmojisTab({ emojis, api, reload, currentUserId, onToast }) {
     if (!file || !name.trim()) return;
     setBusy(true);
     try {
-      const body = new FormData();
-      body.append('emoji', file);
-      const upload = await fetch('/api/upload/emoji', {
-        method: 'POST', headers: { 'x-user-id': currentUserId }, body
-      }).then((r) => r.json());
-      if (upload.error) throw new Error(upload.error);
-
+      const upload = await httpUpload('/api/upload/emoji', 'emoji', file);
       await api('/emojis', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), fileId: upload.id, animated: upload.is_animated })
+        body: { name: name.trim(), fileId: upload.id, animated: upload.is_animated }
       });
       setName(''); setFile(null);
       await reload();
@@ -1235,7 +1371,7 @@ function InvitesTab({ invites, api, reload, channels, onToast }) {
     try {
       const invite = await api('/invites', {
         method: 'POST',
-        body: JSON.stringify({ channelId: channelId || null, maxUses: Number(maxUses), maxAge: Number(maxAge) })
+        body: { channelId: channelId || null, maxUses: Number(maxUses), maxAge: Number(maxAge) }
       });
       await reload();
       navigator.clipboard?.writeText(`${window.location.origin}/invite/${invite.code}`);
@@ -1389,7 +1525,7 @@ function AuditTab({ entries }) {
 
 // --- Stickers ----------------------------------------------------------------
 
-function StickersTab({ stickers, api, reload, currentUserId, onToast }) {
+function StickersTab({ stickers, api, reload, onToast }) {
   const [name, setName] = useState('');
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1400,16 +1536,13 @@ function StickersTab({ stickers, api, reload, currentUserId, onToast }) {
     if (!file || !name.trim()) return;
     setBusy(true);
     try {
-      const body = new FormData();
-      body.append('sticker', file);
-      const upload = await fetch('/api/upload/sticker', {
-        method: 'POST', headers: { 'x-user-id': currentUserId }, body
-      }).then((r) => r.json());
-      if (upload.error) throw new Error(upload.error);
-
+      const upload = await httpUpload('/api/upload/sticker', 'sticker', file);
+      // The server stores the format so clients know whether it animates;
+      // a GIF labelled "png" never would.
+      const format = upload.mimetype === 'image/gif' ? 'gif' : upload.is_animated ? 'apng' : 'png';
       await api('/stickers', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), fileId: upload.id, format: 'png' })
+        body: { name: name.trim(), fileId: upload.id, format }
       });
       setName('');
       setFile(null);
@@ -1476,8 +1609,8 @@ function StickersTab({ stickers, api, reload, currentUserId, onToast }) {
                     onToast?.(err.message, { type: 'error' });
                   }
                 }}
-                className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-d-text3 hover:text-d-danger transition-all p-1"
-                aria-label={t('common.delete') + sticker.name}
+                className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 text-d-text3 hover:text-d-danger transition-all p-1"
+                aria-label={t('common.deleteNamed', { name: sticker.name })}
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
@@ -1507,7 +1640,7 @@ function SoundboardTab({ sounds, api, reload, onToast }) {
       const attachment = uploaded.attachments?.[0] ?? uploaded;
       await api('/sounds', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), fileId: attachment.id, url: attachment.url })
+        body: { name: name.trim(), fileId: attachment.id, url: attachment.url }
       });
       setName(''); setFile(null);
       await reload();
@@ -1576,7 +1709,7 @@ function SoundboardTab({ sounds, api, reload, onToast }) {
               <Music className={`w-4 h-4 ${playing === sound.id ? 'text-d-online animate-pulse' : ''}`} />
             </button>
             <span className="text-sm text-d-strong flex-1 truncate">{sound.name}</span>
-            <button onClick={() => remove(sound)} className="text-d-text3 hover:text-d-danger" aria-label={t('common.delete')}>
+            <button onClick={() => remove(sound)} className="text-d-text3 hover:text-d-danger" aria-label={t('common.deleteNamed', { name: sound.name })}>
               <Trash2 className="w-4 h-4" />
             </button>
           </div>

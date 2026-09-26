@@ -1,5 +1,6 @@
 // ============================================================================
-//  Server Settings → Onboarding. Three sections, each saved on its own:
+//  Server Settings → Onboarding. Three sections behind one save bar (each
+//  edited section is sent to its own endpoint in turn):
 //    1. Membership screening — rules a newcomer must accept.
 //    2. Welcome screen — description + up to five highlighted channels.
 //    3. Onboarding questions — prompts whose options grant channels/roles.
@@ -8,9 +9,10 @@
 // ============================================================================
 
 import React, { useEffect, useState } from 'react';
-import { Plus, Trash2, GripVertical, Loader2, Check, ShieldCheck, Hand, ListChecks } from 'lucide-react';
+import { Plus, Trash2, GripVertical, Loader2, ShieldCheck, Hand, ListChecks } from 'lucide-react';
 import { get, patch, put } from '../../api';
 import { t } from '../../i18n/index.jsx';
+import { UnsavedBar, useReportDirty } from './primitives';
 
 const input = 'w-full bg-d-input text-d-strong rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-d-brand';
 const label = 'block text-[11px] font-bold uppercase tracking-wide text-d-text3 mb-1.5';
@@ -34,62 +36,84 @@ function SectionCard({ icon, title, hint, children, action }) {
   );
 }
 
-function SaveButton({ busy, dirty, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={busy || !dirty}
-      className="inline-flex items-center gap-1.5 bg-d-brand hover:bg-d-brand-hover disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-md shrink-0"
-    >
-      {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <Check className="w-3.5 h-3.5" aria-hidden="true" />}
-      {t('common.save')}
-    </button>
-  );
-}
+/** The editor's shape for each section, derived from a server bundle. */
+const welcomeOf = (b) => ({
+  enabled: b.welcome.enabled,
+  description: b.welcome.description,
+  channels: b.welcome.channels.map((c) => ({ channel_id: c.channel_id, description: c.description, emoji: c.emoji ?? '' }))
+});
+const promptsOf = (b) => b.prompts.map((p) => ({ ...p, options: p.options.map((o) => ({ ...o })) }));
 
-export default function OnboardingTab({ server, channels = [], roles = [], onToast }) {
+export default function OnboardingTab({ server, channels = [], roles = [], onToast, onDirtyChange, nudge = 0 }) {
   const [bundle, setBundle] = useState(null);
   const [rules, setRules] = useState([]);
   const [screeningOn, setScreeningOn] = useState(false);
   const [welcome, setWelcome] = useState({ enabled: false, description: '', channels: [] });
   const [prompts, setPrompts] = useState([]);
-  const [busy, setBusy] = useState(null);   // 'screening' | 'welcome' | 'prompts'
+  const [busy, setBusy] = useState(false);
 
   const pickable = channels.filter((c) => !['category', 'thread'].includes(c.type));
-  const grantable = roles.filter((r) => r.id !== server?.id && !r.managed);
+  const grantable = roles.filter((r) => !r.is_everyone && r.id !== server?.id && !r.managed);
+
+  /**
+   * Copy sections from a bundle into the editor. After a save the server's
+   * answer replaces the local copy — it has the new prompt ids and trims blank
+   * rules — otherwise the section stayed "unsaved" forever after saving.
+   */
+  const seed = (b, sections = ['screening', 'welcome', 'prompts']) => {
+    if (sections.includes('screening')) { setRules(b.screening.rules); setScreeningOn(b.screening.enabled); }
+    if (sections.includes('welcome')) setWelcome(welcomeOf(b));
+    if (sections.includes('prompts')) setPrompts(promptsOf(b));
+  };
 
   useEffect(() => {
     if (!server?.id) return;
     get(`/api/servers/${server.id}/onboarding`).then((b) => {
       setBundle(b);
-      setRules(b.screening.rules);
-      setScreeningOn(b.screening.enabled);
-      setWelcome({ enabled: b.welcome.enabled, description: b.welcome.description, channels: b.welcome.channels.map((c) => ({ channel_id: c.channel_id, description: c.description, emoji: c.emoji ?? '' })) });
-      setPrompts(b.prompts.map((p) => ({ ...p, options: p.options.map((o) => ({ ...o })) })));
+      seed(b);
     }).catch((err) => onToast?.(err.message, { type: 'error' }));
   }, [server?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const run = async (key, fn) => {
-    setBusy(key);
+  const rulesDirty = Boolean(bundle) && (JSON.stringify(rules) !== JSON.stringify(bundle.screening.rules) || screeningOn !== bundle.screening.enabled);
+  const welcomeDirty = Boolean(bundle) && JSON.stringify(welcome) !== JSON.stringify(welcomeOf(bundle));
+  const promptsDirty = Boolean(bundle) && JSON.stringify(prompts) !== JSON.stringify(promptsOf(bundle));
+  const dirty = rulesDirty || welcomeDirty || promptsDirty;
+  useReportDirty(dirty, onDirtyChange);
+
+  /** One save for the page, like every other settings page: each edited section in turn. */
+  const saveAll = async () => {
+    setBusy(true);
+    let latest = bundle;
+    const saved = [];
     try {
-      const next = await fn();
-      setBundle(next);
+      if (rulesDirty) {
+        latest = await patch(`/api/servers/${server.id}/onboarding/screening`, { enabled: screeningOn, rules });
+        saved.push('screening');
+      }
+      if (welcomeDirty) {
+        latest = await patch(`/api/servers/${server.id}/onboarding/welcome`, {
+          enabled: welcome.enabled, description: welcome.description,
+          channels: welcome.channels.map((c) => ({ ...c, emoji: c.emoji || null }))
+        });
+        saved.push('welcome');
+      }
+      if (promptsDirty) {
+        latest = await put(`/api/servers/${server.id}/onboarding/prompts`, { prompts });
+        saved.push('prompts');
+      }
       onToast?.(t('onboarding.saved'), { type: 'success', ttl: 2000 });
     } catch (err) {
       onToast?.(err.message, { type: 'error' });
     } finally {
-      setBusy(null);
+      setBundle(latest);
+      seed(latest, saved);
+      setBusy(false);
     }
   };
 
   if (!bundle) {
     return <div className="flex justify-center py-12 text-d-text3" role="status"><Loader2 className="w-6 h-6 animate-spin" aria-hidden="true" /><span className="sr-only">{t('common.loading')}</span></div>;
   }
-
-  const rulesDirty = JSON.stringify(rules) !== JSON.stringify(bundle.screening.rules) || screeningOn !== bundle.screening.enabled;
-  const welcomeDirty = JSON.stringify(welcome) !== JSON.stringify({ enabled: bundle.welcome.enabled, description: bundle.welcome.description, channels: bundle.welcome.channels.map((c) => ({ channel_id: c.channel_id, description: c.description, emoji: c.emoji ?? '' })) });
-  const promptsDirty = JSON.stringify(prompts) !== JSON.stringify(bundle.prompts.map((p) => ({ ...p, options: p.options.map((o) => ({ ...o })) })));
 
   /* ---- prompt editor helpers ---- */
   const updatePrompt = (i, patchBody) => setPrompts((ps) => ps.map((p, j) => (j === i ? { ...p, ...patchBody } : p)));
@@ -107,8 +131,6 @@ export default function OnboardingTab({ server, channels = [], roles = [], onToa
         icon={ShieldCheck}
         title={t('onboarding.screening')}
         hint={t('onboarding.screeningHint')}
-        action={<SaveButton busy={busy === 'screening'} dirty={rulesDirty}
-          onClick={() => run('screening', () => patch(`/api/servers/${server.id}/onboarding/screening`, { enabled: screeningOn, rules }))} />}
       >
         <label className="flex items-center justify-between gap-3 text-sm mb-3">
           <span className="text-d-strong">{t('onboarding.requireRules')}</span>
@@ -143,11 +165,6 @@ export default function OnboardingTab({ server, channels = [], roles = [], onToa
         icon={Hand}
         title={t('onboarding.welcome')}
         hint={t('onboarding.welcomeHint')}
-        action={<SaveButton busy={busy === 'welcome'} dirty={welcomeDirty}
-          onClick={() => run('welcome', () => patch(`/api/servers/${server.id}/onboarding/welcome`, {
-            enabled: welcome.enabled, description: welcome.description,
-            channels: welcome.channels.map((c) => ({ ...c, emoji: c.emoji || null }))
-          }))} />}
       >
         <label className="flex items-center justify-between gap-3 text-sm mb-3">
           <span className="text-d-strong">{t('onboarding.showWelcome')}</span>
@@ -196,8 +213,6 @@ export default function OnboardingTab({ server, channels = [], roles = [], onToa
         icon={ListChecks}
         title={t('onboarding.prompts')}
         hint={t('onboarding.promptsHint')}
-        action={<SaveButton busy={busy === 'prompts'} dirty={promptsDirty}
-          onClick={() => run('prompts', () => put(`/api/servers/${server.id}/onboarding/prompts`, { prompts }))} />}
       >
         <div className="space-y-3">
           {prompts.map((p, i) => (
@@ -274,6 +289,10 @@ export default function OnboardingTab({ server, channels = [], roles = [], onToa
           </button>
         )}
       </SectionCard>
+
+      {dirty && (
+        <UnsavedBar nudge={nudge} onReset={() => seed(bundle)} onSave={saveAll} saving={busy} />
+      )}
     </div>
   );
 }

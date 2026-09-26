@@ -4,6 +4,8 @@ import { Hash, Volume2, Check, X, Minus, ShieldCheck } from 'lucide-react';
 import { permissionGroups, PERMISSION_BITS } from '../../utils/permissionCatalog';
 import { t } from '../../i18n/index.jsx';
 import { get as httpGet, put as httpPut, del as httpDel } from '../../api';
+import ConfirmModal from '../ConfirmModal';
+import { UnsavedBar, useReportDirty } from './primitives';
 
 /**
  * Per-channel permission overwrites.
@@ -13,12 +15,16 @@ import { get as httpGet, put as httpPut, del as httpDel } from '../../api';
  * "Inherit" means the bit appears in neither the allow nor the deny mask, so the
  * role's server-wide setting decides. That is why this cannot be a checkbox.
  */
-export default function ChannelPermissionsTab({ channels, roles, members = [], onToast }) {
+export default function ChannelPermissionsTab({
+  channels, roles, members = [], onToast, onDirtyChange, nudge = 0
+}) {
   const [channelId, setChannelId] = useState('');
   const [targetKey, setTargetKey] = useState('');   // "role:<id>" or "member:<id>"
   const [overwrites, setOverwrites] = useState([]);
   const [draft, setDraft] = useState({ allow: 0n, deny: 0n });
   const [busy, setBusy] = useState(false);
+  const [localNudge, setLocalNudge] = useState(0);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   const selectable = useMemo(
     () => channels.filter((c) => c.type !== 'category' && c.type !== 'thread'),
@@ -89,21 +95,36 @@ export default function ChannelPermissionsTab({ channels, roles, members = [], o
     }
   };
 
-  const reset = async () => {
+  // Throws on failure so the confirm dialog shows why.
+  const removeOverride = async () => {
     const [type, id] = targetKey.split(':');
-    try {
-      const data = await httpDel(`/api/channels/${channelId}/permissions/${type}/${id}`);
-      setOverwrites(Array.isArray(data) ? data : []);
-      setDraft({ allow: 0n, deny: 0n });
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    const data = await httpDel(`/api/channels/${channelId}/permissions/${type}/${id}`);
+    setOverwrites(Array.isArray(data) ? data : []);
+    setDraft({ allow: 0n, deny: 0n });
+    onToast?.(t('perms.overrideRemoved'), { type: 'success', ttl: 2500 });
   };
 
-  const dirty = useMemo(() => {
+  const existing = useMemo(() => {
     const [type, id] = targetKey.split(':');
-    const existing = overwrites.find((o) => o.target_type === type && o.target_id === id);
-    return draft.allow.toString() !== (existing?.allow ?? '0')
-      || draft.deny.toString() !== (existing?.deny ?? '0');
-  }, [draft, overwrites, targetKey]);
+    return overwrites.find((o) => o.target_type === type && o.target_id === id) ?? null;
+  }, [overwrites, targetKey]);
+
+  const dirty = draft.allow.toString() !== (existing?.allow ?? '0')
+    || draft.deny.toString() !== (existing?.deny ?? '0');
+  useReportDirty(dirty, onDirtyChange);
+
+  /** Changing channel or target would silently drop the edits — refuse instead. */
+  const guarded = (fn) => (value) => {
+    if (dirty) { setLocalNudge((n) => n + 1); return; }
+    fn(value);
+  };
+
+  const targetLabel = (() => {
+    const [type, id] = targetKey.split(':');
+    if (type === 'role') return roles.find((r) => r.id === id)?.name ?? '';
+    const m = members.find((x) => x.id === id);
+    return m ? (m.nickname || m.display_name || m.username) : '';
+  })();
 
   return (
     <div>
@@ -117,7 +138,7 @@ export default function ChannelPermissionsTab({ channels, roles, members = [], o
           <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('autocomplete.channels')}</span>
           <select
             value={channelId}
-            onChange={(e) => setChannelId(e.target.value)}
+            onChange={(e) => guarded(setChannelId)(e.target.value)}
             className="w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none"
           >
             {selectable.map((c) => (
@@ -132,7 +153,7 @@ export default function ChannelPermissionsTab({ channels, roles, members = [], o
           <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('perms.appliesTo')}</span>
           <select
             value={targetKey}
-            onChange={(e) => setTargetKey(e.target.value)}
+            onChange={(e) => guarded(setTargetKey)(e.target.value)}
             className="w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none"
           >
             <optgroup label={t('perms.roles')}>
@@ -159,7 +180,8 @@ export default function ChannelPermissionsTab({ channels, roles, members = [], o
           {overwrites.map((o) => (
             <button
               key={`${o.target_type}:${o.target_id}`}
-              onClick={() => setTargetKey(`${o.target_type}:${o.target_id}`)}
+              onClick={() => guarded(setTargetKey)(`${o.target_type}:${o.target_id}`)}
+              aria-pressed={targetKey === `${o.target_type}:${o.target_id}`}
               className="text-[11px] px-2 py-0.5 rounded bg-d-active text-d-strong"
             >
               {o.role_name ?? o.display_name ?? o.target_id}
@@ -187,24 +209,36 @@ export default function ChannelPermissionsTab({ channels, roles, members = [], o
         ))}
       </div>
 
-      <div className="sticky bottom-0 mt-6 bg-d-surface border border-d-edge rounded-lg p-3 flex items-center justify-between">
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
         <span className="text-xs text-d-text2 flex items-center gap-1.5">
           <ShieldCheck className="w-3.5 h-3.5" />
           {t('perms.cannotGrant')}
         </span>
-        <div className="flex gap-2">
-          <button onClick={reset} className="text-xs text-d-danger px-3 py-1.5 hover:underline">
+        {existing && !dirty && (
+          <button onClick={() => setConfirmRemove(true)} className="text-xs text-d-danger px-3 py-1.5 hover:underline">
             {t('perms.removeOverride')}
           </button>
-          <button
-            onClick={save}
-            disabled={busy || !dirty}
-            className="bg-d-success hover:bg-d-successhover disabled:opacity-40 text-white text-xs font-semibold px-4 py-1.5 rounded transition-colors"
-          >
-            {busy ? t('common.saving') : t('common.save')}
-          </button>
-        </div>
+        )}
       </div>
+
+      {dirty && (
+        <UnsavedBar
+          nudge={nudge + localNudge}
+          onReset={() => setDraft({ allow: BigInt(existing?.allow ?? '0'), deny: BigInt(existing?.deny ?? '0') })}
+          onSave={save}
+          saving={busy}
+        />
+      )}
+
+      {confirmRemove && (
+        <ConfirmModal
+          title={t('perms.removeOverrideTitle', { name: targetLabel })}
+          body={t('perms.removeOverrideBody')}
+          confirmLabel={t('perms.removeOverride')}
+          onConfirm={removeOverride}
+          onClose={() => setConfirmRemove(false)}
+        />
+      )}
     </div>
   );
 }
