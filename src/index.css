@@ -430,6 +430,16 @@ input[type="range"] { height: 1.25rem; }
 .message-row:focus-within .message-actions,
 .message-row[data-actions-open="true"] .message-actions { display: flex; }
 
+/* A message that pings you: Discord's gold tint and left bar. The hover
+   state keeps the tint rather than replacing it. */
+.message-row.mention-row {
+  background-color: color-mix(in srgb, var(--color-d-idle) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-d-idle);
+}
+.message-row.mention-row:hover {
+  background-color: color-mix(in srgb, var(--color-d-idle) 16%, transparent);
+}
+
 /* A jumped-to message flashes, like Discord's highlight. */
 @keyframes messageFlash {
   0%, 60% { background-color: color-mix(in srgb, var(--color-d-brand) 20%, transparent); }

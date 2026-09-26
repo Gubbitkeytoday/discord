@@ -65,6 +65,9 @@ export default function HomeDirectMessages({
   mobileOpen = false,
   onOpenMobile,
   onCloseMobile,
+  serverCount = 0,
+  onCreateServer,
+  onJoinServer,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -340,7 +343,32 @@ export default function HomeDirectMessages({
               <span className="font-bold text-d-strong">{t('dm.friends')}</span>
             </div>
 
-            <div className="flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
+            {/* Phones: one compact select instead of a sideways-scrolling strip. */}
+            <div className="sm:hidden flex items-center gap-2 min-w-0 flex-1">
+              <select
+                value={activeTab === 'add' ? 'add' : activeTab}
+                onChange={(e) => setActiveTab(e.target.value)}
+                aria-label={t('dm.friends')}
+                className="min-w-0 flex-1 bg-d-surface text-sm font-semibold text-d-strong rounded px-2 py-1.5 border border-d-edge focus:outline-none focus:border-d-brand"
+              >
+                {tabs().map((tab) => (
+                  <option key={tab.key} value={tab.key}>
+                    {tab.label}{tab.key === 'pending' && pendingIncoming.length > 0 ? ` (${pendingIncoming.length})` : ''}
+                  </option>
+                ))}
+                <option value="add">{t('dm.addFriend')}</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setActiveTab('add')}
+                aria-label={t('dm.addFriend')}
+                className="shrink-0 p-2 rounded bg-d-success text-white hover:bg-d-successhover"
+              >
+                <UserPlus className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-sm:hidden flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
               {tabs().map((tab) => (
                 <button
                   key={tab.key}
@@ -414,7 +442,34 @@ export default function HomeDirectMessages({
                   {tabs().find((tab) => tab.key === activeTab)?.label} — {visibleFriends.length}
                 </h2>
 
-                {visibleFriends.length === 0 && (
+                {visibleFriends.length === 0 && friends.length === 0 && (activeTab === 'online' || activeTab === 'all') ? (
+                  // First run: nothing here yet, so say what to do next
+                  // instead of "Nobody in this list".
+                  <div className="max-w-md mx-auto text-center py-10">
+                    <Users className="w-12 h-12 mx-auto mb-3 text-d-text4" aria-hidden="true" />
+                    <h3 className="text-lg font-bold text-d-strong mb-1">
+                      {serverCount === 0 ? t('home.welcomeTitle') : t('home.noFriendsTitle')}
+                    </h3>
+                    <p className="text-sm text-d-text2 mb-6">
+                      {serverCount === 0 ? t('home.welcomeBody') : t('home.noFriendsBody')}
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2 justify-center">
+                      {onCreateServer && (
+                        <button type="button" onClick={onCreateServer} className="bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.createServer')}
+                        </button>
+                      )}
+                      {onJoinServer && (
+                        <button type="button" onClick={onJoinServer} className="bg-d-surface hover:bg-d-hover text-d-strong text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.joinServer')}
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setActiveTab('add')} className="bg-d-success hover:bg-d-successhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                        {t('dm.addFriend')}
+                      </button>
+                    </div>
+                  </div>
+                ) : visibleFriends.length === 0 && (
                   <div className="text-center py-16 text-d-text3">
                     <Inbox className="w-10 h-10 mx-auto mb-3 opacity-40" />
                     <p className="text-sm">{t('dm.nobodyHere')}</p>

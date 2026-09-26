@@ -2017,6 +2017,19 @@ export default function App() {
     voiceHost
   ) : null;
 
+  const openJoinWithInvite = () => setInputModal({
+    title: t('server.joinTitle'),
+    label: t('server.inviteLink'),
+    placeholder: `${window.location.origin}/invite/abc123`,
+    submitLabel: t('server.join'),
+    hint: t('server.joinHint'),
+    onSubmit: async (value) => {
+      const code = value.trim().split('/').filter(Boolean).pop();
+      if (!code) throw new Error(t('server.invalidInvite'));
+      setInviteCode(code);
+    }
+  });
+
   if (authState === null) {
     return (
       <div className="fixed inset-0 bg-d-base flex items-center justify-center text-d-text3 text-sm">
@@ -2051,18 +2064,7 @@ export default function App() {
         mobileOpen={mobileSidebarOpen}
         onOpenCreateServerModal={() => setShowCreateServerModal(true)}
         onSelectHome={() => setActiveServerId('home')}
-        onJoinWithInvite={() => setInputModal({
-          title: t('server.joinTitle'),
-          label: t('server.inviteLink'),
-          placeholder: `${window.location.origin}/invite/abc123`,
-          submitLabel: t('server.join'),
-          hint: t('server.joinHint'),
-          onSubmit: async (value) => {
-            const code = value.trim().split('/').filter(Boolean).pop();
-            if (!code) throw new Error(t('server.invalidInvite'));
-            setInviteCode(code);
-          }
-        })}
+        onJoinWithInvite={openJoinWithInvite}
         onServerContextMenu={(server, x, y) => setNotifPopover({ kind: 'server', id: server.id, x, y })}
         pendingFriendCount={friends.filter((f) => f.friend_status === 'pending' && f.direction === 'incoming').length}
       />
@@ -2079,6 +2081,9 @@ export default function App() {
           mobileOpen={mobileSidebarOpen}
           onOpenMobile={() => setMobileSidebarOpen(true)}
           onCloseMobile={() => setMobileSidebarOpen(false)}
+          serverCount={servers.length}
+          onCreateServer={() => setShowCreateServerModal(true)}
+          onJoinServer={openJoinWithInvite}
           onStartDm={handleStartDm}
           onCloseDm={handleCloseDm}
           onAddFriend={handleAddFriend}

@@ -93,7 +93,8 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         secondary: `@${m.username}`,
         avatar: m.avatar_url,
         color: m.role_color,
-        insert: `<@${m.id}> `
+        // Readable in the composer; resolved to <@id> on send.
+        insert: m.username ? `@${m.username} ` : `<@${m.id}> `
       }));
   }
 
@@ -105,7 +106,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         id: c.id,
         primary: c.name,
         secondary: c.category ?? '',
-        insert: `<#${c.id}> `
+        insert: /^[\p{L}\p{N}_-]+$/u.test(c.name ?? '') ? `#${c.name} ` : `<#${c.id}> `
       }));
   }
 
@@ -117,7 +118,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         primary: `:${e.name}:`,
         secondary: t('autocomplete.serverEmoji'),
         image: e.url,
-        insert: `<:${e.name}:${e.id}> `
+        insert: `:${e.name}: `
       }));
     const unicode = EMOJI_TABLE
       .filter((e) => e.name.includes(q))

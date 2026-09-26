@@ -4,7 +4,7 @@ import {
   FileText, Download, Pencil, ArrowDown, Loader2, Check, Sticker, Inbox, UserPlus,
   MessagesSquare, Archive, AlertTriangle, RotateCcw, Megaphone, Volume2, Lock, BarChart3, ChevronRight,
   Bold, Italic, Underline, Strikethrough, Code, Code2, Quote, EyeOff, Type, Link2 as Link2Icon, Menu, Phone, Video, History,
-  SmilePlus, MoreHorizontal, CheckCheck
+  SmilePlus, MoreHorizontal, CheckCheck, MoreVertical, ArrowLeft
 } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { playMessageIncomingSound } from '../utils/soundEffects';
@@ -30,12 +30,15 @@ import LinkEmbed from './LinkEmbed';
 import { RichEmbed, MessageComponents } from './RichEmbed';
 import PinnedMessagesPopover from './PinnedMessagesPopover';
 import MessageContextMenu from './MessageContextMenu';
+import ContextMenu from './ContextMenu';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import PollCard from './PollCard';
 import { VoiceNotePlayer, VoiceNoteRecorder, VoiceNoteButton } from './VoiceNote';
 import SuperReaction, { motionAllowed } from './SuperReaction';
 import { runSlashCommand, parseSlashInput } from '../utils/slashCommands';
 import { t, localeTag } from '../i18n/index.jsx';
 import { convertEmoticons } from '../utils/emoticons';
+import { resolveComposerTokens, humanizeTokens, mentionsUser } from '../utils/mentions';
 import StillImage, { isAnimatedImage } from './StillImage';
 import { lazyComponent } from '../utils/lazyComponent';
 
@@ -156,6 +159,10 @@ export default function ChatArea({
   const [searchTerm, setSearchTerm] = useState('');
   const [showPins, setShowPins] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
+  // Phones: the header has no room for the search box, the bell or the
+  // inbox, so search opens a full-screen sheet and the rest live in "More".
+  const [showMobileSearch, setShowMobileSearch] = useState(false);
+  const [headerMenu, setHeaderMenu] = useState(null);
   const [trigger, setTrigger] = useState(null);
   const [acIndex, setAcIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -238,6 +245,22 @@ export default function ChatArea({
   // On opening a channel, land on the first unread message instead of the
   // bottom, once its history has arrived.
   const unreadScrollPendingRef = useRef(true);
+
+  // What `@name`, `#channel` and `:emoji:` resolve against when sending.
+  const tokenContext = useMemo(() => ({
+    members,
+    channels,
+    customEmojis: [...customEmojis, ...externalEmojiGroups.flatMap((g) => g.emojis ?? [])]
+  }), [members, channels, customEmojis, externalEmojiGroups]);
+  const toWire = (text) => resolveComposerTokens(
+    chatPrefs.convertEmoticons ? convertEmoticons(text) : text, tokenContext
+  );
+
+  // My role ids, for highlighting role mentions of me.
+  const myRoleIds = useMemo(() => {
+    const me = members.find((m) => m.id === currentUser?.id);
+    return (me?.roles ?? []).map((r) => (typeof r === 'object' ? r.id : r));
+  }, [members, currentUser?.id]);
 
   const autocompleteOptions = useMemo(
     () => buildOptions(trigger, { members, channels, customEmojis, botCommands }),
@@ -505,13 +528,13 @@ export default function ChatArea({
       if (command.empty) { clearComposer(); return; }
       // /tts only speaks when Accessibility › Text-to-speech allows it;
       // otherwise it is sent as an ordinary message, as Discord does.
-      onSendMessage(command.content, attachments, replyToMsg?.id, { tts: Boolean(command.tts && a11yPrefs.ttsEnabled) });
+      onSendMessage(resolveComposerTokens(command.content, tokenContext), attachments, replyToMsg?.id, { tts: Boolean(command.tts && a11yPrefs.ttsEnabled) });
       playMessageIncomingSound();
       clearComposer();
       return;
     }
 
-    onSendMessage(chatPrefs.convertEmoticons ? convertEmoticons(inputText) : inputText, attachments, replyToMsg?.id);
+    onSendMessage(toWire(inputText), attachments, replyToMsg?.id);
     playMessageIncomingSound();
     clearComposer();
   };
@@ -651,7 +674,7 @@ export default function ChatArea({
 
   const startEditing = (msg) => {
     setEditingId(msg.id);
-    setEditText(msg.content ?? '');
+    setEditText(humanizeTokens(msg.content ?? '', { members, channels }));
   };
 
   /** Scroll a message into view and flash it, like Discord's jump. */
@@ -723,7 +746,8 @@ export default function ChatArea({
       return;
     }
     const original = messages.find((m) => m.id === editingId);
-    if (original?.content !== editText) onEditMessage?.(editingId, editText);
+    const content = resolveComposerTokens(editText, tokenContext);
+    if (original?.content !== content) onEditMessage?.(editingId, content);
     stopEditing();
   };
 
@@ -920,6 +944,31 @@ export default function ChatArea({
             </button>
           )}
 
+          <button
+            type="button"
+            onClick={() => setShowMobileSearch(true)}
+            className="md:hidden hover:text-d-strong transition-colors"
+            title={t('chat.searchMessages')}
+            aria-label={t('chat.searchMessages')}
+          >
+            <Search className="w-5 h-5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setHeaderMenu({ x: rect.right - 200, y: rect.bottom + 6 });
+            }}
+            className="sm:hidden hover:text-d-strong transition-colors relative"
+            title={t('chat.moreOptions')}
+            aria-label={t('chat.moreOptions')}
+            aria-haspopup="menu"
+          >
+            <MoreVertical className="w-5 h-5" />
+            {inboxCount > 0 && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-d-danger" aria-hidden="true" />}
+          </button>
+
           <form
             onSubmit={(e) => { e.preventDefault(); onSearch?.(searchTerm); }}
             className="relative hidden md:block"
@@ -1043,12 +1092,55 @@ export default function ChatArea({
         )}
 
         {visibleMessages.map((msg) => {
+          const renderDividers = (m) => (
+            <>
+              {Boolean(m.dateDivider) && (
+                <div className="flex items-center gap-2 my-4" role="separator">
+                  <div className="flex-1 h-[1px] bg-d-divider" />
+                  <span className="text-[11px] font-semibold text-d-text3 px-1">
+                    {formatDateDivider(m.dateDivider)}
+                  </span>
+                  <div className="flex-1 h-[1px] bg-d-divider" />
+                </div>
+              )}
+
+              {Boolean(m.isFirstUnread) && (
+                <div data-first-unread="true" className="flex items-center gap-2 my-2">
+                  <div className="flex-1 h-[1px] bg-d-danger" />
+                  <span className="text-[10px] font-bold text-d-danger bg-d-danger/10 px-2 py-0.5 rounded">
+                    {t('chat.newMessages')}
+                  </span>
+                </div>
+              )}
+            </>
+          );
           const isOwn = msg.user_id === currentUser?.id;
+          // Discord's gold row for a message that pings you.
+          const mentionsMe = !msg.pending && mentionsUser(msg, currentUser, {
+            roleIds: myRoleIds, repliedToUserId: msg.replyToMsg?.user_id ?? null
+          });
           const isBlockedAuthor = blockedIds?.has(msg.user_id) && !isOwn;
           const revealed = revealedBlocked.has(msg.id);
           const reactionList = msg.reaction_details?.length
             ? msg.reaction_details
             : Object.entries(msg.reactions ?? {}).map(([emoji, count]) => ({ emoji, count, me: false }));
+
+          // Thread created / pin / join: a compact system line, not a message
+          // signed by whoever triggered it.
+          if (SYSTEM_TYPES.has(msg.type)) {
+            return (
+              <React.Fragment key={msg.id}>
+                {renderDividers(msg)}
+                <SystemMessage
+                  msg={msg}
+                  use24Hour={chatPrefs.use24HourClock}
+                  onOpenThread={(id) => onSelectChannel?.(id)}
+                  onOpenPins={() => setShowPins(true)}
+                  onSelectUser={(id) => onSelectUser?.(id)}
+                />
+              </React.Fragment>
+            );
+          }
 
           if (isBlockedAuthor && !revealed) {
             return (
@@ -1066,24 +1158,7 @@ export default function ChatArea({
 
           return (
             <React.Fragment key={msg.id}>
-              {Boolean(msg.dateDivider) && (
-                <div className="flex items-center gap-2 my-4" role="separator">
-                  <div className="flex-1 h-[1px] bg-d-divider" />
-                  <span className="text-[11px] font-semibold text-d-text3 px-1">
-                    {formatDateDivider(msg.dateDivider)}
-                  </span>
-                  <div className="flex-1 h-[1px] bg-d-divider" />
-                </div>
-              )}
-
-              {Boolean(msg.isFirstUnread) && (
-                <div data-first-unread="true" className="flex items-center gap-2 my-2">
-                  <div className="flex-1 h-[1px] bg-d-danger" />
-                  <span className="text-[10px] font-bold text-d-danger bg-d-danger/10 px-2 py-0.5 rounded">
-                    {t('chat.newMessages')}
-                  </span>
-                </div>
-              )}
+              {renderDividers(msg)}
 
               <div
                 id={`message-${msg.id}`}
@@ -1121,7 +1196,7 @@ export default function ChatArea({
                 }}
                 className={`message-row group flex gap-4 max-sm:gap-3 px-2 -mx-2 rounded hover:bg-d-rowhover transition-colors relative ${
                   msg.isGrouped ? 'py-[1px]' : 'py-[var(--message-padding-y)] message-group-start'
-                } ${msg.pending ? 'opacity-50' : ''} ${msg.failed ? 'opacity-70' : ''} ${msg.isFirstUnread ? 'bg-d-danger/[0.04]' : ''} ${touchActionsId === msg.id ? 'bg-d-rowhover' : ''}`}
+                } ${msg.pending ? 'opacity-50' : ''} ${msg.failed ? 'opacity-70' : ''} ${msg.isFirstUnread && !mentionsMe ? 'bg-d-danger/[0.04]' : ''} ${mentionsMe ? 'mention-row' : ''} ${touchActionsId === msg.id ? 'bg-d-rowhover' : ''}`}
               >
                 {msg.isGrouped ? (
                   <div
@@ -1530,7 +1605,7 @@ export default function ChatArea({
               onClose={() => setShowEmojiPicker(false)}
               onPick={(entry) => {
                 setShowEmojiPicker(false);
-                setInputText((prev) => prev + (entry.custom ? '<:' + entry.name + ':' + entry.id + '> ' : entry.char));
+                setInputText((prev) => prev + (entry.custom ? `:${entry.name}: ` : entry.char));
                 focusComposer();
               }}
             />
@@ -1766,6 +1841,38 @@ export default function ChatArea({
         </div>
       </div>
 
+      {showMobileSearch && (
+        <MobileSearchSheet
+          initial={searchTerm}
+          onClose={() => setShowMobileSearch(false)}
+          onSubmit={(term) => {
+            setSearchTerm(term);
+            setShowMobileSearch(false);
+            onSearch?.(term);
+          }}
+        />
+      )}
+
+      {headerMenu && (
+        <ContextMenu
+          x={headerMenu.x}
+          y={headerMenu.y}
+          onClose={() => setHeaderMenu(null)}
+          items={[
+            {
+              icon: muted ? BellOff : Bell,
+              label: t('notif.notificationSettings'),
+              action: () => onOpenNotificationSettings?.(headerMenu.x, headerMenu.y)
+            },
+            onOpenInbox && {
+              icon: Inbox,
+              label: inboxCount > 0 ? `${t('notif.inbox')} (${inboxCount})` : t('notif.inbox'),
+              action: () => onOpenInbox(window.innerWidth - 8, headerMenu.y)
+            }
+          ].filter(Boolean)}
+        />
+      )}
+
       {showPins && (
         <PinnedMessagesPopover
           messages={pins}
@@ -1975,5 +2082,93 @@ function AnchoredPopover({ anchorId, onClose, children }) {
         {children}
       </div>
     </>
+  );
+}
+
+const SYSTEM_TYPES = new Set(['thread_created', 'pin', 'channel_pinned_message', 'join', 'member_join', 'guild_member_join']);
+
+/** Put a React node where a translation says {name}. */
+function withName(key, node) {
+  return t(key).split('{name}').map((part, i) => (
+    <React.Fragment key={i}>{i > 0 && node}{part}</React.Fragment>
+  ));
+}
+
+function SystemMessage({ msg, use24Hour, onOpenThread, onOpenPins, onSelectUser }) {
+  const name = msg.display_name ?? msg.username ?? '';
+  const who = (
+    <button type="button" onClick={() => onSelectUser(msg.user_id)} className="font-semibold text-d-strong hover:underline">
+      {name}
+    </button>
+  );
+  let icon = MessagesSquare;
+  let body;
+  if (msg.type === 'thread_created') {
+    body = (
+      <>
+        {withName('system.threadStarted', who)}{' '}
+        {msg.thread_id ? (
+          <button type="button" onClick={() => onOpenThread(msg.thread_id)} className="font-semibold text-d-strong hover:underline">
+            {msg.content}
+          </button>
+        ) : <span className="font-semibold text-d-strong">{msg.content}</span>}
+      </>
+    );
+  } else if (msg.type === 'pin' || msg.type === 'channel_pinned_message') {
+    icon = Pin;
+    body = (
+      <>
+        {withName('system.pinned', who)}{' '}
+        <button type="button" onClick={onOpenPins} className="font-semibold text-d-strong hover:underline">
+          {t('system.seePins')}
+        </button>
+      </>
+    );
+  } else {
+    icon = UserPlus;
+    body = withName('system.joined', who);
+  }
+  const Icon = icon;
+  return (
+    <div id={`message-${msg.id}`} role="note" className="message-row flex items-center gap-4 max-sm:gap-3 px-2 -mx-2 py-1 text-sm text-d-text2">
+      <span className="w-10 shrink-0 flex justify-center text-d-text3" aria-hidden="true">
+        <Icon className="w-4 h-4" />
+      </span>
+      <p className="min-w-0 flex-1 leading-relaxed">
+        {body}
+        <span className="ml-2 text-[11px] text-d-text4">{formatTime(msg.created_at, undefined, use24Hour)}</span>
+      </p>
+    </div>
+  );
+}
+
+/** Full-screen search entry for phones. Results open in SearchResultsPanel. */
+function MobileSearchSheet({ initial = '', onSubmit, onClose }) {
+  const [term, setTerm] = useState(initial);
+  const ref = useFocusTrap(true, onClose);
+  return (
+    <div ref={ref} role="dialog" aria-modal="true" aria-label={t('chat.searchMessages')} className="fixed inset-0 z-50 bg-d-canvas flex flex-col">
+      <form
+        onSubmit={(e) => { e.preventDefault(); if (term.trim()) onSubmit(term.trim()); }}
+        className="h-14 px-2 flex items-center gap-2 border-b border-d-edge"
+      >
+        <button type="button" onClick={onClose} className="p-2 text-d-text2 hover:text-d-strong" aria-label={t('common.back')}>
+          <ArrowLeft className="w-5 h-5" />
+        </button>
+        <input
+          type="search"
+          value={term}
+          onChange={(e) => setTerm(e.target.value)}
+          placeholder={t('common.search')}
+          aria-label={t('chat.searchMessages')}
+          enterKeyHint="search"
+          className="flex-1 min-w-0 bg-d-base text-base text-d-strong placeholder-d-text4 px-3 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-d-brand"
+        />
+        <button type="submit" disabled={!term.trim()} className="p-2 text-d-text2 hover:text-d-strong disabled:opacity-40" aria-label={t('chat.searchMessages')}>
+          <Search className="w-5 h-5" />
+        </button>
+      </form>
+      <p className="p-4 text-sm text-d-text3">{t('search.mobileHint')}</p>
+    </div>
   );
 }
