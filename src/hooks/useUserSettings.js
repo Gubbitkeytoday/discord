@@ -93,6 +93,8 @@ export const PREFERENCE_DEFAULTS = {
     markServerRead: 'Shift+Escape',
     navigateChannelUp: 'Alt+ArrowUp',
     navigateChannelDown: 'Alt+ArrowDown',
+    navigateUnreadUp: 'Alt+Shift+ArrowUp',
+    navigateUnreadDown: 'Alt+Shift+ArrowDown',
     toggleStreamerMode: 'Ctrl+Shift+S',
     disconnectVoice: 'Ctrl+Shift+H',
     navigateServerUp: 'Ctrl+Alt+ArrowUp',

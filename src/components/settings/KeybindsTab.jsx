@@ -21,6 +21,8 @@ const GROUPS = () => [
       { key: 'quickSwitcher',       label: t('keys.quickSwitcher') },
       { key: 'navigateChannelUp',   label: t('keys.navigateChannelUp') },
       { key: 'navigateChannelDown', label: t('keys.navigateChannelDown') },
+      { key: 'navigateUnreadUp',    label: t('keybinds.navigateUnreadUp') },
+      { key: 'navigateUnreadDown',  label: t('keybinds.navigateUnreadDown') },
       { key: 'markServerRead',      label: t('keys.markServerRead') },
       { key: 'markChannelRead',     label: t('keys.markChannelRead') },
       { key: 'navigateServerUp',    label: t('keys.navigateServerUp') },

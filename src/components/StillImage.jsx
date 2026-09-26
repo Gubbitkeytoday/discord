@@ -34,13 +34,13 @@ export function isAnimatedImage({ url = '', mimetype = '', filename = '', animat
 }
 
 /**
- * An <img> that honours "Automatically play GIFs": when `animate` is false it
+ * An image element that honours "Automatically play GIFs": when `animate` is false it
  * shows the first frame and plays only while hovered or focused (or never,
  * with `playOnHover={false}`). Same element, same classes — only `src` swaps,
  * so layout is untouched. If the first frame cannot be captured, it falls
  * back to a neutral placeholder rather than autoplaying against the setting.
  */
-export default function StillImage({ src, animate = true, playOnHover = true, className = '', style, ...rest }) {
+export default function StillImage({ src, alt = '', animate = true, playOnHover = true, className = '', style, ...rest }) {
   const [still, setStill] = useState(() => (frames.has(src) ? frames.get(src) : undefined));
   const [active, setActive] = useState(false);
 
@@ -51,13 +51,14 @@ export default function StillImage({ src, animate = true, playOnHover = true, cl
     return () => { cancelled = true; };
   }, [src, animate]);
 
-  if (animate) return <img src={src} className={className} style={style} {...rest} />;
+  if (animate) return <img src={src} alt={alt} className={className} style={style} {...rest} />;
 
   const playing = playOnHover && active;
   const shown = playing ? src : still;
   return (
     <img
       {...rest}
+      alt={alt}
       src={shown || undefined}
       data-still={playing ? undefined : 'true'}
       className={`${className} ${shown ? '' : 'bg-d-surface'}`}

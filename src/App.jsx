@@ -947,15 +947,32 @@ export default function App() {
   }, []);
 
   /** Walk the channel list, the way Alt+↑/↓ does in Discord. */
-  const stepChannel = useCallback((direction) => {
+  const stepChannel = useCallback((direction, { unreadOnly = false } = {}) => {
     const list = activeServerId === 'home'
       ? dmChannels
       : channels.filter((c) => c.type !== 'thread' && c.type !== 'voice' && c.type !== 'category');
     if (list.length === 0) return;
     const index = list.findIndex((c) => c.id === activeChannelId);
-    const next = list[(index + direction + list.length) % list.length];
-    if (next) setActiveChannelId(next.id);
-  }, [activeServerId, dmChannels, channels, activeChannelId]);
+    if (!unreadOnly) {
+      const next = list[(index + direction + list.length) % list.length];
+      if (next) setActiveChannelId(next.id);
+      return;
+    }
+    // Alt+Shift+↑/↓: the next channel with something unread, skipping muted
+    // ones (a mention in a muted channel still counts, as in Discord).
+    const isUnread = (c) => {
+      const state = readStates[c.id];
+      if (state?.mention_count > 0) return true;
+      return Boolean(state?.unread) && !channelSettings[c.id]?.muted;
+    };
+    for (let step = 1; step < list.length; step += 1) {
+      const candidate = list[((index === -1 ? (direction > 0 ? -1 : 0) : index) + direction * step + list.length * step) % list.length];
+      if (candidate && candidate.id !== activeChannelId && isUnread(candidate)) {
+        setActiveChannelId(candidate.id);
+        return;
+      }
+    }
+  }, [activeServerId, dmChannels, channels, activeChannelId, readStates, channelSettings]);
 
   /** Move up or down the server rail, wrapping, with Home at the top. */
   const stepServer = useCallback((direction) => {
@@ -981,6 +998,8 @@ export default function App() {
     markServerRead: markEverythingRead,
     navigateChannelUp: () => stepChannel(-1),
     navigateChannelDown: () => stepChannel(1),
+    navigateUnreadUp: () => stepChannel(-1, { unreadOnly: true }),
+    navigateUnreadDown: () => stepChannel(1, { unreadOnly: true }),
     toggleMute: () => handleToggleMute(),
     toggleDeafen: () => handleToggleDeafen(),
     disconnectVoice: () => { if (currentVoiceChannel) handleLeaveVoice(); },
@@ -1826,6 +1845,7 @@ export default function App() {
       onTypingStop={() => socket.emit('typing_stop', { channelId: activeChannelId })}
       typingUsers={typingUsers}
       lastReadMessageId={channelReadMarker}
+      onClearReadMarker={() => setChannelReadMarker(null)}
       onLoadMore={handleLoadMore}
       hasMoreHistory={hasMoreHistory}
       isLoadingHistory={isLoadingHistory}

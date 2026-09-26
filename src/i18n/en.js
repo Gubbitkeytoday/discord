@@ -1683,4 +1683,10 @@ export default {
   'security.manualKey': 'Or enter this key',
   'security.copyKey': 'Copy key',
   'security.openInAuthenticator': 'Open in authenticator app',
+  'chat.unreadSince': '{count} new messages since {time}',
+  'chat.unreadSince_one': '{count} new message since {time}',
+  'chat.markAsRead': 'Mark as read',
+  'keybinds.navigateUnreadUp': 'Previous unread channel',
+  'keybinds.navigateUnreadDown': 'Next unread channel',
+  'chat.addReactionTo': 'Add reaction',
 };

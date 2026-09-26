@@ -1683,4 +1683,10 @@ export default {
   'security.manualKey': 'หรือใส่คีย์นี้',
   'security.copyKey': 'คัดลอกคีย์',
   'security.openInAuthenticator': 'เปิดในแอปยืนยันตัวตน',
+  'chat.unreadSince': '{count} ข้อความใหม่ตั้งแต่ {time}',
+  'chat.unreadSince_one': '{count} ข้อความใหม่ตั้งแต่ {time}',
+  'chat.markAsRead': 'ทำเครื่องหมายว่าอ่านแล้ว',
+  'keybinds.navigateUnreadUp': 'ห้องที่ยังไม่ได้อ่านก่อนหน้า',
+  'keybinds.navigateUnreadDown': 'ห้องที่ยังไม่ได้อ่านถัดไป',
+  'chat.addReactionTo': 'เพิ่มรีแอคชัน',
 };

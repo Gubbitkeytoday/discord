@@ -1,10 +1,10 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import {
   Hash, Bell, BellOff, Pin, Users, Search, PlusCircle, Smile, Send, Trash2, Reply, X,
   FileText, Download, Pencil, ArrowDown, Loader2, Check, Sticker, Inbox, UserPlus,
   MessagesSquare, Archive, AlertTriangle, RotateCcw, Megaphone, Volume2, Lock, BarChart3, ChevronRight,
   Bold, Italic, Underline, Strikethrough, Code, Code2, Quote, EyeOff, Type, Link2 as Link2Icon, Menu, Phone, Video, History,
-  SmilePlus, MoreHorizontal
+  SmilePlus, MoreHorizontal, CheckCheck
 } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { playMessageIncomingSound } from '../utils/soundEffects';
@@ -12,6 +12,15 @@ import { DEFAULT_AVATAR } from '../utils/avatar';
 import {
   decorateMessages, formatDateDivider, formatTime, formatFullTimestamp, formatTypingText
 } from '../utils/messageGrouping';
+
+/** "3:42 PM" today, "Mar 3, 3:42 PM" otherwise — the unread bar's "since". */
+function formatUnreadSince(date, use24Hour) {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const time = formatTime(d, localeTag(), use24Hour);
+  if (d.toDateString() === new Date().toDateString()) return time;
+  return `${d.toLocaleDateString(localeTag(), { month: 'short', day: 'numeric' })}, ${time}`;
+}
 
 import ImageLightboxModal from './ImageLightboxModal';
 import LinkEmbed from './LinkEmbed';
@@ -25,7 +34,7 @@ import CreatePollModal from './CreatePollModal';
 import { VoiceNotePlayer, VoiceNoteRecorder, VoiceNoteButton } from './VoiceNote';
 import SuperReaction, { motionAllowed } from './SuperReaction';
 import { runSlashCommand, parseSlashInput } from '../utils/slashCommands';
-import { t } from '../i18n/index.jsx';
+import { t, localeTag } from '../i18n/index.jsx';
 import { convertEmoticons } from '../utils/emoticons';
 import StillImage, { isAnimatedImage } from './StillImage';
 import { useUserSettings } from '../hooks/useUserSettings';
@@ -105,7 +114,8 @@ export default function ChatArea({
   onArchiveThread,
   onToast,
   isUnknownSender,
-  isLoadingMessages = false
+  isLoadingMessages = false,
+  onClearReadMarker
 }) {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -193,6 +203,21 @@ export default function ChatArea({
     [messages, lastReadMessageId, currentUser?.id]
   );
 
+  // Discord's "N new messages since 3:42 PM — Mark as read" bar. Counted from
+  // what is loaded; when the first unread is the oldest loaded message and
+  // there is more history, the count is a lower bound ("50+").
+  const unreadSummary = useMemo(() => {
+    const index = decorated.findIndex((m) => m.isFirstUnread);
+    if (index === -1) return null;
+    const count = decorated.slice(index).filter((m) => m.user_id !== currentUser?.id && !m.pending).length;
+    if (count === 0) return null;
+    return { id: decorated[index].id, count, more: index === 0 && hasMoreHistory, since: decorated[index].created_at };
+  }, [decorated, hasMoreHistory, currentUser?.id]);
+  const [unreadBarDismissed, setUnreadBarDismissed] = useState(false);
+  // On opening a channel, land on the first unread message instead of the
+  // bottom, once its history has arrived.
+  const unreadScrollPendingRef = useRef(true);
+
   const autocompleteOptions = useMemo(
     () => buildOptions(trigger, { members, channels, customEmojis, botCommands }),
     [trigger, members, channels, customEmojis, botCommands]
@@ -265,8 +290,21 @@ export default function ChatArea({
       prependAnchorRef.current = null;
       return;
     }
+    if (unreadScrollPendingRef.current && decorated.length > 0 && !isLoadingMessages) {
+      unreadScrollPendingRef.current = false;
+      const divider = el.querySelector('[data-first-unread]');
+      if (divider) {
+        const top = divider.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        // Only when the divider would otherwise be above the fold.
+        if (top < el.scrollHeight - el.clientHeight) {
+          el.scrollTop = Math.max(0, top - 56);
+          setIsAtBottom(false);
+          return;
+        }
+      }
+    }
     if (isAtBottom) el.scrollTop = el.scrollHeight;
-  }, [decorated, isAtBottom]);
+  }, [decorated, isAtBottom, isLoadingMessages]);
 
   // Keep the latest text in a ref so the channel-switch cleanup below can
   // stash the draft of the channel being left.
@@ -283,6 +321,8 @@ export default function ChatArea({
     setShowPins(false);
     setReactTarget(null);
     setTouchActionsId(null);
+    setUnreadBarDismissed(false);
+    unreadScrollPendingRef.current = true;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
     return () => {
@@ -883,6 +923,37 @@ export default function ChatArea({
         className="flex-1 overflow-y-auto px-4 max-sm:px-3 select-text"
         aria-busy={isLoadingMessages || isLoadingHistory}
       >
+        {unreadSummary && !unreadBarDismissed && (
+          // Zero-height sticky host: the bar floats over the history without
+          // pushing it down.
+          <div className="sticky top-0 z-10 h-0 -mx-4 max-sm:-mx-3">
+            <div
+              role="status"
+              className="flex items-center bg-d-brand text-white text-xs font-semibold rounded-b-lg shadow-md mx-2"
+            >
+              <button
+                type="button"
+                onClick={() => jumpToMessage(unreadSummary.id)}
+                className="flex-1 min-w-0 text-left px-3 py-1.5 truncate hover:underline"
+              >
+                {t('chat.unreadSince', {
+                  count: unreadSummary.more ? `${unreadSummary.count}+` : unreadSummary.count,
+                  time: formatUnreadSince(unreadSummary.since, chatPrefs.use24HourClock)
+                })}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setUnreadBarDismissed(true);
+                  onClearReadMarker?.();
+                }}
+                className="shrink-0 flex items-center gap-1 px-3 py-1.5 hover:bg-white/10 rounded-br-lg"
+              >
+                {t('chat.markAsRead')} <CheckCheck className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
         {/* Like Discord, a short conversation sits on the composer rather than
             floating at the top of an empty pane. */}
         <div className="min-h-full flex flex-col">
@@ -963,7 +1034,7 @@ export default function ChatArea({
               )}
 
               {Boolean(msg.isFirstUnread) && (
-                <div className="flex items-center gap-2 my-2">
+                <div data-first-unread="true" className="flex items-center gap-2 my-2">
                   <div className="flex-1 h-[1px] bg-d-danger" />
                   <span className="text-[10px] font-bold text-d-danger bg-d-danger/10 px-2 py-0.5 rounded">
                     {t('chat.newMessages')}
@@ -1408,26 +1479,39 @@ export default function ChatArea({
           accept="image/*,video/*,audio/*,.pdf,.json,.txt,.zip"
         />
 
-        {showEmojiPicker && (
+        {showEmojiPicker && !reactTarget && (
           <div className="absolute bottom-20 right-4 z-40">
+            <EmojiPicker
+              customEmojis={customEmojis}
+              externalGroups={externalEmojiGroups.filter((g) => g.server_id !== channel?.server_id)}
+              onClose={() => setShowEmojiPicker(false)}
+              onPick={(entry) => {
+                setShowEmojiPicker(false);
+                setInputText((prev) => prev + (entry.custom ? '<:' + entry.name + ':' + entry.id + '> ' : entry.char));
+                focusComposer();
+              }}
+            />
+          </div>
+        )}
+
+        {showEmojiPicker && reactTarget && (
+          // "Add reaction" opens beside the message it reacts to, as in
+          // Discord — not down by the composer, far from what you clicked.
+          <AnchoredPopover
+            anchorId={`message-${reactTarget.id}`}
+            onClose={() => { setShowEmojiPicker(false); setReactTarget(null); }}
+          >
             <EmojiPicker
               customEmojis={customEmojis}
               externalGroups={externalEmojiGroups.filter((g) => g.server_id !== channel?.server_id)}
               onClose={() => { setShowEmojiPicker(false); setReactTarget(null); }}
               onPick={(entry) => {
                 setShowEmojiPicker(false);
-                // Opened from a message ("Add reaction"): react to it. This
-                // used to paste the emoji into the composer instead.
-                if (reactTarget) {
-                  onToggleReaction(reactTarget.id, entry.char ?? `:${entry.name}:`);
-                  setReactTarget(null);
-                  return;
-                }
-                setInputText((prev) => prev + (entry.custom ? '<:' + entry.name + ':' + entry.id + '> ' : entry.char));
-                focusComposer();
+                onToggleReaction(reactTarget.id, entry.char ?? `:${entry.name}:`);
+                setReactTarget(null);
               }}
             />
-          </div>
+          </AnchoredPopover>
         )}
 
         {showPollComposer && (
@@ -1807,5 +1891,46 @@ function ReactionChip({ reaction, onToggle, nameFor }) {
       <span>{reaction.emoji}</span>
       <span className="font-semibold text-[11px]">{reaction.count}</span>
     </button>
+  );
+}
+
+/**
+ * A popover placed beside an element in the message list: to the left of the
+ * row's right edge (where the action bar sits), top-aligned with the row,
+ * clamped inside the viewport; on a phone it centres horizontally. A clear
+ * backdrop closes it on an outside click.
+ */
+function AnchoredPopover({ anchorId, onClose, children }) {
+  const ref = useRef(null);
+  const [position, setPosition] = useState(null);
+  useLayoutEffect(() => {
+    const anchor = document.getElementById(anchorId);
+    const node = ref.current;
+    if (!node) return;
+    const margin = 8;
+    const { width, height } = node.getBoundingClientRect();
+    const rect = anchor?.getBoundingClientRect() ?? { top: window.innerHeight / 3, right: window.innerWidth - margin };
+    const narrow = window.innerWidth < 640;
+    const left = narrow
+      ? (window.innerWidth - width) / 2
+      : rect.right - width - 56;
+    let top = rect.top - 8;
+    if (top + height > window.innerHeight - margin) top = window.innerHeight - height - margin;
+    setPosition({
+      left: Math.max(margin, Math.min(left, window.innerWidth - width - margin)),
+      top: Math.max(margin, top)
+    });
+  }, [anchorId]);
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onMouseDown={onClose} aria-hidden="true" />
+      <div
+        ref={ref}
+        className="fixed z-50"
+        style={position ? { left: position.left, top: position.top } : { left: 0, top: 0, visibility: 'hidden' }}
+      >
+        {children}
+      </div>
+    </>
   );
 }
