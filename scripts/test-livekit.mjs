@@ -48,7 +48,7 @@ process.env.LIVEKIT_API_SECRET = API_SECRET;
 process.env.VOICE_MESH_LIMIT = '2';
 
 const { startServer, stopServer, api, BASE } = await import('./testHarness.mjs');
-const { readLivekitConfig, computeGrants } = await import('../services/livekit.js');
+const { readLivekitConfig, computeGrants, buildIceServers } = await import('../services/livekit.js');
 
 before(startServer);
 after(async () => { await stopServer(); fake.close(); });
@@ -136,6 +136,17 @@ describe('configuration', () => {
     assert.equal(computeGrants({ channel, permissions: everyone, state: null }).canPublish, false);
     assert.equal(computeGrants({ channel, permissions: everyone, state: { suppress: 0 } }).summary.audio, true);
     assert.equal(computeGrants({ channel, permissions: all, state: null }).summary.stageRole, 'moderator');
+  });
+
+  test('TURN REST credentials: expiry + random nonce, valid coturn HMAC, no account id', () => {
+    const env = { TURN_URLS: 'turn:turn.test:3478', TURN_SECRET: 'turn-secret', TURN_TTL_SECONDS: '600', STUN_URLS: '' };
+    const a = buildIceServers(env).iceServers.find((s) => s.urls.includes('turn:turn.test:3478'));
+    const b = buildIceServers(env).iceServers.find((s) => s.urls.includes('turn:turn.test:3478'));
+    const [expiry, nonce] = a.username.split(':');
+    assert.ok(Number(expiry) > Date.now() / 1000 + 500 && Number(expiry) <= Date.now() / 1000 + 601);
+    assert.match(nonce, /^[0-9a-f-]{36}$/);
+    assert.notEqual(a.username, b.username, 'minted per call');
+    assert.equal(a.credential, crypto.createHmac('sha1', 'turn-secret').update(a.username).digest('base64'));
   });
 });
 

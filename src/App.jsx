@@ -1382,7 +1382,7 @@ export default function App() {
 
   const handleSendMessage = (content, attachments, reply_to_id, extra = {}) => {
     if (!activeChannelId || !currentUser) return;
-    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const nonce = `${Date.now()}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
     const sticker = extra.sticker ?? null;
 
     setMessages((prev) => [...prev, {

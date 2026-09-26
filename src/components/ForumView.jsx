@@ -18,7 +18,7 @@ import { useDialog } from './settings/primitives';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { avatarOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
-import { proxiedImageUrl } from '../utils/media';
+import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
 
 const SORTS = () => [
   { key: 'latest_activity', label: t('forum.sortActivity') },
@@ -247,8 +247,8 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
   const fileInput = useRef(null);
   const requireTag = Boolean(channel?.require_tag);
 
-  const previews = useMemo(() => files.map((f) => ({ file: f, url: URL.createObjectURL(f) })), [files]);
-  useEffect(() => () => previews.forEach((p) => URL.revokeObjectURL(p.url)), [previews]);
+  const previews = useMemo(() => files.map((f) => ({ file: f, url: filePreviewUrl(f) })), [files]);
+  useEffect(() => () => previews.forEach((p) => { if (p.url) URL.revokeObjectURL(p.url); }), [previews]);
 
   const canSubmit = title.trim().length > 0 && (body.trim().length > 0 || files.length > 0)
     && (!requireTag || selected.length > 0) && !busy;
@@ -351,9 +351,9 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
             {previews.length > 0 && (
               <ul className="flex flex-wrap gap-2 mt-2" aria-label={t('forum.attachments')}>
                 {previews.map(({ file, url }, i) => (
-                  <li key={url} className="relative w-20 h-20 rounded-md overflow-hidden bg-d-surface border border-d-edge">
-                    {file.type.startsWith('image/') ? (
-                      <img src={proxiedImageUrl(url)} alt="" className="w-full h-full object-cover" />
+                  <li key={url ?? `${file.name}-${i}`} className="relative w-20 h-20 rounded-md overflow-hidden bg-d-surface border border-d-edge">
+                    {file.type.startsWith('image/') && url ? (
+                      <img src={url} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[10px] text-d-text2 p-1 text-center break-all">{file.name}</div>
                     )}
