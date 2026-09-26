@@ -5,6 +5,8 @@ import { THEME_PRESETS, profileTheme } from '../../profile/theme';
 import { t } from '../../i18n/index.jsx';
 
 const DEFAULT_COLORS = ['#5865f2', '#eb459e'];
+// Two Thai letters, so each font preview shows its Thai coverage.
+const THAI_SAMPLE = '\u0E01\u0E02';
 
 /**
  * Name style: font (all with Thai coverage), effect and colours, with the
@@ -41,7 +43,7 @@ export function NameStyleEditor({ value, onChange, sample }) {
               <input type="radio" name={`${id}-font`} value={key} checked={style.font === key}
                 onChange={() => set({ font: key })} className="sr-only" />
               <span className="truncate text-base text-d-strong" style={{ fontFamily: font.family ? `${font.family}, var(--font-sans)` : undefined }}>
-                {sample || 'Aa'} กข
+                {sample || 'Aa'} {THAI_SAMPLE}
               </span>
               <span className="text-[11px] text-d-text3">{key === 'default' ? t('profiles.fontDefault') : font.label}</span>
             </label>
