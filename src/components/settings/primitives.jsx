@@ -152,9 +152,12 @@ export function Toggle({ checked, onChange, disabled = false, label, id }) {
 
 /** Row + Toggle, the pairing that makes up most of every settings page. */
 export function SettingToggle({ label, hint, checked, onChange, disabled, last }) {
+  // The whole row is the target, as on Discord: the label is a <label> for
+  // the switch (a button is labelable), so clicking the words toggles it.
+  const id = useId();
   return (
-    <Row label={label} hint={hint} last={last}>
-      <Toggle checked={checked} onChange={onChange} disabled={disabled} label={label} />
+    <Row label={label} hint={hint} last={last} htmlFor={disabled ? undefined : id}>
+      <Toggle id={id} checked={checked} onChange={onChange} disabled={disabled} label={label} />
     </Row>
   );
 }

@@ -7,6 +7,9 @@ import {
 } from 'lucide-react';
 import UserStatusMenu from './UserStatusMenu';
 import { proxiedImageUrl } from '../utils/media';
+import { useMessageRequests, MessageRequestRow, MessageRequestBar } from './admin/MessageRequests';
+import { BirthdateCard } from './admin/BirthdatePrompt';
+import { useStreamerMask, useAccountFlags } from './admin/safety';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -69,6 +72,7 @@ export default function HomeDirectMessages({
   serverCount = 0,
   onCreateServer,
   onJoinServer,
+  onToast,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -119,6 +123,25 @@ export default function HomeDirectMessages({
 
   const isConversationOpen = Boolean(activeChannelId && dms.some((d) => d.id === activeChannelId));
 
+  // Message requests: DMs from non-friends are listed apart from the
+  // conversations you chose, with Accept / Ignore / Block & report.
+  const requestKey = useMemo(
+    () => dms.map((d) => `${d.id}:${d.last_message_id ?? ''}:${readStates[d.id]?.unread ? 1 : 0}`).join('|'),
+    [dms, readStates]
+  );
+  const requests = useMessageRequests(requestKey);
+  const requestIds = useMemo(() => new Set(requests.requests.map((r) => r.channel_id)), [requests.requests]);
+  const shownDms = useMemo(() => visibleDms.filter((d) => !requestIds.has(d.id)), [visibleDms, requestIds]);
+  const shownRequests = useMemo(() => {
+    if (!filter.trim()) return requests.requests;
+    const needle = filter.toLowerCase();
+    return requests.requests.filter((r) => `${r.user.display_name ?? ''} ${r.user.username ?? ''}`.toLowerCase().includes(needle));
+  }, [requests.requests, filter]);
+  const activeRequest = isConversationOpen ? requests.requests.find((r) => r.channel_id === activeChannelId) : null;
+  const accountFlags = useAccountFlags(currentUser);
+  const isMinor = accountFlags.age_group === 'minor';
+  const mask = useStreamerMask();
+
   return (
     <div className="flex-1 bg-d-canvas flex shrink-0 min-w-0 h-full">
       {/* On a phone the DM list is a drawer beside the server rail, exactly
@@ -163,6 +186,26 @@ export default function HomeDirectMessages({
         </div>
 
         <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5 focus:outline-none">
+          {shownRequests.length > 0 && (
+            <div className="mb-3 pb-2 border-b border-d-divider" role="group" aria-labelledby="dm-requests-heading">
+              <div id="dm-requests-heading" className="px-2 mb-1 mt-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider">
+                <span>{t('safety.messageRequests')}</span>
+                <span className="bg-d-danger text-white text-[10px] font-bold px-1.5 rounded-full" aria-label={t('safety.requestCount', { count: shownRequests.length })}>
+                  {shownRequests.length}
+                </span>
+              </div>
+              {shownRequests.map((request) => (
+                <MessageRequestRow
+                  key={request.channel_id}
+                  request={request}
+                  blur={requests.blur_previews}
+                  active={request.channel_id === activeChannelId}
+                  onOpen={(id) => onSelectDm?.(id)}
+                />
+              ))}
+            </div>
+          )}
+
           <div className="px-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider mb-1 mt-2">
             <span>{t('dm.directMessages')}</span>
             <button
@@ -175,11 +218,11 @@ export default function HomeDirectMessages({
             </button>
           </div>
 
-          {visibleDms.length === 0 && (
+          {shownDms.length === 0 && shownRequests.length === 0 && (
             <p className="px-2 text-[11px] text-d-text4 leading-relaxed">{t('dm.noConversations')}</p>
           )}
 
-          {visibleDms.map((dm) => {
+          {shownDms.map((dm) => {
             const isActive = dm.id === activeChannelId;
             const state = readStates[dm.id] ?? {};
             const hasUnread = Boolean(state.unread) && !isActive;
@@ -281,7 +324,7 @@ export default function HomeDirectMessages({
                 {currentUser?.display_name || currentUser?.username}
               </span>
               <span className="text-[11px] text-d-text3 truncate leading-tight">
-                {currentUser?.custom_status || `@${currentUser?.username}`}
+                {currentUser?.custom_status || (mask.usernames ? t('safety.streamerHidden') : `@${currentUser?.username}`)}
               </span>
             </div>
           </button>
@@ -325,7 +368,27 @@ export default function HomeDirectMessages({
 
       {/* Conversation, or the friends dashboard */}
       {isConversationOpen ? (
-        children
+        activeRequest ? (
+          <div className="flex-1 flex flex-col min-w-0 h-full">
+            <MessageRequestBar
+              request={activeRequest}
+              isMinor={isMinor}
+              onToast={onToast}
+              onAccept={() => requests.accept(activeRequest.channel_id)}
+              onIgnore={async () => {
+                const id = activeRequest.channel_id;
+                await requests.ignore(id);
+                onCloseDm?.(id);
+              }}
+              onReported={async () => {
+                const id = activeRequest.channel_id;
+                await requests.ignore(id).catch(() => {});
+                onCloseDm?.(id);
+              }}
+            />
+            <div className="flex-1 flex min-h-0 min-w-0">{children}</div>
+          </div>
+        ) : children
       ) : (
         <div className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
           <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 max-md:gap-2 bg-d-canvas shrink-0 min-w-0">
@@ -399,6 +462,9 @@ export default function HomeDirectMessages({
           </div>
 
           <div className="flex-1 overflow-y-auto p-6">
+            {/* Accounts made before the age gate are asked once, without
+                blocking anything (teen protections depend on the answer). */}
+            <BirthdateCard user={currentUser ? { ...currentUser, ...accountFlags } : null} onToast={onToast} />
             {activeTab === 'add' ? (
               <div className="max-w-xl">
                 <h2 className="text-base font-bold text-d-strong mb-1">{t('dm.addFriend')}</h2>
