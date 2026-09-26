@@ -361,6 +361,7 @@ export async function createMessage({
     throw new ApiError('A message can carry at most 10 attachments', { code: 'TOO_MANY_ATTACHMENTS' });
   }
   let senderPermissions = '0';
+  let senderRoleIds = null;
   if (!skipModeration && userId) {
     const access = await assertChannelAccess({
       channelId, userId,
@@ -368,6 +369,7 @@ export async function createMessage({
       permission: channel.channel_type === 'thread' ? 'SEND_MESSAGES_IN_THREADS' : 'SEND_MESSAGES'
     });
     senderPermissions = access.isDm ? String(ALL_PERMISSIONS) : access.permissions;
+    senderRoleIds = access.isDm ? [] : access.roleIds ?? null;
     if (!access.isDm && attachments.length > 0 && !has(access.permissions, 'ATTACH_FILES')) {
       throw ApiError.forbidden('Missing permission: ATTACH_FILES');
     }
@@ -428,13 +430,17 @@ export async function createMessage({
   // Moderation runs before anything is written, so a blocked message never
   // exists — not even as a soft-deleted row.
   if (!skipModeration) {
-    const { roleIds } = channel.server_id
+    // The access check above already resolved the sender's roles.
+    const { roleIds } = senderRoleIds
+      ? { roleIds: senderRoleIds }
+      : channel.server_id
       ? await resolveSenderContext(channel.server_id, userId)
       : { roleIds: [] };
     const permissions = senderPermissions;
 
     await automod.assertCanSpeak({
-      serverId: channel.server_id, channelId, userId, permissions
+      serverId: channel.server_id, channelId, userId, permissions,
+      slowmodeSeconds: Number(channel.rate_limit_per_user) || 0
     });
 
     const verdict = await automod.evaluate({

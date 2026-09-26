@@ -44,6 +44,26 @@ export async function listRules(serverId) {
   return rows.map(inflate);
 }
 
+// Rules as enforcement sees them, cached per guild: evaluate() runs on every
+// message, and the rule set changes rarely. Every write below invalidates its
+// guild; the TTL bounds staleness for writes made by another process.
+const RULE_CACHE_TTL_MS = 15_000;
+const ruleCache = new Map();   // serverId -> { rules, at }
+
+async function rulesForEnforcement(serverId) {
+  const hit = ruleCache.get(serverId);
+  if (hit && Date.now() - hit.at < RULE_CACHE_TTL_MS) return hit.rules;
+  const rules = await listRules(serverId);
+  ruleCache.set(serverId, { rules, at: Date.now() });
+  if (ruleCache.size > 5000) ruleCache.delete(ruleCache.keys().next().value);
+  return rules;
+}
+
+export function invalidateRuleCache(serverId = null) {
+  if (serverId) ruleCache.delete(serverId);
+  else ruleCache.clear();
+}
+
 function inflate(row) {
   return {
     ...row,
@@ -86,6 +106,7 @@ export async function createRule({ serverId, actorId, rule }) {
      JSON.stringify(rule.exempt_roles ?? []), JSON.stringify(rule.exempt_channels ?? []),
      actorId]
   );
+  invalidateRuleCache(serverId);
   return inflate(await getQuery(`SELECT * FROM automod_rules WHERE id = ?`, [id]));
 }
 
@@ -120,11 +141,13 @@ export async function updateRule({ serverId, ruleId, patch }) {
     params.push(ruleId);
     await runQuery(`UPDATE automod_rules SET ${sets.join(', ')} WHERE id = ?`, params);
   }
+  invalidateRuleCache(serverId);
   return inflate(await getQuery(`SELECT * FROM automod_rules WHERE id = ?`, [ruleId]));
 }
 
 export async function deleteRule({ serverId, ruleId }) {
   await runQuery(`DELETE FROM automod_rules WHERE id = ? AND server_id = ?`, [ruleId, serverId]);
+  invalidateRuleCache(serverId);
   return { success: true };
 }
 
@@ -144,7 +167,7 @@ export async function evaluate({ serverId, channelId, userId, content, memberRol
     return { blocked: false, actions: [] };
   }
 
-  const rules = await listRules(serverId);
+  const rules = await rulesForEnforcement(serverId);
   if (rules.length === 0) return { blocked: false, actions: [] };
 
   const history = rememberSend(channelId, userId, content);
@@ -239,7 +262,7 @@ export async function logHit({ serverId, userId, channelId, rule, reason, conten
  * Enforce channel slowmode and member timeouts.
  * Throws with a 429/403 rather than returning, since both are hard stops.
  */
-export async function assertCanSpeak({ serverId, channelId, userId, permissions = '0' }) {
+export async function assertCanSpeak({ serverId, channelId, userId, permissions = '0', slowmodeSeconds = undefined }) {
   // An administrator is never silenced by a timeout, matching Discord.
   if (serverId && !has(permissions, 'ADMINISTRATOR')) {
     const member = await getQuery(
@@ -258,9 +281,10 @@ export async function assertCanSpeak({ serverId, channelId, userId, permissions 
   // MANAGE_MESSAGES / MANAGE_CHANNELS bypass slowmode, as on Discord.
   if (has(permissions, 'MANAGE_MESSAGES') || has(permissions, 'MANAGE_CHANNELS')) return;
 
-  const channel = await getQuery(
-    `SELECT rate_limit_per_user FROM channels WHERE id = ?`, [channelId]
-  );
+  // The caller usually has the channel row already.
+  const channel = slowmodeSeconds === undefined
+    ? await getQuery(`SELECT rate_limit_per_user FROM channels WHERE id = ?`, [channelId])
+    : { rate_limit_per_user: slowmodeSeconds };
   const slowmode = Number(channel?.rate_limit_per_user) || 0;
   if (slowmode <= 0) return;
 
