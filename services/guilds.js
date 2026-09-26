@@ -398,7 +398,7 @@ export async function createChannel({
 
   // Text-ish channel names are slugs; voice, category and forum names are not.
   const finalName = ['text', 'announcement', 'forum'].includes(type)
-    ? trimmed.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '')
+    ? trimmed.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '')
     : trimmed;
 
   let resolvedParent = parentId;
@@ -473,7 +473,7 @@ export async function updateChannel({ channelId, patch, userId }) {
       value = String(value).trim();
       if (!value) throw new ApiError('Channel name is required', { code: 'INVALID_NAME' });
       if (['text', 'announcement', 'forum'].includes(channel.type)) {
-        value = value.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '');
+        value = value.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '');
       }
       value = value.slice(0, 100);
     }

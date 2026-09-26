@@ -265,14 +265,15 @@ export async function guardJoin(serverId) {
     `SELECT raid_protection, raid_join_threshold, raid_join_window_secs, raid_action, screening_enabled
        FROM servers WHERE id = ?`, [serverId]
   );
-  if (!server?.raid_protection) return { allowed: true };
-
+  // A lockdown started by hand ("Lock now") applies whether or not automatic
+  // raid protection is switched on, so check it before that early return.
   const existing = await activeLockdown(serverId);
   if (existing) {
     throw new ApiError('This server is locked down against a raid — try again later', {
       status: 403, code: 'SERVER_LOCKDOWN'
     });
   }
+  if (!server?.raid_protection) return { allowed: true };
 
   const since = iso(Date.now() - server.raid_join_window_secs * 1000);
   const recent = await getQuery(

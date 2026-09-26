@@ -88,7 +88,7 @@ const INLINE_SOURCE = [
   // like "2 * 3 * 4" turns italic.
   '\\*(?!\\*)(?!\\s)[^\\n]+?(?<!\\s)\\*(?!\\*)',
   // Underscore emphasis only at word boundaries, so snake_case_names survive.
-  '(?<![\\p{L}\\p{N}_])_(?!_)(?!\\s)[^\\n]+?(?<!\\s)_(?!_)(?![\\p{L}\\p{N}_])',
+  '(?<![\\p{L}\\p{M}\\p{N}_])_(?!_)(?!\\s)[^\\n]+?(?<!\\s)_(?!_)(?![\\p{L}\\p{M}\\p{N}_])',
   '<a?:\\w+:\\d+>',                         // custom emoji
   '<@!?[\\w-]+>',                           // user mention
   '<@&[\\w-]+>',                            // role mention

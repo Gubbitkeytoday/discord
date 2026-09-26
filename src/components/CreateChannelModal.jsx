@@ -35,7 +35,7 @@ export default function CreateChannelModal({ defaultType = 'text', categories = 
 
   // Discord slugifies text-ish names live in the field.
   const preview = ['text', 'announcement', 'forum', 'media'].includes(type)
-    ? channelName.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '')
+    ? channelName.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '')
     : channelName;
 
   return (

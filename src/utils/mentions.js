@@ -8,8 +8,8 @@
 //  the way Discord's client does. Code spans and blocks are left alone.
 // ============================================================================
 
-const USER = /(^|[\s(>*_~|])@([\p{L}\p{N}_.-]+)/gu;
-const CHANNEL = /(^|[\s(>*_~|])#([\p{L}\p{N}_-]+)/gu;
+const USER = /(^|[\s(>*_~|])@([\p{L}\p{M}\p{N}_.-]+)/gu;
+const CHANNEL = /(^|[\s(>*_~|])#([\p{L}\p{M}\p{N}_-]+)/gu;
 const EMOJI = /(^|[^<\w]):([\w-]{2,32}):(?!\d)/g;
 
 const lower = (s) => String(s ?? '').toLowerCase();
@@ -70,7 +70,7 @@ export function humanizeTokens(text, { members = [], channels = [] } = {}) {
     })
     .replace(/<#([\w-]+)>/g, (whole, id) => {
       const c = channels.find((x) => String(x.id) === id);
-      return c?.name && /^[\p{L}\p{N}_-]+$/u.test(c.name) ? `#${c.name}` : whole;
+      return c?.name && /^[\p{L}\p{M}\p{N}_-]+$/u.test(c.name) ? `#${c.name}` : whole;
     });
 }
 

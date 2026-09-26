@@ -48,7 +48,7 @@ export function detectTrigger(text, caret) {
   const slash = before.match(/^\/(\w*)$/);
   if (slash) return { kind: 'command', query: slash[1], start: 0 };
 
-  const match = before.match(/(^|\s)([@#:])([\p{L}\p{N}_-]*)$/u);
+  const match = before.match(/(^|\s)([@#:])([\p{L}\p{M}\p{N}_-]*)$/u);
   if (!match) return null;
 
   const [, lead, symbol, query] = match;
@@ -107,7 +107,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         id: c.id,
         primary: c.name,
         secondary: c.category ?? '',
-        insert: /^[\p{L}\p{N}_-]+$/u.test(c.name ?? '') ? `#${c.name} ` : `<#${c.id}> `
+        insert: /^[\p{L}\p{M}\p{N}_-]+$/u.test(c.name ?? '') ? `#${c.name} ` : `<#${c.id}> `
       }));
   }
 
