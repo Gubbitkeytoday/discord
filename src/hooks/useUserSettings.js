@@ -4,6 +4,7 @@ import { setSoundVolumeSource, setSoundPackSource } from '../utils/soundEffects'
 import { applyThemeLayer, writeBootCache } from '../theme/engine.js';
 import { SOUND_PACKS } from '../theme/soundPacks.js';
 import { BASE_THEMES, SYSTEM_LIGHT_CHOICES, SYSTEM_DARK_CHOICES } from '../theme/palettes.js';
+import { configureSeasonWindows } from '../theme/seasonal.js';
 import { localeTag, useLocaleCode } from '../i18n/index.jsx';
 
 /**
@@ -498,5 +499,20 @@ export async function loadPreferences() {
     hydratePreferences(await get('/api/settings/preferences'));
   } catch {
     // Not signed in yet, or offline — the cached values stay in force.
+  }
+}
+
+/**
+ * The instance admin's seasonal theme windows (public, no sign-in needed).
+ * Until the server exposes GET /api/instance/seasonal the built-in defaults
+ * stay in force (see the round-4 themes patch for the endpoint).
+ */
+export async function loadSeasonWindows() {
+  try {
+    const data = await get('/api/instance/seasonal');
+    configureSeasonWindows(data?.windows ?? null);
+    applyPreferences(current);
+  } catch {
+    // Older server or offline: default windows.
   }
 }

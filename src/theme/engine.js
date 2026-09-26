@@ -142,7 +142,9 @@ export function applyThemeLayer(root, prefs, baseTheme) {
   const word = clamp(appearance.wordSpacing, 0, 0.3, 0);
   root.style.setProperty('--ui-letter-spacing', `${letter}em`);
   root.style.setProperty('--ui-word-spacing', `${word}em`);
-  const customSpacing = letter > 0 || word > 0 || clamp(appearance.chatLineHeight, 1.2, 2.2, 1.375) >= 1.5;
+  // Only override every element's tracking when the user actually asked for
+  // extra letter or word spacing; line height alone is a message-body var.
+  const customSpacing = letter > 0 || word > 0;
   setData(root, 'textSpacing', customSpacing ? 'custom' : null);
 
   // Browser chrome colour (title bar / Android status bar).
