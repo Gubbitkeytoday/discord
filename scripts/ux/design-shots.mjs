@@ -103,6 +103,12 @@ try {
   await a.keyboard.press('ArrowDown');
   const focused = await a.evaluate(() => document.activeElement?.getAttribute('aria-label'));
   log('ArrowDown focus →', focused);
+  // Keyboard reorder: Ctrl+Shift+↓ moves the focused server one place down.
+  await a.keyboard.press('Control+Shift+ArrowDown');
+  await a.waitForTimeout(500);
+  const order = await a.getByRole('navigation', { name: 'Servers' }).getByRole('button').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')));
+  const stillFocused = await a.evaluate(() => document.activeElement?.getAttribute('aria-label'));
+  log('after Ctrl+Shift+Down:', JSON.stringify(order), 'focus:', stillFocused);
 
   // Server context menu (notification popover) with Move up/down.
   await a.getByRole('button', { name: /^ไรเดอร์/ }).click({ button: 'right' });
@@ -111,7 +117,7 @@ try {
   await a.keyboard.press('Escape');
 
   // Status menu.
-  const avatarBtn = a.locator('button[aria-label*="status" i], button[aria-haspopup="menu"]').first();
+  const avatarBtn = a.locator('div.h-14 > button[aria-haspopup]').first();
   await avatarBtn.click().catch(() => {});
   await a.waitForTimeout(300);
   await a.screenshot({ path: out('status-menu-1366-dark') });
