@@ -14,6 +14,50 @@ per-member cost and should raise chat throughput 15–60×.
 
 ---
 
+## Update: after the fixes (re-run 2026-09-26)
+
+Fixes #1, #2, #4, #5, #7, #8 (partly), #9 and #10 have since landed (lazy unread counters from
+`last_message_id`, a guild permission cache with versioned invalidation, session caching,
+presence sent only to related users (shared guilds, DMs, friends; not yet batched), one multi-room
+`channel_activity` emit per message, the nonce check
+folded into the insert, write admission control, per-method rate-limit buckets). The steady-chat
+scenario was re-run on the same dataset shape as the original 500-user row (`lt500`: 500 users +
+10 owners, 10 guilds × 2 channels, 51 members per guild, 200 messages of history per channel),
+same generator settings (1 msg / 10 s / user, 60 % with typing first, 45 s, 20 s ramp, 4 worker
+threads), SQLite, `UV_THREADPOOL_SIZE=4`, `NODE_ENV=development`.
+
+**Host load:** the same 4-vCPU VM was shared with other agents' test servers and browsers during
+the run; the 1-minute load average was 4.2 at the start of the 200-user run and 8.4 at the start
+of the 500-user run. As before, treat absolute latencies as conservative (±30 %).
+
+| Connected users | Target msg/s | **Acked msg/s** before → after | Send errors before → after | Ack p50 / p95 / p99 (ms) after | Fan-out p50 / p95 (ms) after | Delivered | Server CPU avg / max (% of 1 core) | RSS max | Loop lag p99 avg / max | SQL statements per message |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 200 | 20 | 15.3 → **21.1** | 0 → 0 | 17 / 173 / 250 (was 5,573 / 13,761 / 14,064) | 17 / 172 | 100 % | 22 % / 36 % | 299 MB | 10 / 139 ms | 326 → **25** |
+| 500 | 50 | 6.0 → **50.1** | 1,266 timeouts → **0** | 20 / 160 / 523 (was 10,027 / 25,719 / 29,198) | 20 / 160 | 100 % | 58 % / 97 % | 421 MB | 3 / 23 ms | 326 → **25** |
+
+- Both loads now run at the offered rate with every message acknowledged and delivered; the
+  500-user run was the one that previously collapsed. The server used about half a core on
+  average; `sql_busy` averaged 0.35 (max 0.90) at 500 users, so the single SQLite connection
+  still has headroom but is the next limit (bottleneck #3).
+- Statements per message fell from 326 to about 25 (23,541 SQL calls for 950 messages at 200
+  users; 56,168 for 2,254 at 500), i.e. the per-member cost is gone: what remains is the fixed
+  part (#8).
+- Connect: all 500 sockets ready with p95 15 ms (ramped over 20 s).
+- The load generator stayed below 0.1 ELU, so the numbers are not generator-bound.
+
+Reproduce (the fixture is seeded through the API):
+
+```bash
+scripts/load/start-server.sh /tmp/lt500
+node scripts/load/seed.mjs --users 500 --guilds 10 --channels 2 --history 200 --out /tmp/lt500/fixture.json
+for u in 200 500; do
+  node scripts/load/socket-load.mjs --fixture /tmp/lt500/fixture.json --users $u --rate 0.1 \
+       --duration 45 --ramp 20 --workers 4 --probe /tmp/lt500/probe.jsonl --out /tmp/lt500/steady-$u.json
+done
+```
+
+---
+
 ## 1. Methodology
 
 ### Environment
@@ -203,11 +247,27 @@ message, not serialising every statement, and not broadcasting presence to every
 
 ### PostgreSQL
 
-A PostgreSQL server was reachable at `postgres://localhost:55432`, but the branch merged here has no
-`DATABASE_URL` support: `db.js` is SQLite-only. That run was therefore skipped. Once the Postgres
-adapter lands, rerun `run-suite.sh` with `DATABASE_URL` exported; `start-server.sh` passes the
-environment through. Expect the per-member statement count (#1) to dominate there as well, because
-every awaited round trip costs about 0.1–0.3 ms over TCP. A connection pool removes #3, but not #1.
+The original run predates the PostgreSQL adapter. It was run on 2026-09-26 with the same steady-chat
+settings as the "after" table at the top (`DATABASE_URL` exported to `start-server.sh`; PostgreSQL
+16 on the same host, default `DB_POOL_MAX=10`; host load average 4.4–6.9 during the runs):
+
+| Connected users | Target msg/s | Acked msg/s | Send errors | Ack p50 / p95 / p99 (ms) | Fan-out p50 / p95 (ms) | Delivered | Server CPU avg / max | RSS max | Loop lag p99 avg / max |
+|---|---|---|---|---|---|---|---|---|---|
+| 200 | 20 | 20.2 | 0 | 18 / 50 / 90 | 18 / 50 | 100 % | 19 % / 33 % | 295 MB | 4 / 29 ms |
+| 500 | 50 | 50.7 | 0 | 25 / 599 / 1,012 | 26 / 604 | 100 % | 45 % / 82 % | 435 MB | 8 / 58 ms |
+
+Throughput matches SQLite; the p95/p99 tail at 500 users is higher (pool queueing and
+per-statement TCP round trips; the probe's SQL profile only instruments the SQLite driver, so there
+are no statement counts here).
+
+**Found while seeding:** 16 concurrent invite accepts into the same 10 guilds failed with `503 BUSY`
+on PostgreSQL. `UPDATE servers SET member_count = (SELECT count(*) FROM server_members …)` inside a
+SERIALIZABLE transaction conflicts with every other join to that guild
+(`could not serialize access due to read/write dependencies`, SQLSTATE 40001) and exhausted the 8
+retries. The fixture above was therefore seeded one request at a time
+(`seed.mjs --concurrency 1`). Fix: make the counter an atomic `member_count = member_count + 1`
+(and `- 1` on leave), or run the join transaction at READ COMMITTED like `createMessage` does.
+A burst of people following one invite link (a raid, or a popular announcement) hits exactly this.
 
 ---
 
@@ -426,4 +486,4 @@ Then #3: replace the driver or finish the Postgres adapter. Rerun `run-suite.sh`
 9. ไม่มี backpressure → งานค้างไม่จำกัดและส่งข้อความถึงผู้รับช้า 40–60 วินาที
 10. rate limit บางตัวปรับผ่าน env ไม่ได้ และใช้ bucket อ่านกับการเขียนด้วย
 
-PostgreSQL ยังไม่ได้ทดสอบ เพราะ branch ที่ merge มายังไม่รองรับ `DATABASE_URL`
+**ผลหลังแก้ (ทดสอบซ้ำ 26 ก.ย. 2026, เครื่องเดียวกันมีงานอื่นรันร่วม load average 4–8):** แชทพร้อมกัน 200 คนได้ 21 ข้อความ/วินาที และ 500 คนได้ 50 ข้อความ/วินาทีตามเป้า ไม่มีข้อผิดพลาดเลย (เดิม 500 คนล่ม ส่งได้แค่ 6 ข้อความ/วินาที timeout 1,266 ครั้ง) ack p50 ราว 20 ms p95 160–175 ms, คำสั่ง SQL ต่อข้อความลดจาก 326 เหลือราว 25 · บน PostgreSQL ได้ throughput เท่ากัน (p95 ที่ 500 คน ≈ 600 ms) แต่พบว่าการกดรับคำเชิญพร้อมกันหลายคนในกิลด์เดียวกันล้มด้วย 503 เพราะ serialization conflict ที่ `servers.member_count` (ดูหัวข้อ PostgreSQL)
