@@ -107,7 +107,7 @@ export function parseExample(text = fs.readFileSync(EXAMPLE, 'utf8')) {
   return entries;
 }
 
-const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+const cell = (s) => String(s ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
 
 export function markdownTable(entries = parseExample()) {
   const out = [

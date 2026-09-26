@@ -26,8 +26,16 @@ const requireUser = (req) => {
 const FRESH_SESSION_MS = 10 * 60_000;
 
 async function assertRecentAuth(req) {
-  const password = req.body?.password;
-  if (password) {
+  // Server state decides first: a session created within the window has just
+  // proved the password. Only otherwise is a password (from the body) needed,
+  // and then it is always verified — its presence alone never passes.
+  if (req.sessionId) {
+    const session = await getQuery(`SELECT created_at FROM sessions WHERE id = ?`, [req.sessionId]);
+    const created = session?.created_at ? new Date(session.created_at).getTime() : NaN;
+    if (Number.isFinite(created) && Date.now() - created < FRESH_SESSION_MS) return;
+  }
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (password.length > 0) {
     await security.assertReauthenticated({ userId: req.userId, password, code: req.body?.code ?? null })
       .catch((err) => {
         // Enabling 2FA on an account that already has it is refused later;
@@ -36,11 +44,6 @@ async function assertRecentAuth(req) {
         throw err;
       });
     return;
-  }
-  if (req.sessionId) {
-    const session = await getQuery(`SELECT created_at FROM sessions WHERE id = ?`, [req.sessionId]);
-    const created = session?.created_at ? new Date(session.created_at).getTime() : NaN;
-    if (Number.isFinite(created) && Date.now() - created < FRESH_SESSION_MS) return;
   }
   throw new ApiError('Confirm with your password to continue', { status: 401, code: 'PASSWORD_REQUIRED' });
 }

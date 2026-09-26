@@ -75,7 +75,8 @@ if (!write) {
 // count as gaps — they are public, so they are never a real secret.
 const PLACEHOLDERS = new Set(['dev-insecure-storage-secret', 'change-me', 'change-me-too', 'secret']);
 const shown = opt('env', '.env');
-const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+let existing = '';
+try { existing = fs.readFileSync(envPath, 'utf8'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
 const current = new Map();
 for (const line of existing.split('\n')) {
   const m = line.match(/^\s*([A-Z][A-Z0-9_]*)=(.*)$/);
