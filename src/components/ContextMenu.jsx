@@ -25,11 +25,39 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
     });
   }, [x, y, items.length]);
 
+  // Keyboard: the menu takes focus when it opens (so a menu opened from a
+  // button — the message "More" button — is usable without a mouse), arrows
+  // move between items, Home/End jump, Escape closes and hands focus back.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const returnTo = document.activeElement;
+    ref.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true });
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onCloseRef.current(); return; }
+      const menu = ref.current;
+      if (!menu || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+      const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
+      if (items.length === 0) return;
+      e.preventDefault();
+      const at = items.indexOf(document.activeElement);
+      const next = e.key === 'Home' ? 0
+        : e.key === 'End' ? items.length - 1
+        : e.key === 'ArrowDown' ? (at + 1) % items.length
+        : (at - 1 + items.length) % items.length;
+      items[next].focus();
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      // Only if nothing else claimed focus: an item that opens an editor or
+      // focuses the composer must keep it.
+      const orphaned = !document.activeElement || document.activeElement === document.body;
+      if (orphaned && returnTo?.isConnected && typeof returnTo.focus === 'function') {
+        returnTo.focus({ preventScroll: true });
+      }
+    };
+  }, []);
 
   const run = (item) => () => {
     if (item.disabled || item.submenu) return;

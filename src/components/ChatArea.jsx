@@ -894,9 +894,14 @@ export default function ChatArea({
 
         {!hasMoreHistory && !isLoadingMessages && (
           <div className="my-6">
-            <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3">
-              <HeaderIcon className="w-10 h-10 text-d-strong" />
-            </div>
+            {isDM ? (
+              // A conversation opens on the person, not on a channel glyph.
+              <img src={channel.avatar_url || FALLBACK_AVATAR} alt="" className="w-20 h-20 rounded-full object-cover mb-3" />
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3">
+                <HeaderIcon className="w-10 h-10 text-d-strong" />
+              </div>
+            )}
             <h2 className="text-3xl max-sm:text-2xl font-extrabold text-d-strong mb-1 break-words">
               {isDM ? t('chat.welcomeToDm', { name: title }) : t('chat.welcomeToChannel', { channel: title })}
             </h2>
