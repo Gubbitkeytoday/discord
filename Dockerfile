@@ -22,7 +22,10 @@ WORKDIR /app
 
 # Copy manifests first so `npm ci` is cached until a dependency actually changes.
 COPY package.json package-lock.json ./
-RUN npm ci
+# sqlite3 6.x ships prebuilt binaries linked against glibc 2.38, newer than
+# bookworm's 2.36, so compile it against this image's libc instead.
+RUN npm ci \
+ && npm rebuild sqlite3 --build-from-source
 
 COPY . .
 RUN npm run build \

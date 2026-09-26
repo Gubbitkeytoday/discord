@@ -13,6 +13,7 @@ import { get, post, patch, del } from '../../api';
 import { t } from '../../i18n/index.jsx';
 import ConfirmModal from '../ConfirmModal';
 import { PageHeader, Section, Note, Divider, useDialog } from './primitives';
+import { proxiedImageUrl } from '../../utils/media';
 
 const inputClass = 'w-full bg-d-input text-d-strong rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-d-brand';
 
@@ -99,7 +100,7 @@ export default function ApplicationsTab({ servers = [], onToast }) {
                 <div className="flex items-start gap-3">
                   <div className="w-10 h-10 rounded-full bg-d-brand/20 flex items-center justify-center shrink-0">
                     {app.icon_url
-                      ? <img src={app.icon_url} alt="" className="w-full h-full rounded-full object-cover" />
+                      ? <img src={proxiedImageUrl(app.icon_url)} alt="" className="w-full h-full rounded-full object-cover" />
                       : <Bot className="w-5 h-5 text-d-brand" aria-hidden="true" />}
                   </div>
                   <div className="min-w-0 flex-1">

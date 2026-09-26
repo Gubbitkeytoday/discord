@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { useDismiss } from '../hooks/useFocusTrap';
 import { Search, Sticker } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 /** The composer's sticker tray. Sends immediately on click, as Discord does. */
 export default function StickerPicker({ stickers = [], onPick, onClose }) {
@@ -45,7 +46,7 @@ export default function StickerPicker({ stickers = [], onPick, onClose }) {
                 title={sticker.name}
                 className="aspect-square rounded-lg bg-d-base hover:bg-d-hover p-1.5 transition-colors"
               >
-                <img src={sticker.url} alt={sticker.name} className="w-full h-full object-contain" loading="lazy" />
+                <img src={proxiedImageUrl(sticker.url)} alt={sticker.name} className="w-full h-full object-contain" loading="lazy" />
               </button>
             ))}
           </div>

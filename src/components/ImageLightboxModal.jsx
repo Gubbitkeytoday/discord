@@ -2,6 +2,7 @@ import React from 'react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { X, Download, ExternalLink } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 export default function ImageLightboxModal({ imageUrl, altText, onClose }) {
   const dialogRef = useFocusTrap(Boolean(imageUrl), onClose);
@@ -59,7 +60,7 @@ export default function ImageLightboxModal({ imageUrl, altText, onClose }) {
         onClick={(e) => e.stopPropagation()}
       >
         <img
-          src={imageUrl}
+          src={proxiedImageUrl(imageUrl)}
           alt={altText || t('files.expandedAttachment')}
           className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl border border-white/10"
         />

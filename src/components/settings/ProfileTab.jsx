@@ -12,6 +12,7 @@ import { Loader2, Check, Camera } from 'lucide-react';
 import { upload } from '../../api';
 import { t } from '../../i18n/index.jsx';
 import { DEFAULT_AVATAR } from '../../utils/avatar';
+import { proxiedImageUrl, cssImageUrl } from '../../utils/media';
 import {
   PageHeader, Section, Field, Divider, inputClass, Button, Select, UnsavedBar, useReportDirty
 } from './primitives';
@@ -136,8 +137,8 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
   };
 
   // What to show: the local file while it uploads, otherwise the saved URL.
-  const avatarSrc = preview.avatar ?? (form.avatar_url || DEFAULT_AVATAR);
-  const bannerSrc = preview.banner ?? form.banner_url;
+  const avatarSrc = preview.avatar ?? (proxiedImageUrl(form.avatar_url) || DEFAULT_AVATAR);
+  const bannerSrc = preview.banner ?? proxiedImageUrl(form.banner_url);
 
   const save = async () => {
     setBusy(true);
@@ -335,7 +336,7 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
             <div
               className="h-[60px] bg-cover bg-center"
               style={{
-                backgroundImage: bannerSrc ? `url(${bannerSrc})` : undefined,
+                backgroundImage: bannerSrc ? cssImageUrl(bannerSrc) : undefined,
                 backgroundColor: form.accent_color
               }}
             />

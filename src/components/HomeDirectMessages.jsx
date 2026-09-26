@@ -6,6 +6,7 @@ import {
   Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox, Menu
 } from 'lucide-react';
 import UserStatusMenu from './UserStatusMenu';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -203,7 +204,7 @@ export default function HomeDirectMessages({
                   }`}
                 >
                   <div className="relative shrink-0">
-                    <img src={dm.avatar_url || defaultAvatar(dm.recipients?.[0]?.id ?? dm.id)} alt="" className="w-8 h-8 rounded-full object-cover" />
+                    <img src={proxiedImageUrl(dm.avatar_url || defaultAvatar(dm.recipients?.[0]?.id ?? dm.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
                     {dm.type === 'dm' && (
                       <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-d-surface ${
                         STATUS_COLORS[recipient?.status] ?? STATUS_COLORS.offline
@@ -270,7 +271,7 @@ export default function HomeDirectMessages({
             className="flex items-center gap-2 px-1 py-1 hover:bg-d-hover/60 rounded-md flex-1 min-w-0 transition-colors text-left"
           >
             <div className="relative shrink-0">
-              <img src={currentUser?.avatar_url || defaultAvatar(currentUser?.id)} alt="" className="w-8 h-8 rounded-full object-cover" />
+              <img src={proxiedImageUrl(currentUser?.avatar_url || defaultAvatar(currentUser?.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
               <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-panel ${
                 STATUS_COLORS[currentUser?.status] ?? STATUS_COLORS.offline
               }`} />
@@ -496,7 +497,7 @@ export default function HomeDirectMessages({
                           className="flex items-center gap-3 min-w-0 text-left flex-1"
                         >
                           <div className="relative shrink-0">
-                            <img src={friend.avatar_url || defaultAvatar(friend.id)} alt="" className="w-10 h-10 rounded-full object-cover" />
+                            <img src={proxiedImageUrl(friend.avatar_url || defaultAvatar(friend.id))} alt="" className="w-10 h-10 rounded-full object-cover" />
                             {!isBlockedTab && (
                               <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-canvas ${
                                 STATUS_COLORS[friend.status] ?? STATUS_COLORS.offline
