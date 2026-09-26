@@ -446,7 +446,7 @@ export default function ChatArea(props) {
       {callBar}
 
       <MessageList
-        key={channelId}
+        key={`list-${channelId}`}
         ref={listRef}
         channelId={channelId}
         channelLabel={channelLabel}
@@ -471,7 +471,7 @@ export default function ChatArea(props) {
       />
 
       <Composer
-        key={channelId}
+        key={`composer-${channelId}`}
         ref={composerRef}
         channelId={channelId}
         serverId={channel.server_id ?? null}

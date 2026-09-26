@@ -2037,8 +2037,12 @@ export default function App() {
     body: t('members.banBody'),
     confirmLabel: t('members.ban'),
     withReason: true,
-    onConfirm: async (reason) => {
-      await post(`/api/servers/${activeServerId}/bans/${user.id}`, { reason, deleteMessageSeconds: 0 });
+    // The dialog offers "Delete message history" (none / 1 h / 24 h / 7 d)
+    // and passes the choice as the second argument.
+    withDeleteHistory: true,
+    onConfirm: async (reason, options = {}) => {
+      const seconds = Math.max(0, Math.min(604800, Number(options?.deleteMessageSeconds ?? 0) || 0));
+      await post(`/api/servers/${activeServerId}/bans/${user.id}`, { reason, deleteMessageSeconds: seconds });
       setMembers((prev) => prev.filter((m) => m.id !== user.id));
       pushToast(t('members.banned', { name: user.display_name || user.username }), { type: 'success', ttl: 3000 });
     }
