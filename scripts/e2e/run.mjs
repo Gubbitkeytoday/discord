@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 // ============================================================================
 //  End-to-end browser test: two real users, one real server process.
 //
@@ -43,7 +44,7 @@ const SHOTS = process.env.E2E_SHOTS
   || '/tmp/claude-0/-home-user-discord/663d99e8-07c9-5b0f-8b1a-38c6a8c33dc1/scratchpad/shots';
 const CHROMIUM = process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium';
 const T = 8000; // default per-assertion timeout
-const RUN = Math.random().toString(36).slice(2, 7);
+const RUN = crypto.randomBytes(4).toString('hex').slice(0, 5);
 const PASSWORD = 'correct-horse-battery-9';
 
 fs.mkdirSync(SHOTS, { recursive: true });

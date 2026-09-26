@@ -1540,7 +1540,9 @@ app.get('/api/voice/ice-servers', requireUser, (req, res) => {
   const secret = process.env.TURN_SECRET;
   if (turn.length && secret) {
     const ttl = Math.max(60, Number.parseInt(process.env.TURN_TTL_SECONDS, 10) || 86400);
-    const username = `${Math.floor(Date.now() / 1000) + ttl}:${req.userId}`;
+    // coturn's REST API (use-auth-secret) mandates HMAC-SHA1. The username is
+    // expiry + a random nonce, so no account identifier goes into the MAC.
+    const username = `${Math.floor(Date.now() / 1000) + ttl}:${crypto.randomUUID()}`;
     const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
     iceServers.push({ urls: turn, username, credential });
   }
