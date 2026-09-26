@@ -7,9 +7,10 @@ import {
 import ServerDropdown from './ServerDropdown';
 import ContextMenu from './ContextMenu';
 import UserStatusMenu from './UserStatusMenu';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -100,6 +101,8 @@ export default function ChannelSidebar({
     update('layout', { ...(prefs.layout ?? {}), pinnedChannels: next });
   };
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const grouped = useMemo(() => {
     const groups = new Map();
     const pinned = [];
@@ -119,7 +122,7 @@ export default function ChannelSidebar({
       entries.unshift([t('channel.pinned'), pinned]);
     }
     return entries;
-  }, [channels, pinnedIds]);
+  }, [channels, pinnedIds, locale]);
 
   if (!currentServer) return null;
 
@@ -349,7 +352,7 @@ export default function ChannelSidebar({
                           {activeVoiceParticipants.map((p) => (
                             <div key={p.userId} className="flex items-center gap-2 py-0.5 px-1 rounded text-xs text-d-text">
                               <img
-                                src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
+                                src={proxiedImageUrl(p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id))}
                                 alt=""
                                 className={`w-5 h-5 rounded-full ${p.isSpeaking ? 'ring-2 ring-d-online' : ''}`}
                               />
@@ -399,7 +402,7 @@ export default function ChannelSidebar({
         >
           <div className="relative shrink-0">
             <img
-              src={currentUser?.avatar_url || defaultAvatar(currentUser?.id)}
+              src={proxiedImageUrl(currentUser?.avatar_url || defaultAvatar(currentUser?.id))}
               alt=""
               className="w-8 h-8 rounded-full object-cover"
             />

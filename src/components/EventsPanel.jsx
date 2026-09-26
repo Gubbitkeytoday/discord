@@ -15,6 +15,7 @@ import { api, get } from '../api';
 import ConfirmModal from './ConfirmModal';
 import { useDialog } from './settings/primitives';
 import { t, localeTag } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 const fmtDate = (iso) => new Date(iso).toLocaleString(localeTag(), {
   weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
@@ -268,7 +269,7 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
         </div>
 
         {Boolean(event.image_url) && (
-          <img src={event.image_url} alt="" className="h-20 w-32 shrink-0 rounded-md object-cover" />
+          <img src={proxiedImageUrl(event.image_url)} alt="" className="h-20 w-32 shrink-0 rounded-md object-cover" />
         )}
       </div>
 

@@ -50,7 +50,7 @@ import {
   X, ArrowLeft, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
   Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot
 } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 
 const APP_VERSION = import.meta.env?.VITE_APP_VERSION ?? '1.0.0';
 
@@ -120,11 +120,13 @@ export default function UserSettingsModal({
   const dialogRef = useDialog(requestClose);
   const navRef = useRef(null);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const groups = useMemo(() => {
     return tabGroups()
       .map((group) => ({ ...group, tabs: group.tabs.filter((tab) => matches(tab, query)) }))
       .filter((group) => group.tabs.length > 0);
-  }, [query]);
+  }, [query, locale]);
 
   const visible = groups.flatMap((group) => group.tabs);
 

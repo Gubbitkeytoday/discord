@@ -16,6 +16,8 @@ import fs from 'fs';
 import { createSqliteDriver } from './db/sqlite.js';
 import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
+import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
+import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -412,6 +414,30 @@ const MIGRATIONS = [
     postgres: async () => {
       await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_edited ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL`);
       await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL`);
+    }
+  }
+  // passkeys (v35) — WebAuthn credentials, single-use challenges, audit trail.
+  // Self-contained DDL (not in schema.sql / schema.pg.sql) so it merges cleanly.
+  ,{
+    version: 35,
+    name: 'passkeys (WebAuthn credentials, challenges, events)',
+    up: async () => { for (const ddl of PASSKEY_DDL.sqlite) await runQuery(ddl); },
+    postgres: async () => { for (const ddl of PASSKEY_DDL.postgres) await runQuery(ddl); }
+  }
+  // translation (v36) — per-message translation cache + guild opt-out.
+  ,{
+    version: 36,
+    name: 'message translation cache, guild translation switch',
+    up: async () => {
+      for (const ddl of TRANSLATION_DDL.sqlite) await runQuery(ddl);
+      const cols = await allQuery(`PRAGMA table_info(servers)`);
+      if (!cols.some((c) => c.name === 'translation_disabled')) {
+        await runQuery(`ALTER TABLE servers ADD COLUMN translation_disabled INTEGER NOT NULL DEFAULT 0`);
+      }
+    },
+    postgres: async () => {
+      for (const ddl of TRANSLATION_DDL.postgres) await runQuery(ddl);
+      await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS translation_disabled INTEGER NOT NULL DEFAULT 0`);
     }
   }
 ];

@@ -61,6 +61,8 @@ import * as pollService from './services/polls.js';
 import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
+import passkeysRouter from './routes/passkeys.js'; // passkeys
+import translationRouter from './routes/translation.js'; // translation
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
   revalidateRooms, emitToChannelViewers, emitToRelated,
@@ -249,6 +251,8 @@ app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
 app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
+app.use('/api', passkeysRouter); // passkeys
+app.use('/api', translationRouter); // translation
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)
 // is fetched by the server, so viewers' browsers never contact third-party
@@ -1555,9 +1559,11 @@ app.get('/api/voice/ice-servers', requireUser, (req, res) => {
   const secret = process.env.TURN_SECRET;
   if (turn.length && secret) {
     const ttl = Math.max(60, Number.parseInt(process.env.TURN_TTL_SECONDS, 10) || 86400);
-    const username = `${Math.floor(Date.now() / 1000) + ttl}:${req.userId}`;
-    const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
-    iceServers.push({ urls: turn, username, credential });
+    // coturn's REST API (use-auth-secret) mandates HMAC-SHA1. The username is
+    // expiry + a random nonce, so no account identifier goes into the MAC.
+    const turnLabel = `${Math.floor(Date.now() / 1000) + ttl}:${crypto.randomUUID()}`;
+    const credential = crypto.createHmac('sha1', secret).update(turnLabel).digest('base64');
+    iceServers.push({ urls: turn, username: turnLabel, credential });
   }
 
   res.setHeader('Cache-Control', 'no-store');

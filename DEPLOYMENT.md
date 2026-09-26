@@ -715,3 +715,64 @@ pgBackRest or WAL-G). A nightly dump alone can lose up to a day.
   only; Thai and other scripts match exactly, as substrings.
 - Rate limits, presence, typing state and Socket.IO rooms stay in process
   memory; they do not move into Postgres (see [Scaling](#8-scaling)).
+
+## 12. Passkeys and message translation
+
+Both are optional and off unless configured; `GET /api/passkeys/config` and
+`GET /api/translate/config` report what is active.
+
+### Passkeys (WebAuthn)
+
+Set `PUBLIC_URL` (or `RP_ID` + `RP_ORIGIN`) and passkeys turn on:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PASSKEYS_ENABLED` | on when `RP_ID`/`PUBLIC_URL` is set | `0` forces off |
+| `RP_ID` | host of `PUBLIC_URL` | domain passkeys are bound to. **Changing it orphans every passkey.** |
+| `RP_ORIGIN` | origin of `PUBLIC_URL` | comma-separated list of page origins allowed to run a ceremony |
+| `RP_NAME` | `Antigravity Discord` | name shown by the browser |
+
+Behaviour:
+
+- Discoverable credentials, attestation `none`, user verification
+  `preferred`. A **sign-in** is only accepted when the authenticator verified
+  the user (biometric/PIN); such a sign-in skips both the password and TOTP.
+- Challenges are single-use rows in `webauthn_challenges`, valid 5 minutes.
+- Adding or removing a passkey needs a re-authentication (password + TOTP, or
+  a passkey) from the same session within the last 5 minutes.
+- Sign-in counters, backup-eligible/backed-up flags and last-used times are
+  stored; `GET /api/passkeys/events` is the account's audit trail.
+- WebAuthn needs a secure context: HTTPS, or `http://localhost` in development.
+  With the Vite dev server set `RP_ID=localhost` and
+  `RP_ORIGIN=http://localhost:5173`.
+
+### Message translation
+
+The client first uses the browser's on-device Translator API (Chrome), which
+needs no server at all. Otherwise `POST /api/translate {messageId, targetLang}`
+translates the *stored* text of a message the caller can read — never arbitrary
+text — trying, in order, the providers that are configured:
+
+1. **LibreTranslate** (self-hosted, recommended): `docker compose --profile
+   translate up -d`, then `LIBRETRANSLATE_URL=http://libretranslate:5000` in
+   `.env`. `LT_LOAD_ONLY` picks the languages (default
+   `en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id`); models download on first start
+   into the `lt-models` volume. Set `LT_API_KEYS=true` plus
+   `LIBRETRANSLATE_API_KEY` to require a key.
+2. **DeepL**: `DEEPL_API_KEY` (free-plan keys ending `:fx` are detected).
+3. **Claude**: `ANTHROPIC_API_KEY`; model `TRANSLATION_ANTHROPIC_MODEL`
+   (default `claude-haiku-4-5-20251001`). Message text is sent to Anthropic —
+   only enable it if your privacy policy allows.
+
+`TRANSLATION_PROVIDERS` reorders or narrows the list;
+`TRANSLATION_SERVER_ENABLED=0` disables the endpoint; a server owner can turn
+server-side translation off for one guild (`PUT
+/api/servers/:id/translation {disabled:true}`, MANAGE_GUILD).
+
+Mentions, channels, emoji, timestamps, code, URLs and Markdown markers are
+replaced by placeholders before text reaches a provider and restored after.
+Results are cached in `translation_cache` per (message, content hash, target
+language) for `TRANSLATION_CACHE_TTL_HOURS` (default 168); editing a message
+changes the hash, so an old translation is never served. Provider calls are
+rate limited per user (`TRANSLATION_RATE_PER_MIN`, default 20). Message
+content is never written to logs.

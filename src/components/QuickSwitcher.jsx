@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Volume2, AtSign, Server } from 'lucide-react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, serverIconOf } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -23,6 +24,8 @@ export default function QuickSwitcher({
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const entries = useMemo(() => [
     ...channels
       .filter((c) => c.type !== 'category')
@@ -41,7 +44,7 @@ export default function QuickSwitcher({
       label: s.name, hint: t('autocomplete.serverEmoji'),
       avatar: serverIconOf(s), icon: Server
     }))
-  ], [channels, dms, servers]);
+  ], [channels, dms, servers, locale]);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase().replace(/^[#@]/, '');
@@ -110,7 +113,7 @@ export default function QuickSwitcher({
               }`}
             >
               {entry.avatar ? (
-                <img src={entry.avatar || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+                <img src={proxiedImageUrl(entry.avatar || FALLBACK_AVATAR)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
               ) : (
                 <entry.icon className="w-5 h-5 text-d-text4 shrink-0" />
               )}

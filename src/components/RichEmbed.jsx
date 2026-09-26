@@ -12,6 +12,7 @@ import React, { useState } from 'react';
 import { ExternalLink, Loader2, ChevronDown } from 'lucide-react';
 import { post } from '../api';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 const httpOnly = (url) => (/^https?:\/\//i.test(String(url ?? '')) ? url : null);
 
@@ -30,7 +31,7 @@ export function RichEmbed({ embed }) {
           {Boolean(embed.author?.name) && (
             <div className="flex items-center gap-1.5 mb-1 min-w-0">
               {httpOnly(embed.author.icon_url) && (
-                <img src={embed.author.icon_url} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
+                <img src={proxiedImageUrl(embed.author.icon_url)} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
               )}
               <span className="text-xs font-semibold text-d-strong truncate">{embed.author.name}</span>
             </div>
@@ -69,7 +70,7 @@ export function RichEmbed({ embed }) {
 
           {Boolean(embed.image?.url) && httpOnly(embed.image.url) && (
             <img
-              src={embed.image.url}
+              src={proxiedImageUrl(embed.image.url)}
               alt=""
               loading="lazy"
               className="mt-3 rounded max-h-80 w-auto max-w-full object-contain bg-d-canvas"
@@ -79,7 +80,7 @@ export function RichEmbed({ embed }) {
           {(embed.footer?.text || embed.timestamp) && (
             <div className="flex items-center gap-1.5 mt-2 text-[11px] text-d-text3">
               {httpOnly(embed.footer?.icon_url) && (
-                <img src={embed.footer.icon_url} alt="" className="w-4 h-4 rounded-full object-cover" />
+                <img src={proxiedImageUrl(embed.footer.icon_url)} alt="" className="w-4 h-4 rounded-full object-cover" />
               )}
               {Boolean(embed.footer?.text) && <span className="truncate">{embed.footer.text}</span>}
               {Boolean(embed.footer?.text) && embed.timestamp && <span aria-hidden="true">·</span>}
@@ -90,7 +91,7 @@ export function RichEmbed({ embed }) {
 
         {Boolean(embed.thumbnail?.url) && httpOnly(embed.thumbnail.url) && (
           <img
-            src={embed.thumbnail.url}
+            src={proxiedImageUrl(embed.thumbnail.url)}
             alt=""
             loading="lazy"
             className="w-20 h-20 rounded object-cover shrink-0 bg-d-canvas"

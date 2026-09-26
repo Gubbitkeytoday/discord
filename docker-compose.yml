@@ -221,12 +221,45 @@ services:
       valkey:
         condition: service_healthy
 
+  # --- translation -------------------------------------------------------------
+  # Self-hosted machine translation for POST /api/translate — message text
+  # never leaves your infrastructure. Enable with the `translate` profile and
+  # set LIBRETRANSLATE_URL=http://libretranslate:5000 in .env. Only the
+  # languages in LT_LOAD_ONLY are downloaded (first start fetches the models
+  # into the volume; allow a few minutes and ~1-2 GB). See DEPLOYMENT.md,
+  # "Passkeys and message translation".
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    profiles: ["translate"]
+    restart: unless-stopped
+    environment:
+      LT_LOAD_ONLY: ${LT_LOAD_ONLY:-en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id}
+      LT_DISABLE_WEB_UI: "true"
+      LT_UPDATE_MODELS: "true"
+      # Optional: require LIBRETRANSLATE_API_KEY (set the same key in the app).
+      LT_API_KEYS: ${LT_API_KEYS:-false}
+    volumes:
+      - lt-models:/home/libretranslate/.local
+    # Internal only: the app is its sole client.
+    expose:
+      - "5000"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "./venv/bin/python scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    logging: *logging
+
 volumes:
   app-data:
   app-backups:
   pg-data:
   caddy-data:
   caddy-config:
+  lt-models:   # translation (LibreTranslate language models)
 
 networks:
   edge:

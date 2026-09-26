@@ -175,7 +175,7 @@ async function restorePostgres(file) {
     '--clean', '--if-exists', '--no-owner', '--no-privileges', '--single-transaction',
     `--dbname=${pgEnv().PGDATABASE}`, file
   ]);
-  console.log(`✅ restored ${file} → ${pgEnv().PGDATABASE}`);
+  console.log(`✅ restored ${file} into the configured PostgreSQL database`);
   console.log('   Start the server; migrations run automatically on connect.');
 }
 

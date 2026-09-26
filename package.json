@@ -18,8 +18,8 @@
     "storage:verify": "node scripts/storage.js verify",
     "search:reindex": "node scripts/storage.js reindex",
     "db:migrate-to-pg": "node scripts/migrate-sqlite-to-postgres.mjs",
-    "test": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-realtime-v34.mjs",
-    "test:pg": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-realtime-v34.mjs",
+    "test": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs",
+    "test:pg": "node --test scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-passkeys.mjs scripts/test-translation.mjs scripts/test-realtime-v34.mjs",
     "test:watch": "node --test --watch scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs scripts/test-part6.mjs scripts/test-realtime-v34.mjs",
     "a11y": "node scripts/a11y-audit.mjs",
     "i18n:audit": "node scripts/i18n-audit.mjs",
@@ -43,9 +43,12 @@
     "sharp": "^0.35.4"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@fontsource/inter": "^5.3.0",
     "@fontsource/kanit": "^5.3.0",
     "@socket.io/redis-streams-adapter": "^0.3.1",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.0.3",
     "@tailwindcss/vite": "^4.3.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",

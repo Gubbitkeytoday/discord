@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Search, Clock, Star, X } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 const RECENT_KEY = 'antigravity.recentEmojis';
 const RECENT_LIMIT = 24;
@@ -106,6 +107,8 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
     return [...custom, ...unicode];
   }, [query, customEmojis, externalGroups]);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const categories = useMemo(() => ([
     { key: 'recent', label: t('emoji.recent'), icon: '🕐', entries: recent },
     ...(customEmojis.length
@@ -123,7 +126,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
     ...emojiCategories().map((c) => ({
       key: c.key, label: c.label, icon: c.icon, entries: c.emojis.map((char) => ({ char }))
     }))
-  ]), [recent, customEmojis, externalGroups]);
+  ]), [recent, customEmojis, externalGroups, locale]);
 
   const visible = searchResults ?? categories.find((c) => c.key === activeCategory)?.entries ?? [];
 
@@ -161,7 +164,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
             >
               {c.key === 'recent' ? <Clock className="w-4 h-4 text-d-text2" />
                 : c.key === 'custom' ? <Star className="w-4 h-4 text-d-idle" />
-                : c.icon?.src ? <img src={c.icon.src} alt="" className="w-5 h-5 rounded-full object-cover" />
+                : c.icon?.src ? <img src={proxiedImageUrl(c.icon.src)} alt="" className="w-5 h-5 rounded-full object-cover" />
                 : c.icon}
             </button>
           ))}
@@ -190,7 +193,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
               className="w-8 h-8 rounded hover:bg-d-active flex items-center justify-center text-xl transition-transform hover:scale-110"
             >
               {entry.custom
-                ? <img src={entry.url} alt={`:${entry.name}:`} className="w-6 h-6 object-contain" />
+                ? <img src={proxiedImageUrl(entry.url)} alt={`:${entry.name}:`} className="w-6 h-6 object-contain" />
                 : entry.char}
             </button>
           ))}

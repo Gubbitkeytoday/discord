@@ -18,6 +18,7 @@ import { useDialog } from './settings/primitives';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { avatarOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 const SORTS = () => [
   { key: 'latest_activity', label: t('forum.sortActivity') },
@@ -111,7 +112,7 @@ function PostCard({ post, onOpen, canModerate, onTogglePin, onEditTags, isNew })
         </div>
         {Boolean(post.thumbnail_url) && (
           <img
-            src={post.thumbnail_url}
+            src={proxiedImageUrl(post.thumbnail_url)}
             alt=""
             className="w-20 h-20 sm:w-24 sm:h-24 rounded-md object-cover shrink-0 bg-d-canvas"
             loading="lazy"
@@ -161,7 +162,7 @@ function GalleryCard({ post, onOpen, canModerate, onTogglePin, onEditTags }) {
       >
         <div className="aspect-[4/3] w-full bg-d-canvas flex items-center justify-center overflow-hidden">
           {post.thumbnail_url ? (
-            <img src={post.thumbnail_url} alt="" className="w-full h-full object-cover" loading="lazy" />
+            <img src={proxiedImageUrl(post.thumbnail_url)} alt="" className="w-full h-full object-cover" loading="lazy" />
           ) : (
             <p className="text-sm text-d-text2 p-4 line-clamp-5 whitespace-pre-line break-words">{post.preview}</p>
           )}
@@ -352,7 +353,7 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
                 {previews.map(({ file, url }, i) => (
                   <li key={url} className="relative w-20 h-20 rounded-md overflow-hidden bg-d-surface border border-d-edge">
                     {file.type.startsWith('image/') ? (
-                      <img src={url} alt="" className="w-full h-full object-cover" />
+                      <img src={proxiedImageUrl(url)} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[10px] text-d-text2 p-1 text-center break-all">{file.name}</div>
                     )}

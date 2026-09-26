@@ -1,7 +1,8 @@
 import React, { useMemo } from 'react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -51,7 +52,9 @@ function groupMembers(members) {
 }
 
 export default function MemberList({ members, onSelectMember, onMemberContextMenu }) {
-  const sections = useMemo(() => groupMembers(members ?? []), [members]);
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
+  const sections = useMemo(() => groupMembers(members ?? []), [members, locale]);
   // Accessibility › Role Colors decides whether the colour tints the name, sits
   // beside it as a dot, or is dropped entirely.
   const { prefs } = useUserSettings();
@@ -88,7 +91,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                 >
                   <div className="relative shrink-0">
                     <img
-                      src={member.avatar_url || defaultAvatar(member.id)}
+                      src={proxiedImageUrl(member.avatar_url || defaultAvatar(member.id))}
                       alt=""
                       className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale' : ''}`}
                     />
@@ -132,7 +135,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       </span>
                       {Boolean(member.role_icon?.url) && (
                         <img
-                          src={member.role_icon.url}
+                          src={proxiedImageUrl(member.role_icon.url)}
                           alt=""
                           title={member.role_icon.name}
                           className="h-4 w-4 shrink-0 rounded-sm object-contain"

@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { AtSign, Hash, Smile, Slash } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { matchCommands } from '../utils/slashCommands';
 import { DEFAULT_AVATAR } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -173,7 +174,9 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
     node?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex]);
 
-  const meta = useMemo(() => kindMeta()[trigger?.kind] ?? kindMeta().user, [trigger?.kind]);
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
+  const meta = useMemo(() => kindMeta()[trigger?.kind] ?? kindMeta().user, [trigger?.kind, locale]);
   if (!trigger || options.length === 0) return null;
 
   const Icon = meta.icon;
@@ -199,9 +202,9 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
             }`}
           >
             {Boolean(option.avatar) && (
-              <img src={option.avatar || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+              <img src={proxiedImageUrl(option.avatar || FALLBACK_AVATAR)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
             )}
-            {Boolean(option.image) && <img src={option.image} alt="" className="w-6 h-6 object-contain shrink-0" />}
+            {Boolean(option.image) && <img src={proxiedImageUrl(option.image)} alt="" className="w-6 h-6 object-contain shrink-0" />}
             {Boolean(option.emoji) && <span className="w-6 text-center text-lg shrink-0">{option.emoji}</span>}
 
             <span

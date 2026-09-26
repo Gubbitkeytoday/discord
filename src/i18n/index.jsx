@@ -1,4 +1,6 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, {
+  createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore
+} from 'react';
 
 import en from './en.js';
 import {
@@ -211,16 +213,43 @@ export function getAvailableLocales() {
 export const LOCALES = getAvailableLocales();
 
 // ---------------------------------------------------------------------------
-//  Module-level translate function.
+//  Module-level translate function and the active-locale store.
 //
 //  Most components need nothing but `t`, and threading a hook through several
-//  hundred call sites adds a lot of noise for no benefit. So the provider also
-//  publishes the active locale here and remounts its subtree when the locale
-//  changes (see `key={locale}` below) — which means this plain function is
-//  always reading the locale the UI is currently rendered in, without every
-//  component having to subscribe to a context.
+//  hundred call sites adds a lot of noise for no benefit. So the active locale
+//  lives here, in a tiny external store: `t` reads it directly, React reads it
+//  through useSyncExternalStore (see `useLocaleCode` and the provider), and a
+//  switch re-renders the whole tree in place (see `rerenderTree` below) rather
+//  than remounting it — so open dialogs, drafts and scroll positions survive a
+//  language change.
 // ---------------------------------------------------------------------------
 let currentLocale = 'en-US';
+const localeSubscribers = new Set();
+
+function subscribeLocale(callback) {
+  localeSubscribers.add(callback);
+  return () => localeSubscribers.delete(callback);
+}
+
+function getLocaleSnapshot() {
+  return currentLocale;
+}
+
+/** Publish a new active locale to `t` and to every subscribed component. */
+function publishLocale(code) {
+  if (code === currentLocale) return;
+  currentLocale = code;
+  for (const callback of localeSubscribers) callback();
+}
+
+/**
+ * The active locale code, re-rendering the caller when it changes. For
+ * components that call the module-level `t` but should not depend on the
+ * provider re-rendering them (e.g. a future React.memo boundary).
+ */
+export function useLocaleCode() {
+  return useSyncExternalStore(subscribeLocale, getLocaleSnapshot, getLocaleSnapshot);
+}
 
 /** Translate outside of React, or inside it without a hook. */
 export function t(key, values) {
@@ -268,7 +297,7 @@ async function syncToAccount(code) {
   } catch { /* offline or signed out — the local choice still stands */ }
 }
 
-const listeners = new Set();
+const accountLocaleListeners = new Set();
 
 /**
  * Adopt the locale stored on the signed-in account, unless this browser has an
@@ -282,19 +311,30 @@ export function adoptAccountLocale(code) {
   try { stored = localStorage.getItem(STORAGE_KEY); } catch { /* ignore */ }
   const next = normalize(code) ?? matchLocale(code, hasDictionary);
   if (stored || !next) return;
-  for (const listener of listeners) listener(next, { sync: false });
+  for (const listener of accountLocaleListeners) listener(next, { sync: false });
+}
+
+/**
+ * Re-render (never remount) everything under the provider. The provider's
+ * `children` are the same element objects on every provider render, so React
+ * would bail out and only context consumers would update — leaving every
+ * component that calls the module-level `t` in the old language. A shallow
+ * clone gives the top element new props: it re-renders and, because each
+ * render creates fresh child elements, so does the whole tree beneath it.
+ * Types and keys are unchanged, so no state is lost.
+ */
+function rerenderTree(children) {
+  return React.Children.map(children, (child) => (React.isValidElement(child) ? React.cloneElement(child) : child));
 }
 
 const I18nContext = createContext(null);
 
 export function I18nProvider({ children }) {
-  const [locale, setLocaleState] = useState(detectLocale);
+  // Adopt the detected locale before the first render reads the store.
+  useState(() => publishLocale(detectLocale()));
+  const locale = useSyncExternalStore(subscribeLocale, getLocaleSnapshot, getLocaleSnapshot);
   const [ready, setReady] = useState(() => isLoaded(locale));
   const [switching, setSwitching] = useState(null);
-
-  // Published before children render, so the very first paint after a switch
-  // already uses the new dictionary.
-  currentLocale = locale;
 
   // First load of a lazily-loaded language: fetch it before rendering anything,
   // so the UI never flashes English or raw keys. English is bundled and ready.
@@ -322,16 +362,21 @@ export function I18nProvider({ children }) {
       return false;
     }
     setSwitching(null);
-    setLocaleState(next);
     setReady(true);
+    // The dictionary is in memory, so `t` and the next render agree at once.
+    publishLocale(next);
     if (sync) syncToAccount(next);
     return true;
   }, []);
 
   useEffect(() => {
-    listeners.add(setLocale);
-    return () => listeners.delete(setLocale);
+    accountLocaleListeners.add(setLocale);
+    return () => accountLocaleListeners.delete(setLocale);
   }, [setLocale]);
+
+  // Recomputed only when the language changes, so ordinary provider renders
+  // (e.g. `switchingTo` flipping) keep the bail-out and cost nothing.
+  const tree = useMemo(() => rerenderTree(children), [children, locale]);
 
   const value = useMemo(() => {
     const entry = REGISTRY_BY_CODE[locale];
@@ -352,10 +397,7 @@ export function I18nProvider({ children }) {
 
   return (
     <I18nContext.Provider value={value}>
-      {/* Remounting on locale change is what makes the module-level `t` above
-          correct: every component re-renders, whether it subscribes or not.
-          Language switching is rare, so the cost of a remount is fine. */}
-      {ready ? <React.Fragment key={locale}>{children}</React.Fragment> : null}
+      {ready ? tree : null}
     </I18nContext.Provider>
   );
 }
