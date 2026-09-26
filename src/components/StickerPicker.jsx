@@ -39,7 +39,7 @@ export default function StickerPicker({ stickers = [], onPick, onClose }) {
         ) : (
           <div className="grid grid-cols-3 gap-2">
             {visible.map((sticker) => (
-              <button
+              <button aria-label={sticker.name}
                 key={sticker.id}
                 onClick={() => { onPick(sticker); onClose(); }}
                 title={sticker.name}

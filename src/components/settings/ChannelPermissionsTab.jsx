@@ -252,7 +252,7 @@ function TriState({ value, onChange, label }) {
   return (
     <div className="flex rounded overflow-hidden shrink-0" role="radiogroup" aria-label={label}>
       {options.map(({ key, Icon, tint, title }) => (
-        <button
+        <button aria-label={title}
           key={key}
           role="radio"
           aria-checked={value === key}

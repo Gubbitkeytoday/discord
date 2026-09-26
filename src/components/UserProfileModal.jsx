@@ -173,7 +173,7 @@ export default function UserProfileModal({
                     </button>
                   )}
                   {friend?.friend_status === 'accepted' && (
-                    <button
+                    <button aria-label={t('dm.removeFriend')}
                       onClick={() => onRemoveFriend(user)}
                       className="flex items-center justify-center gap-1.5 bg-d-surface hover:bg-d-hover text-d-text2 text-xs font-semibold px-3 py-2 rounded transition-colors"
                       title={t('dm.removeFriend')}

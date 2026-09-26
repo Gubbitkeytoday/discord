@@ -1553,7 +1553,7 @@ export default function ChatArea({
         {uploadError && (
           <div className="mb-2 px-3 py-2 bg-d-danger/10 border border-d-danger/40 rounded-lg text-xs text-d-danger flex items-start justify-between gap-2">
             <span className="whitespace-pre-wrap">{uploadError}</span>
-            <button onClick={() => setUploadError(null)} className="shrink-0 hover:text-d-strong">
+            <button type="button" onClick={() => setUploadError(null)} aria-label={t('common.close')} className="shrink-0 hover:text-d-strong">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -1574,7 +1574,7 @@ export default function ChatArea({
                   <div className="text-[11px] text-d-strong truncate">{att.filename}</div>
                   <div className="text-[10px] text-d-text3">{att.size_human}</div>
                 </div>
-                <button
+                <button aria-label={t('chat.removeAttachment')}
                   type="button"
                   onClick={() => setAttachments(attachments.filter((_, idx) => idx !== i))}
                   className="absolute -top-1.5 -right-1.5 bg-d-danger text-white rounded-full p-1 shadow-md opacity-90 hover:opacity-100 transition-opacity"

@@ -251,7 +251,7 @@ export default function ChannelSidebar({
                   <span className="truncate">{category}</span>
                 </button>
                 {can('MANAGE_CHANNELS') && (
-                  <button
+                  <button aria-label={isVoiceCategory ? t('sidebar.createVoiceChannel') : t('sidebar.createTextChannel')}
                     onClick={() => onOpenCreateChannelModal(isVoiceCategory ? 'voice' : 'text')}
                     className="opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-d-strong transition-opacity shrink-0"
                     title={isVoiceCategory ? t('sidebar.createVoiceChannel') : t('sidebar.createTextChannel')}
@@ -379,7 +379,7 @@ export default function ChannelSidebar({
             </div>
             <span className="text-[11px] text-d-text3 truncate max-w-[130px]">{currentVoiceChannel.name}</span>
           </div>
-          <button
+          <button aria-label={t('sidebar.disconnect')}
             onClick={onLeaveVoice}
             className="p-1.5 bg-d-danger/20 hover:bg-d-danger text-d-danger hover:text-white rounded-full transition-colors shrink-0"
             title={t('sidebar.disconnect')}
@@ -437,7 +437,7 @@ export default function ChannelSidebar({
           >
             {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
           </button>
-          <button
+          <button aria-label={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
             onClick={onToggleDeafen}
             aria-pressed={isDeafened}
             className={`p-1.5 hover:bg-d-hover hover:text-white rounded transition-colors ${isDeafened ? 'text-d-danger' : ''}`}
@@ -445,7 +445,7 @@ export default function ChannelSidebar({
           >
             <Headphones className="w-5 h-5" />
           </button>
-          <button
+          <button aria-label={t('sidebar.userSettings')}
             onClick={onOpenUserSettingsModal}
             className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"
             title={t('sidebar.userSettings')}

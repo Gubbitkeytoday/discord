@@ -652,7 +652,7 @@ export default function VoiceRoom({
         )}
 
         {Boolean(channel?.server_id) && (
-          <button
+          <button aria-label={t('soundboard.title')}
             onClick={() => setShowSoundboard((v) => !v)}
             className={`p-3.5 rounded-full transition-all ${
               showSoundboard ? 'bg-d-brand text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
