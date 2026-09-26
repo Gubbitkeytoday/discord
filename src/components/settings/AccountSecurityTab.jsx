@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
-  ShieldCheck, ShieldOff, KeyRound, Mail, Monitor, Loader2, Check, Copy, LogOut, AlertTriangle
+  ShieldCheck, ShieldOff, KeyRound, Mail, Monitor, Loader2, Check, Copy, LogOut, AlertTriangle, Download, Gavel
 } from 'lucide-react';
+import { deviceLabel, useAccountFlags } from '../admin/safety';
 import { get, post, del } from '../../api';
 import { localeTag, t } from '../../i18n/index.jsx';
 import { useUserSettings } from '../../hooks/useUserSettings';
@@ -9,6 +10,9 @@ import { PageHeader, Divider } from './primitives';
 import QrCode from './QrCode';
 import PasskeysSection from './PasskeysSection';
 import { passkeysAvailable } from '../../auth/passkeys';
+
+// Only instance admins ever load the console's code.
+const AdminConsole = lazy(() => import('../admin/AdminConsole'));
 
 /**
  * Account and security: password, two-factor with recovery codes, e-mail
@@ -28,6 +32,12 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
   const [recoveryCodes, setRecoveryCodes] = useState(null);
   const [busy, setBusy] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
+  const accountFlags = useAccountFlags(currentUser);
+  // Turning 2FA on is step-up authenticated: the password first.
+  const [mfaPasswordStep, setMfaPasswordStep] = useState(false);
+  const [mfaPassword, setMfaPassword] = useState('');
+  const [mfaBeginError, setMfaBeginError] = useState('');
   // Passkeys section (and its divider) only when the server has them on.
   const [showPasskeys, setShowPasskeys] = useState(false);
   useEffect(() => {
@@ -48,7 +58,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'antigravity-export.json';
+      link.download = `antigravity-export-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -117,10 +127,32 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
     }
   };
 
-  const beginMfa = () => run('mfa', async () => {
-    setEnrolment(await post('/api/auth/mfa/begin'));
-    setRecoveryCodes(null);
-  });
+  const beginMfa = async (e) => {
+    e?.preventDefault?.();
+    if (!mfaPassword) { setMfaBeginError(t('apiError.PASSWORD_REQUIRED')); return; }
+    setBusy('mfa');
+    setMfaBeginError('');
+    try {
+      setEnrolment(await post('/api/auth/mfa/begin', { password: mfaPassword }));
+      setRecoveryCodes(null);
+      setMfaPasswordStep(false);
+      setMfaPassword('');
+    } catch (err) {
+      setMfaBeginError(err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadCodes = () => {
+    const text = `${t('safety.recoveryFileHeader', { name: currentUser?.username ?? '' })}\n\n${recoveryCodes.join('\n')}\n`;
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'antigravity-recovery-codes.txt';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const confirmMfa = (e) => {
     e.preventDefault();
@@ -183,11 +215,12 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
   });
 
   const revokeSession = (id) => run(`session-${id}`, async () => {
-    const wasCurrent = sessions.find((s) => s.id === id)?.current;
+    const session = sessions.find((s) => s.id === id);
     await del(`/api/auth/sessions/${id}`);
     setSessions((prev) => prev.filter((s) => s.id !== id));
     // Revoking the session you are using leaves the tab holding a dead cookie.
-    if (wasCurrent) onSignOut?.();
+    if (session?.current) { onSignOut?.(); return; }
+    onToast?.(t('safety.deviceSignedOut', { device: deviceLabel(session) }), { type: 'success', ttl: 3000 });
   });
 
   const revokeAll = () => run('logout-all', async () => {
@@ -301,15 +334,46 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               : t('security.mfaOff')}
           </p>
 
-          {!mfa?.enabled && !enrolment && (
+          {!mfa?.enabled && !enrolment && !mfaPasswordStep && (
             <button
-              onClick={beginMfa}
-              disabled={busy === 'mfa'}
+              onClick={() => { setMfaPasswordStep(true); setMfaBeginError(''); }}
               className="bg-d-success hover:bg-d-successhover text-white text-xs font-semibold px-4 py-2 rounded flex items-center gap-2 transition-colors"
             >
-              {busy === 'mfa' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+              <ShieldCheck className="w-3.5 h-3.5" />
               {t('security.enableMfa')}
             </button>
+          )}
+
+          {!mfa?.enabled && !enrolment && mfaPasswordStep && (
+            <form onSubmit={beginMfa} className="space-y-2" aria-label={t('security.enableMfa')}>
+              <p className="text-xs text-d-text2">{t('safety.mfaPasswordFirst')}</p>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="block">
+                  <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.currentPassword')}</span>
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    autoFocus
+                    value={mfaPassword}
+                    onChange={(e) => { setMfaPassword(e.target.value); setMfaBeginError(''); }}
+                    aria-invalid={mfaBeginError ? 'true' : undefined}
+                    className="w-56 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!mfaPassword || busy === 'mfa'}
+                  className="bg-d-brand hover:bg-d-brandhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded flex items-center gap-2"
+                >
+                  {busy === 'mfa' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {t('safety.continue')}
+                </button>
+                <button type="button" onClick={() => { setMfaPasswordStep(false); setMfaPassword(''); }} className="text-xs text-d-text3 hover:underline py-2">
+                  {t('common.cancel')}
+                </button>
+              </div>
+              {Boolean(mfaBeginError) && <p role="alert" className="text-xs text-d-danger">{mfaBeginError}</p>}
+            </form>
           )}
 
           {enrolment && (
@@ -374,19 +438,38 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               <p className="text-xs text-d-strong font-semibold flex items-center gap-1.5">
                 <AlertTriangle className="w-3.5 h-3.5 text-d-idle" /> {t('security.saveRecoveryCodes')}
               </p>
-              <div className="grid grid-cols-2 gap-1 font-mono text-xs text-d-text">
+              <div className="grid grid-cols-2 gap-1 font-mono text-sm text-d-text">
                 {recoveryCodes.map((c) => <span key={c}>{c}</span>)}
               </div>
-              <button
-                onClick={() => { navigator.clipboard?.writeText(recoveryCodes.join('\n')); onToast?.(t('common.copied'), { type: 'success', ttl: 2000 }); }}
-                className="text-[11px] text-d-link hover:underline"
-              >
-                {t('common.copy')}
-              </button>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={downloadCodes}
+                  className="flex min-h-9 items-center gap-1.5 rounded bg-d-brand px-3 text-xs font-semibold text-white hover:bg-d-brandhover"
+                >
+                  <Download className="h-3.5 w-3.5" /> {t('safety.downloadCodes')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { navigator.clipboard?.writeText(recoveryCodes.join('\n')); onToast?.(t('common.copied'), { type: 'success', ttl: 2000 }); }}
+                  className="flex min-h-9 items-center gap-1.5 rounded bg-d-control2 px-3 text-xs font-semibold text-d-strong hover:bg-d-control"
+                >
+                  <Copy className="h-3.5 w-3.5" /> {t('common.copy')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRecoveryCodes(null)}
+                  className="flex min-h-9 items-center gap-1.5 rounded px-3 text-xs font-semibold text-d-text2 hover:text-d-strong hover:underline"
+                >
+                  <Check className="h-3.5 w-3.5" /> {t('safety.savedCodes')}
+                </button>
+              </div>
             </div>
           )}
 
-          {Boolean(mfa?.enabled) && (
+          {/* The disable form stays out of the way until the new codes have
+              been dealt with: it used to sit right under them. */}
+          {Boolean(mfa?.enabled) && !recoveryCodes && (
             <form onSubmit={disableMfa} className="pt-2 border-t border-d-divider space-y-2" aria-label={t('security.disableMfa')}>
               <div className="flex flex-wrap items-end gap-2">
                 <label className="block">
@@ -445,9 +528,9 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
             <button
               onClick={revokeAll}
               disabled={busy === 'logout-all'}
-              className="text-xs text-d-danger hover:underline flex items-center gap-1"
+              className="text-xs text-d-danger hover:underline flex items-center gap-1 min-h-6"
             >
-              <LogOut className="w-3.5 h-3.5" /> {t('security.signOutOthers')}
+              <LogOut className="w-3.5 h-3.5" /> {t('safety.logOutOthers')}
             </button>
           )}
         </div>
@@ -457,8 +540,8 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
           {sessions.map((session) => (
             <div key={session.id} className="p-3 flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-sm text-d-strong truncate">
-                  {session.device_name || session.user_agent || t('security.unknownDevice')}
+                <p className="text-sm text-d-strong truncate" title={session.user_agent ?? undefined}>
+                  {deviceLabel(session)}
                   {Boolean(session.current) && (
                     <span className="ml-2 text-[10px] bg-d-online/20 text-d-online px-1.5 py-0.5 rounded">
                       {t('security.thisDevice')}
@@ -473,15 +556,40 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
                 <button
                   onClick={() => revokeSession(session.id)}
                   disabled={busy === `session-${session.id}`}
-                  className="text-xs text-d-danger hover:underline shrink-0"
+                  aria-label={t('safety.logOutDeviceNamed', { device: deviceLabel(session) })}
+                  className="text-xs text-d-danger hover:underline shrink-0 min-h-6"
                 >
-                  {t('security.revoke')}
+                  {t('safety.logOutDevice')}
                 </button>
               )}
             </div>
           ))}
         </div>
       </section>
+
+      {Boolean(accountFlags.is_instance_admin) && (
+        <>
+          <Divider />
+          <section className="space-y-2">
+            <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.02em] text-d-text2">
+              <Gavel className="w-4 h-4" /> {t('admin.title')}
+            </h3>
+            <p className="text-sm text-d-text2">{t('admin.entryHint')}</p>
+            <button
+              type="button"
+              onClick={() => setShowAdmin(true)}
+              className="bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold px-4 py-2 rounded-md"
+            >
+              {t('admin.open')}
+            </button>
+          </section>
+          {showAdmin && (
+            <Suspense fallback={null}>
+              <AdminConsole currentUser={currentUser} onClose={() => setShowAdmin(false)} onToast={onToast} />
+            </Suspense>
+          )}
+        </>
+      )}
 
       <Divider />
 

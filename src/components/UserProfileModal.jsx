@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import {
-  X, MessageSquare, UserPlus, UserMinus, ShieldAlert, ShieldOff, Pencil, Check
+  X, MessageSquare, UserPlus, UserMinus, ShieldAlert, ShieldOff, Pencil, Check, MoreHorizontal, Flag
 } from 'lucide-react';
-import { useDialog } from './settings/primitives';
+import { useDialog, useEscapeLayer } from './settings/primitives';
+import ReportDialog from './admin/ReportDialog';
+import { useStreamerMask } from './admin/safety';
 import { localeTag, t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl, cssImageUrl } from '../utils/media';
@@ -19,7 +21,9 @@ export default function UserProfileModal({
   user, currentUser, member, roles = [], friend, isBlocked, serverId = null,
   onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile, onToast
 }) {
+  const [reporting, setReporting] = useState(false);
   const dialogRef = useDialog(onClose);
+  const mask = useStreamerMask();
   if (!user) return null;
 
   const isSelf = user.id === currentUser?.id;
@@ -75,7 +79,11 @@ export default function UserProfileModal({
                 {member?.nickname || user.display_name || user.username}
               </h3>
               <p className="text-xs text-d-text3">
-                @{user.username}{user.discriminator ? `#${user.discriminator}` : ''}
+                {/* Streamer mode: the tag (and, if chosen, the handle) is what
+                    lets a viewer add or find someone, so it is hidden. */}
+                {mask.usernames && !isSelf
+                  ? t('safety.streamerHidden')
+                  : <>@{user.username}{user.discriminator && !mask.personal ? `#${user.discriminator}` : ''}</>}
               </p>
               {Boolean(user.pronouns) && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
               {Boolean(user.custom_status) && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
@@ -98,7 +106,7 @@ export default function UserProfileModal({
               <GuildProfileEditor serverId={serverId} onToast={onToast} />
             )}
 
-            {!isSelf && <PrivateNote userId={user.id} initial={user.my_note} />}
+            {!isSelf && !mask.personal && <PrivateNote userId={user.id} initial={user.my_note} />}
 
             {memberRoles.length > 0 && (
               <div>
@@ -183,19 +191,95 @@ export default function UserProfileModal({
                     </button>
                   )}
 
-                  <button
-                    onClick={() => (isBlocked ? onUnblock(user) : onBlock(user))}
-                    className="flex items-center justify-center gap-1.5 bg-d-surface hover:bg-d-danger hover:text-white text-d-text2 text-xs font-semibold px-3 py-2 rounded transition-colors"
-                    title={isBlocked ? t('dm.unblock') : t('dm.block')}
-                  >
-                    {isBlocked ? <ShieldOff className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
-                  </button>
+                  <SafetyMenu
+                    isBlocked={isBlocked}
+                    onBlock={() => onBlock(user)}
+                    onUnblock={() => onUnblock(user)}
+                    onReport={() => setReporting(true)}
+                  />
                 </>
               )}
             </div>
           </div>
         </div>
       </div>
+      {reporting && (
+        <ReportDialog
+          target={{ type: 'user', id: user.id }}
+          user={isBlocked ? null : user}
+          where="user"
+          onClose={() => setReporting(false)}
+          onToast={onToast}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * "⋯" beside the profile actions: Block and Report, labelled, the way every
+ * other messenger puts them. (It used to be a lone shield icon with only a
+ * tooltip, next to a large green Accept button.)
+ */
+function SafetyMenu({ isBlocked, onBlock, onUnblock, onReport }) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef(null);
+  const menuRef = useRef(null);
+  useEscapeLayer(() => { setOpen(false); buttonRef.current?.focus(); }, open);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    menuRef.current?.querySelector('[role="menuitem"]')?.focus();
+    const onDown = (e) => {
+      if (!menuRef.current?.contains(e.target) && !buttonRef.current?.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const onKeyDown = (e) => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') ?? [])];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+    if (e.key === 'Tab') setOpen(false);
+  };
+  const pick = (fn) => () => { setOpen(false); fn(); };
+  const item = 'flex w-full min-h-10 items-center gap-2 rounded px-2.5 text-left text-sm font-medium focus:outline-none';
+
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('safety.moreActions')}
+        title={t('safety.moreActions')}
+        className="flex h-full min-h-9 min-w-9 items-center justify-center rounded bg-d-surface px-2 text-d-text2 hover:bg-d-hover hover:text-d-strong"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label={t('safety.moreActions')}
+          onKeyDown={onKeyDown}
+          className="absolute bottom-full right-0 z-10 mb-1 w-48 rounded-md border border-d-edge bg-d-sunken p-1.5 shadow-xl"
+        >
+          <button type="button" role="menuitem" onClick={pick(isBlocked ? onUnblock : onBlock)}
+            className={`${item} ${isBlocked ? 'text-d-text hover:bg-d-hover focus:bg-d-hover' : 'text-d-danger hover:bg-d-danger hover:text-white focus:bg-d-danger focus:text-white'}`}>
+            {isBlocked ? <ShieldOff className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
+            {isBlocked ? t('dm.unblock') : t('dm.block')}
+          </button>
+          <button type="button" role="menuitem" onClick={pick(onReport)}
+            className={`${item} text-d-danger hover:bg-d-danger hover:text-white focus:bg-d-danger focus:text-white`}>
+            <Flag className="h-4 w-4" /> {t('safety.reportUser')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

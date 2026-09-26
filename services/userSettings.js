@@ -78,6 +78,9 @@ export const SETTING_DEFAULTS = {
     friendRequests: 'everyone',    // everyone | friends_of_friends | none
     // Discord's "who can add you as a friend" also honours server membership.
     allowServerMemberDms: true,
+    // DMs from people who are not your friends wait in "Message requests"
+    // until you accept them (Discord's message request filter).
+    messageRequests: true,
     showCurrentActivity: true,
     allowAnalytics: false
   },
@@ -89,6 +92,9 @@ export const SETTING_DEFAULTS = {
     enabled: false,
     autoEnable: false,             // when a screen share starts
     hidePersonalInformation: true,
+    // Usernames, #tags and message text in toasts (a viewer can add you
+    // with a username, or read a DM off a notification).
+    hideUsernames: true,
     hideInviteLinks: true,
     disableSounds: true,
     disableNotifications: true
@@ -149,6 +155,91 @@ export const SETTING_DEFAULTS = {
 
 export const CATEGORIES = Object.keys(SETTING_DEFAULTS);
 
+// ============================================================================
+//  Age.
+//
+//  Only the birth year and month are stored (data minimisation, PDPA / GDPR
+//  art. 5(1)(c)); the day is used once, at sign-up, for the 13+ check. Ages
+//  derived later from year + month assume the birthday falls at the *end* of
+//  the month, so a teen stays protected until the month is over — the error
+//  is always on the safe side.
+// ============================================================================
+
+export const MINIMUM_AGE = 13;
+export const ADULT_AGE = 18;
+
+/** Whole years between a birth date and `now` (UTC). Day defaults to month end. */
+export function ageFrom({ year, month, day = null }, now = new Date()) {
+  const y = Number(year); const m = Number(month);
+  if (!Number.isInteger(y) || !Number.isInteger(m)) return null;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const d = day == null ? lastDay : Number(day);
+  let age = now.getUTCFullYear() - y;
+  const beforeBirthday = now.getUTCMonth() + 1 < m
+    || (now.getUTCMonth() + 1 === m && now.getUTCDate() < d);
+  if (beforeBirthday) age -= 1;
+  return age;
+}
+
+/**
+ * Validate a date of birth. Throws INVALID_BIRTHDATE for impossible dates and
+ * AGE_TOO_YOUNG under 13. Returns `{ year, month, age }` — never the day.
+ */
+export function checkBirthdate({ year, month, day }, now = new Date()) {
+  const y = Number(year); const m = Number(month); const d = Number(day);
+  const valid = Number.isInteger(y) && Number.isInteger(m) && Number.isInteger(d)
+    && y >= now.getUTCFullYear() - 120 && y <= now.getUTCFullYear()
+    && m >= 1 && m <= 12 && d >= 1 && d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (!valid) throw new ApiError('That date of birth is not valid', { code: 'INVALID_BIRTHDATE' });
+  const age = ageFrom({ year: y, month: m, day: d }, now);
+  if (age < 0) throw new ApiError('That date of birth is not valid', { code: 'INVALID_BIRTHDATE' });
+  if (age < MINIMUM_AGE) {
+    throw new ApiError(`You need to be at least ${MINIMUM_AGE} to use this service`,
+      { status: 403, code: 'AGE_TOO_YOUNG' });
+  }
+  return { year: y, month: m, age };
+}
+
+/** 'minor' | 'adult' | 'unknown' for a user row carrying birth_year / birth_month. */
+export function ageGroupOf(row, now = new Date()) {
+  if (!row || row.birth_year == null || row.birth_month == null) return 'unknown';
+  const age = ageFrom({ year: row.birth_year, month: row.birth_month }, now);
+  if (age == null) return 'unknown';
+  return age < ADULT_AGE ? 'minor' : 'adult';
+}
+
+export async function getAgeGroup(userId) {
+  const row = await getQuery(`SELECT birth_year, birth_month FROM users WHERE id = ?`, [userId]);
+  return ageGroupOf(row);
+}
+
+/**
+ * Teen defaults (Discord's Teen Safety defaults, stricter where it costs
+ * nothing): only friends can DM, other DMs wait as message requests, every
+ * DM image is scanned, and friend requests need a friend in common. They are
+ * defaults — stored choices still win — and are written once when an
+ * account is found to be under 18.
+ */
+export const MINOR_PRIVACY_DEFAULTS = Object.freeze({
+  allowDmsFrom: 'friends',
+  allowServerMemberDms: false,
+  messageRequests: true,
+  dmScanning: 'everyone',
+  friendRequests: 'friends_of_friends'
+});
+
+/** Persist the teen defaults over whatever the account had. */
+export async function applyMinorDefaults(userId) {
+  return updateCategory(userId, 'privacy', { ...MINOR_PRIVACY_DEFAULTS });
+}
+
+async function defaultsFor(userId, category) {
+  if (category !== 'privacy') return SETTING_DEFAULTS[category];
+  return (await getAgeGroup(userId)) === 'minor'
+    ? { ...SETTING_DEFAULTS.privacy, ...MINOR_PRIVACY_DEFAULTS }
+    : SETTING_DEFAULTS.privacy;
+}
+
 function parse(json, fallback) {
   if (!json) return fallback;
   try { return JSON.parse(json); } catch { return fallback; }
@@ -181,7 +272,8 @@ export async function getAll(userId) {
   const stored = new Map(rows.map((r) => [r.category, parse(r.data, {})]));
   const result = {};
   for (const category of CATEGORIES) {
-    result[category] = merge(SETTING_DEFAULTS[category], stored.get(category) ?? {});
+    const defaults = category === 'privacy' ? await defaultsFor(userId, category) : SETTING_DEFAULTS[category];
+    result[category] = merge(defaults, stored.get(category) ?? {});
   }
   return result;
 }
@@ -191,7 +283,7 @@ export async function getCategory(userId, category) {
   const row = await getQuery(
     `SELECT data FROM user_settings WHERE user_id = ? AND category = ?`, [userId, category]
   );
-  return merge(SETTING_DEFAULTS[category], parse(row?.data, {}));
+  return merge(await defaultsFor(userId, category), parse(row?.data, {}));
 }
 
 /** Merge a patch into one category and return the category's full new value. */
@@ -220,7 +312,7 @@ export async function resetCategory(userId, category) {
   await runQuery(
     `DELETE FROM user_settings WHERE user_id = ? AND category = ?`, [userId, category]
   );
-  return { ...SETTING_DEFAULTS[category] };
+  return { ...(await defaultsFor(userId, category)) };
 }
 
 // --- validation --------------------------------------------------------------

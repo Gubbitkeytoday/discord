@@ -34,13 +34,13 @@ export async function exportAccount(userId) {
   const user = await getQuery(
     `SELECT id, username, discriminator, display_name, email, bio, pronouns,
             accent_color, avatar_url, banner_url, locale, theme, status,
-            custom_status, created_at
+            custom_status, birth_year, birth_month, created_at
        FROM users WHERE id = ? AND deleted_at IS NULL`,
     [userId]
   );
   if (!user) throw ApiError.notFound('User');
 
-  const [servers, messages, friends, settings, sessions] = await Promise.all([
+  const [servers, messages, friends, settings, sessions, reportsFiled, blocked] = await Promise.all([
     allQuery(
       `SELECT s.id, s.name, sm.joined_at, sm.nickname
          FROM server_members sm JOIN servers s ON s.id = sm.server_id
@@ -67,6 +67,17 @@ export async function exportAccount(userId) {
       `SELECT device_name, platform, created_at, last_seen_at FROM sessions
         WHERE user_id = ? AND revoked_at IS NULL`,
       [userId]
+    ),
+    // Reports this person filed: theirs to know about (what, why, status).
+    allQuery(
+      `SELECT target_type, target_id, reason, details, status, created_at, resolved_at
+         FROM reports WHERE reporter_id = ? ORDER BY created_at`,
+      [userId]
+    ),
+    allQuery(
+      `SELECT u.username, b.created_at FROM blocks b JOIN users u ON u.id = b.blocked_id
+        WHERE b.user_id = ?`,
+      [userId]
     )
   ]);
 
@@ -85,7 +96,9 @@ export async function exportAccount(userId) {
       try { return [row.category, JSON.parse(row.data)]; }
       catch { return [row.category, row.data]; }
     })),
-    sessions
+    sessions,
+    reports_filed: reportsFiled,
+    blocked_users: blocked
   };
 }
 
@@ -118,7 +131,8 @@ export async function deleteAccount({ userId }) {
               username = 'deleted_' || id,
               email = NULL, password_hash = NULL, mfa_secret = NULL, mfa_enabled = 0,
               avatar_url = NULL, banner_url = NULL, bio = NULL, pronouns = NULL,
-              custom_status = NULL, custom_status_emoji = NULL, status = 'offline'
+              custom_status = NULL, custom_status_emoji = NULL, status = 'offline',
+              birth_year = NULL, birth_month = NULL
         WHERE id = ?`,
       [userId]
     );
@@ -133,6 +147,7 @@ export async function deleteAccount({ userId }) {
     await runQuery(`DELETE FROM friends WHERE user_id = ? OR friend_id = ?`, [userId, userId]);
     await runQuery(`DELETE FROM blocks WHERE user_id = ? OR blocked_id = ?`, [userId, userId]);
     await runQuery(`DELETE FROM user_settings WHERE user_id = ?`, [userId]);
+    await runQuery(`DELETE FROM dm_requests WHERE user_id = ?`, [userId]);
     // Leaving every server also removes the per-guild profiles.
     await runQuery(
       `UPDATE server_members SET left_at = ${sql.now},

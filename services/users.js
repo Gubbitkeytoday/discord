@@ -10,7 +10,21 @@ import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import {
   addReference, releaseReference, getStorageUsage, findFileByPublicUrl
 } from '../storageService.js';
-import { getCategory } from './userSettings.js';
+import {
+  getCategory, getAgeGroup, checkBirthdate, applyMinorDefaults, ageGroupOf
+} from './userSettings.js';
+import { publicStatus } from '../lib/presence.js';
+
+/**
+ * The one refusal for "you cannot reach this person": blocked, DMs limited to
+ * friends, friend requests off, no shared server. Every reason answers with
+ * the same status, code and words, so a harasser cannot compare two refusals
+ * to find out that he was blocked rather than filtered by a privacy setting.
+ */
+export function unreachable() {
+  return new ApiError("This person isn't accepting messages or requests from you right now.",
+    { status: 403, code: 'USER_UNREACHABLE' });
+}
 
 const PUBLIC_COLUMNS = `
   id, username, discriminator, display_name, avatar_url, banner_url, accent_color,
@@ -74,13 +88,14 @@ export async function getUser(userId, viewerId = null) {
   // SQLite has no boolean type; normalise on the way out so the wire shape is
   // the same here as it is on a message.
   const shaped = { ...user, is_bot: Boolean(user.is_bot), mutual_servers: mutualServers };
-  // "Invisible" is only ever revealed to its owner.
-  if (viewerId && viewerId !== userId && shaped.status === 'invisible') shaped.status = 'offline';
+  // "Invisible" is only ever revealed to its owner, and a payload built
+  // without a viewer (a broadcast) is for everyone else.
+  shaped.status = publicStatus(shaped.status, viewerId, userId);
 
   // Private profile (Discord, Aug 2026): the bio and banner are what a
   // profile "shows", so those are what visibility hides. Name, avatar and
   // status stay — you have to be able to tell who you are talking to.
-  if (viewerId && viewerId !== userId && !(await canSeeProfile(user, viewerId))) {
+  if (viewerId && viewerId !== userId && !(await canViewProfile(user, viewerId))) {
     shaped.bio = null;
     shaped.banner_url = null;
     shaped.pronouns = null;
@@ -95,9 +110,11 @@ export async function getUser(userId, viewerId = null) {
  *   mutual   — people who share a server (or are friends)
  *   friends  — accepted friends only
  */
-async function canSeeProfile(user, viewerId) {
+export async function canViewProfile(user, viewerId) {
   const mode = user.profile_visibility ?? 'everyone';
   if (mode === 'everyone') return true;
+  if (!viewerId) return false;
+  if (viewerId === user.id) return true;
 
   const friends = await getQuery(
     `SELECT 1 FROM friends WHERE status = 'accepted'
@@ -210,7 +227,7 @@ export async function updateProfile({ userId, patch }) {
     sets.push(`${key} = ?`);
     params.push(resolved[key]);
   }
-  if (!sets.length) return getUser(userId);
+  if (!sets.length) return getUser(userId, userId);
 
   sets.push(`updated_at = ${sql.now}`);
   params.push(userId);
@@ -227,7 +244,7 @@ export async function updateProfile({ userId, patch }) {
     }
   });
 
-  return getUser(userId);
+  return getUser(userId, userId);
 }
 
 export async function setPresence({ userId, status, customStatus = undefined }) {
@@ -262,7 +279,7 @@ export async function sendFriendRequest({ userId, targetUsername = null, targetI
   const blocked = await getQuery(
     `SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?`, [target.id, userId]
   );
-  if (blocked) throw ApiError.forbidden('Cannot send a request to this user');
+  if (blocked) throw unreachable();
 
   // Privacy & Safety › who can send you a friend request. Enforced here rather
   // than in the client, so the setting means something.
@@ -301,9 +318,7 @@ export async function sendFriendRequest({ userId, targetUsername = null, targetI
  */
 async function assertCanFriendRequest({ senderId, targetId }) {
   const privacy = await getCategory(targetId, 'privacy');
-  if (privacy.friendRequests === 'none') {
-    throw ApiError.forbidden('This user is not accepting friend requests');
-  }
+  if (privacy.friendRequests === 'none') throw unreachable();
   if (privacy.friendRequests === 'everyone') return;
 
   const mutualFriend = await getQuery(
@@ -324,9 +339,11 @@ async function assertCanFriendRequest({ senderId, targetId }) {
       LIMIT 1`,
     [senderId, targetId]
   );
-  if (sharedServer) return;
+  // For a teen, "friends of friends" means exactly that: sharing a big public
+  // server with a stranger is not an introduction.
+  if (sharedServer && (await getAgeGroup(targetId)) !== 'minor') return;
 
-  throw ApiError.forbidden('This user only accepts requests from people they have a friend in common with');
+  throw unreachable();
 }
 
 /**
@@ -345,13 +362,8 @@ export async function assertCanDirectMessage({ senderId, recipientId }) {
   );
   if (friends) return;
 
-  if (privacy.allowDmsFrom === 'friends') {
-    throw ApiError.forbidden('This user only accepts direct messages from friends');
-  }
-
-  if (!privacy.allowServerMemberDms) {
-    throw ApiError.forbidden('This user does not accept direct messages from server members');
-  }
+  if (privacy.allowDmsFrom === 'friends') throw unreachable();
+  if (!privacy.allowServerMemberDms) throw unreachable();
 
   const sharedServer = await getQuery(
     `SELECT 1 FROM server_members a
@@ -360,9 +372,7 @@ export async function assertCanDirectMessage({ senderId, recipientId }) {
       LIMIT 1`,
     [senderId, recipientId]
   );
-  if (!sharedServer) {
-    throw ApiError.forbidden('You can only message people you share a server with');
-  }
+  if (!sharedServer) throw unreachable();
 }
 
 export async function acceptFriendRequest({ userId, requestId }) {
@@ -465,3 +475,142 @@ export async function updateServerSettings({ userId, serverId, patch }) {
 }
 
 export { getStorageUsage };
+
+// ============================================================================
+//  Message requests.
+//
+//  A 1:1 DM from someone who is not your friend waits in "Message requests"
+//  until you accept it (or reply, which is the same decision). Nothing is
+//  stored for the pending state: a DM is a request for `userId` while
+//    - the privacy setting `messageRequests` is on,
+//    - the other person is not an accepted friend,
+//    - `userId` has not answered in it and has not accepted / ignored it
+//      (dm_requests), and
+//    - the other person has actually said something.
+// ============================================================================
+
+const REQUEST_PREVIEW_CHARS = 200;
+
+function pendingRequestRows(userId) {
+  return allQuery(
+    `SELECT c.id AS channel_id, other.user_id AS other_id
+       FROM channels c
+       JOIN channel_recipients me ON me.channel_id = c.id AND me.user_id = ?
+       JOIN channel_recipients other ON other.channel_id = c.id AND other.user_id <> ?
+      WHERE c.type = 'dm' AND c.deleted_at IS NULL AND me.closed = 0
+        AND NOT EXISTS (SELECT 1 FROM dm_requests d WHERE d.user_id = ? AND d.channel_id = c.id)
+        AND NOT EXISTS (SELECT 1 FROM friends f WHERE f.status = 'accepted'
+                          AND ((f.user_id = ? AND f.friend_id = other.user_id)
+                            OR (f.friend_id = ? AND f.user_id = other.user_id)))
+        AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.user_id = ? AND b.blocked_id = other.user_id)
+        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.user_id = ?)
+        AND EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.user_id = other.user_id
+                      AND m.deleted_at IS NULL)`,
+    [userId, userId, userId, userId, userId, userId, userId]
+  );
+}
+
+/** The viewer's pending message requests, newest first, with a short preview. */
+export async function listMessageRequests(userId) {
+  const privacy = await getCategory(userId, 'privacy');
+  if (!privacy.messageRequests) return { enabled: false, blur_previews: false, requests: [] };
+  const rows = await pendingRequestRows(userId);
+  const requests = [];
+  for (const row of rows) {
+    const [user, last, count, shared] = await Promise.all([
+      getQuery(`SELECT id, username, display_name, avatar_url, created_at FROM users WHERE id = ?`, [row.other_id]),
+      getQuery(
+        `SELECT id, content, created_at FROM messages
+          WHERE channel_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`, [row.channel_id]),
+      getQuery(`SELECT count(*) AS n FROM messages WHERE channel_id = ? AND deleted_at IS NULL`, [row.channel_id]),
+      getQuery(
+        `SELECT count(*) AS n FROM server_members a JOIN server_members b ON a.server_id = b.server_id
+          WHERE a.user_id = ? AND b.user_id = ? AND a.left_at IS NULL AND b.left_at IS NULL`,
+        [userId, row.other_id])
+    ]);
+    if (!user) continue;
+    requests.push({
+      channel_id: row.channel_id,
+      user,
+      mutual_server_count: Number(shared?.n ?? 0),
+      message_count: Number(count?.n ?? 0),
+      last_message: last
+        ? { id: last.id, content: String(last.content ?? '').slice(0, REQUEST_PREVIEW_CHARS), created_at: last.created_at }
+        : null
+    });
+  }
+  // Snowflake ids sort by time once they are the same length.
+  const key = (r) => String(r.last_message?.id ?? '').padStart(24, '0');
+  requests.sort((a, b) => key(b).localeCompare(key(a)));
+  // Previews of a stranger's words are blurred for teens until tapped.
+  return { enabled: true, blur_previews: (await getAgeGroup(userId)) === 'minor', requests };
+}
+
+/** Channel ids that are pending requests for `userId` (for list filtering). */
+export async function pendingRequestChannelIds(userId) {
+  const privacy = await getCategory(userId, 'privacy');
+  if (!privacy.messageRequests) return [];
+  return (await pendingRequestRows(userId)).map((r) => r.channel_id);
+}
+
+async function assertDmRecipient(userId, channelId) {
+  const row = await getQuery(
+    `SELECT c.type FROM channels c JOIN channel_recipients cr ON cr.channel_id = c.id AND cr.user_id = ?
+      WHERE c.id = ? AND c.deleted_at IS NULL`,
+    [userId, channelId]
+  );
+  if (!row || row.type !== 'dm') throw ApiError.notFound('Message request');
+}
+
+async function setRequestState(userId, channelId, state) {
+  await runQuery(
+    `INSERT INTO dm_requests (user_id, channel_id, state, updated_at) VALUES (?, ?, ?, ${sql.now})
+     ON CONFLICT(user_id, channel_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`,
+    [userId, channelId, state]
+  );
+}
+
+/** Accept: the conversation moves into the normal DM list. */
+export async function acceptMessageRequest({ userId, channelId }) {
+  await assertDmRecipient(userId, channelId);
+  await setRequestState(userId, channelId, 'accepted');
+  await runQuery(`UPDATE channel_recipients SET closed = 0 WHERE channel_id = ? AND user_id = ?`, [channelId, userId]);
+  return { channel_id: channelId, state: 'accepted' };
+}
+
+/** Ignore: hidden from both lists; the sender is not told. */
+export async function ignoreMessageRequest({ userId, channelId }) {
+  await assertDmRecipient(userId, channelId);
+  await setRequestState(userId, channelId, 'ignored');
+  await runQuery(`UPDATE channel_recipients SET closed = 1 WHERE channel_id = ? AND user_id = ?`, [channelId, userId]);
+  return { channel_id: channelId, state: 'ignored' };
+}
+
+// ============================================================================
+//  Date of birth.
+// ============================================================================
+
+/** What the client needs to know about the account's age, never the date. */
+export async function getAgeStatus(userId) {
+  const row = await getQuery(`SELECT birth_year, birth_month FROM users WHERE id = ?`, [userId]);
+  return { birthdate_set: row?.birth_year != null, age_group: ageGroupOf(row) };
+}
+
+/**
+ * Record a date of birth once (sign-up, or the one-time prompt for accounts
+ * made before the age gate). Only year and month are kept. It cannot be
+ * changed afterwards from the client: a teen "correcting" their age upward
+ * would switch the protections off.
+ */
+export async function setBirthdate({ userId, year, month, day }) {
+  const current = await getQuery(`SELECT birth_year FROM users WHERE id = ? AND deleted_at IS NULL`, [userId]);
+  if (!current) throw ApiError.notFound('User');
+  if (current.birth_year != null) {
+    throw new ApiError('Your date of birth is already set', { status: 409, code: 'BIRTHDATE_ALREADY_SET' });
+  }
+  const checked = checkBirthdate({ year, month, day });
+  await runQuery(`UPDATE users SET birth_year = ?, birth_month = ? WHERE id = ?`, [checked.year, checked.month, userId]);
+  const status = await getAgeStatus(userId);
+  if (status.age_group === 'minor') await applyMinorDefaults(userId);
+  return status;
+}
