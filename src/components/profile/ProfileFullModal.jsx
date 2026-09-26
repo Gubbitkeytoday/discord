@@ -83,7 +83,7 @@ export default function ProfileFullModal({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b border-d-divider px-4">
             <div ref={tabsRef} role="tablist" aria-label={t('profiles.profileOf', { name })} onKeyDown={onTabKey}
-              className="-mb-px flex min-w-0 flex-1 gap-4 overflow-x-auto">
+              className="-mb-px flex min-w-0 flex-1 flex-wrap gap-x-4 md:flex-nowrap md:overflow-x-auto">
               {tabs.map((x) => (
                 <button key={x.id} type="button" role="tab" data-tab={x.id}
                   id={`${baseId}-tab-${x.id}`} aria-controls={`${baseId}-panel`}
