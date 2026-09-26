@@ -93,7 +93,9 @@ function MessageRow({
   const rowProps = {
     'data-row-id': msg.id,
     tabIndex: isFocusTarget ? 0 : -1,
-    onFocus: () => actions.focusRow(msg.id),
+    // Only focusing the row itself moves the list's Tab stop; a link or a
+    // Copy button inside another message must not steal it.
+    onFocus: (e) => actions.focusRow(msg.id, e.target === e.currentTarget),
     onBlur: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) actions.blurRow(msg.id); },
     onPointerEnter: (e) => { if (e.pointerType === 'mouse') actions.hoverRow(msg.id); }
   };
@@ -134,7 +136,11 @@ function MessageRow({
   const lang = msg.content ? guessLang(msg.content) : null;
   const { chatPrefs, a11yPrefs } = ctx;
   const canDelete = isOwn || ctx.canManageMessages;
-  const showActions = isActive && !msg.pending && !msg.failed && !isEditing;
+  // The toolbar exists for the active row, and — invisible until focus
+  // reaches it — for the list's Tab stop, so Shift+Tab from the composer
+  // lands on Reply / Add reaction without a mouse (switch and screen-reader
+  // users). Every other row carries no toolbar at all.
+  const showActions = (isActive || isFocusTarget) && !msg.pending && !msg.failed && !isEditing;
   const innerTab = isActive || isFocusTarget ? 0 : -1;
   const ids = {
     author: `msg-author-${msg.id}`,
@@ -179,8 +185,12 @@ function MessageRow({
         onDoubleClick={(e) => {
           // Tap to React. Ignored on anything you might legitimately be
           // double-clicking for another reason, and on unsent messages.
+          // Like Discord's "double-tap to react", this is a touch gesture: a
+          // mouse double-click (a tremor, a word selection) must not publish
+          // a reaction everyone sees.
           const emoji = chatPrefs?.tapToReactEmoji;
           if (!emoji || msg.pending || msg.failed) return;
+          if (!window.matchMedia?.('(hover: none)').matches) return;
           if (e.target.closest('a, img, video, audio, textarea, input, button')) return;
           if (window.getSelection?.()?.toString()) return;
           actions.toggleReaction(msg.id, emoji);
@@ -200,6 +210,7 @@ function MessageRow({
             canDelete={canDelete}
             canThread={ctx.canThread}
             actions={actions}
+            idle={!isActive}
           />
         )}
         {grouped ? (

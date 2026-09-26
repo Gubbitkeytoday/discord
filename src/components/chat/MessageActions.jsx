@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { SmilePlus, Reply, Pencil, Trash2, MoreHorizontal, MessagesSquare, Forward } from 'lucide-react';
+import { SmilePlus, Reply, Pencil, Trash2, MoreHorizontal, Forward } from 'lucide-react';
 import { TranslateButton } from '../../translation';
 import { t } from '../../i18n/index.jsx';
 
@@ -21,7 +21,7 @@ const ICON_BUTTON = `${BUTTON} hover:bg-d-hover focus-visible:bg-d-hover text-d-
  * reaches it at once; ←/→/Home/End move between its buttons as in a
  * WAI-ARIA toolbar, ↑/↓ go back to the message list.
  */
-export default function MessageActions({ msg, isOwn, canReply, canDelete, canThread, actions }) {
+export default function MessageActions({ msg, isOwn, canReply, canDelete, canThread, actions, idle = false }) {
   const ref = useRef(null);
 
   const onKeyDown = (event) => {
@@ -51,7 +51,9 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
       role="toolbar"
       aria-label={t('chat.messageActions')}
       onKeyDown={onKeyDown}
-      className="message-actions absolute right-4 max-sm:right-2 -top-4 flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-0.5 z-10"
+      className={`message-actions absolute right-4 max-sm:right-2 -top-4 flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-0.5 z-10 ${
+        idle ? 'opacity-0 pointer-events-none focus-within:opacity-100 focus-within:pointer-events-auto' : ''
+      }`}
     >
       {quickReactions(3).map((emoji) => (
         <button
@@ -59,7 +61,9 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
           type="button"
           // Shift-click is Discord's "super" gesture: the same reaction, plus a
           // burst everyone in the channel sees.
-          onClick={(e) => actions.react(msg, emoji, e.shiftKey)}
+          // A double-click (tremor, habit) reacts once instead of toggling
+          // the reaction on and straight back off.
+          onClick={(e) => { if (e.detail > 1) return; actions.react(msg, emoji, e.shiftKey); }}
           className={`${BUTTON} hover:bg-d-hover focus-visible:bg-d-hover text-sm leading-none`}
           title={`${t('chat.reactWith', { emoji })} — ${t('chat.superHint')}`}
           aria-label={t('chat.reactWith', { emoji })}
@@ -75,12 +79,6 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
         <button type="button" onClick={() => actions.reply(msg)} className={ICON_BUTTON}
           title={t('chat.reply')} aria-label={t('chat.reply')} aria-keyshortcuts="R">
           <Reply className="w-4 h-4" aria-hidden="true" />
-        </button>
-      )}
-      {canThread && (
-        <button type="button" onClick={() => actions.createThread(msg)} className={`${ICON_BUTTON} max-sm:hidden`}
-          title={t('chat.createThread')} aria-label={t('chat.createThread')} aria-keyshortcuts="T">
-          <MessagesSquare className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
       {actions.canForward && (

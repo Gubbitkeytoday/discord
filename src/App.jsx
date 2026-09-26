@@ -2623,7 +2623,8 @@ export default function App() {
           list instead of tabbing through the rail and every message. */}
       {connection.showBanner && <ConnectionBanner status={connection.status} onRetry={connection.retry} />}
       <nav aria-label={t('a11y.skipLinks')} className="contents">
-        <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>
+        {/* Only when there is a composer to skip to (not on the friends page). */}
+        {activeChannel && activeChannel.type !== 'forum' && <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>}
         <a href="#channel-list" className="skip-link">{t('a11y.skipToChannels')}</a>
       </nav>
       <ErrorBoundary region="rail" className={RAIL_FALLBACK}>

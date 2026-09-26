@@ -1958,6 +1958,7 @@ export default {
   'chat.forwardedLabel': 'Forwarded',
   'chat.forwardedFrom': 'Forwarded from {channel}',
   'chat.forwardedSource': 'the original message',
+  'search.badDate': 'Didn\'t understand the date “{value}”. Use YYYY-MM-DD, today, yesterday or tomorrow.',
   // --- voice (polish round) ---
   'voice.callControls': 'Call controls',
   'voice.ctlMute': 'Mute',

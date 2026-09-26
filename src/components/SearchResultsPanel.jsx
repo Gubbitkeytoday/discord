@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Hash, Users, Paperclip, Loader2, Megaphone, MessagesSquare, Volume2 } from 'lucide-react';
 import { announce } from '../chat/announcer';
+import { parseSearchQuery } from '../../lib/searchQuery.js';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
@@ -60,6 +61,11 @@ export default function SearchResultsPanel({
   const channelsInResults = useMemo(() => [...new Set(results.map((r) => r.channel_id))], [results]);
 
   const terms = useMemo(() => searchTerms(query), [query]);
+  // Operators the server could not use ("before:someday") are said, not
+  // silently ignored.
+  const warnings = useMemo(() => {
+    try { return parseSearchQuery(query).warnings ?? []; } catch { return []; }
+  }, [query]);
 
   // Say how many results there are (WCAG 4.1.3): the panel is not focused.
   useEffect(() => {
@@ -90,6 +96,11 @@ export default function SearchResultsPanel({
 
       <div className="px-3 py-2 border-b border-d-edge space-y-2">
         <p className="text-[11px] text-d-text3 truncate">{t('search.for', { query })}</p>
+        {warnings.map((w) => (
+          <p key={w.token} role="status" className="text-xs text-d-text2 bg-d-base rounded px-2 py-1">
+            {w.code === 'INVALID_DATE' ? t('search.badDate', { value: w.value }) : w.message}
+          </p>
+        ))}
         <div className="flex flex-wrap gap-1.5">
           <select
             value={channelFilter}

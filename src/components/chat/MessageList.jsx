@@ -261,7 +261,7 @@ const MessageList = forwardRef(function MessageList({
     actions: {
       ...ctx.actions,
       hoverRow: (id) => setHoveredId(id),
-      focusRow: (id) => { setFocusedId(id); setTabStopId(id); },
+      focusRow: (id, isRow = true) => { setFocusedId(id); if (isRow) setTabStopId(id); },
       blurRow: (id) => setFocusedId((current) => (current === id ? null : current)),
       tapRow: (id) => { if (hoverless()) setTouchOpenId((current) => (current === id ? null : id)); },
       closeTouchActions: () => setTouchOpenId(null)

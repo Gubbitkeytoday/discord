@@ -1958,6 +1958,7 @@ export default {
   'chat.forwardedLabel': 'ส่งต่อมา',
   'chat.forwardedFrom': 'ส่งต่อจาก {channel}',
   'chat.forwardedSource': 'ข้อความต้นฉบับ',
+  'search.badDate': 'ไม่เข้าใจวันที่ “{value}” ใช้รูปแบบ YYYY-MM-DD หรือ today, yesterday, tomorrow',
   // --- voice (polish round) ---
   'voice.callControls': 'ปุ่มควบคุมการโทร',
   'voice.ctlMute': 'ปิดไมค์',
