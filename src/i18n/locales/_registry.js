@@ -132,13 +132,18 @@ export function matchLocale(tag, isAvailable = () => true) {
  * letters to translate ("{count}", "•"). Brand names that legitimately stay in
  * English cost a point or two — this is an estimate, not a gate.
  */
+const PLURAL_FORM = /_(zero|one|two|few|many|other)$/;
+
 export function completeness(dictionary, source) {
   const keys = Object.keys(source);
   if (!keys.length || !dictionary) return 0;
   if (dictionary === source) return 100;
   let done = 0;
   for (const key of keys) {
-    const value = dictionary[key];
+    let value = dictionary[key];
+    // An English plural form this language does not need (ja has no `_one`)
+    // is covered at runtime by the translated base key, so count that.
+    if (value === undefined && PLURAL_FORM.test(key)) value = dictionary[key.replace(PLURAL_FORM, '')];
     if (typeof value !== 'string' || !value.trim()) continue;
     const letters = value.replace(/\{\w+\}/g, '');
     if (value !== source[key] || !/\p{L}/u.test(letters)) done += 1;

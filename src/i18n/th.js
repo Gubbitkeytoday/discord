@@ -185,7 +185,6 @@ export default {
   'dm.openFailed': 'เปิดการสนทนาไม่ได้: {error}',
 
   // --- search ----------------------------------------------------------------
-  'search.noResults': 'ไม่พบข้อความที่ตรงกัน',
   'search.jumpFailed': 'ไปที่ข้อความนั้นไม่ได้: {error}',
 
   // --- quick switcher --------------------------------------------------------
@@ -260,7 +259,6 @@ export default {
   'settings.allMessages': 'ทุกข้อความ',
   'settings.onlyMentions': 'เฉพาะเมื่อถูก @mention',
   'settings.type': 'ประเภท',
-  'settings.userSettings': 'ตั้งค่าผู้ใช้',
   'settings.saved': 'บันทึกแล้ว',
 
   // --- roles -----------------------------------------------------------------

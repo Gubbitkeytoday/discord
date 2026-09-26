@@ -185,7 +185,6 @@ export default {
   'dm.openFailed': 'Could not open the conversation: {error}',
 
   // --- search ----------------------------------------------------------------
-  'search.noResults': 'No messages matched',
   'search.jumpFailed': 'Could not jump to that message: {error}',
 
   // --- quick switcher --------------------------------------------------------
@@ -260,7 +259,6 @@ export default {
   'settings.allMessages': 'All messages',
   'settings.onlyMentions': 'Only @mentions',
   'settings.type': 'Type',
-  'settings.userSettings': 'User settings',
   'settings.saved': 'Saved',
 
   // --- roles -----------------------------------------------------------------
