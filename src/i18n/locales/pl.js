@@ -2979,4 +2979,8 @@ export default {
   "apiError.INVALID_EMOJI": "Użyj jednego emoji.",
   "apiError.INVALID_EXPIRY": "Wybierz, kiedy status ma zniknąć.",
   "apiError.UNKNOWN_COSMETIC": "Ten element nie jest już dostępny.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Tożsamość",
+  "admin.tab.cosmetics": "Kosmetyki",
 };

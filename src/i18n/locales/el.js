@@ -2908,4 +2908,8 @@ export default {
   "apiError.INVALID_EMOJI": "Χρησιμοποίησε ένα μόνο emoji.",
   "apiError.INVALID_EXPIRY": "Διάλεξε πότε να διαγραφεί η κατάσταση.",
   "apiError.UNKNOWN_COSMETIC": "Αυτό το στοιχείο δεν είναι πλέον διαθέσιμο.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Ταυτότητα",
+  "admin.tab.cosmetics": "Καλλυντικά",
 };

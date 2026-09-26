@@ -2979,4 +2979,8 @@ export default {
   "apiError.INVALID_EMOJI": "Используй один эмодзи.",
   "apiError.INVALID_EXPIRY": "Выбери, когда очистить статус.",
   "apiError.UNKNOWN_COSMETIC": "Этот предмет больше недоступен.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Идентичность",
+  "admin.tab.cosmetics": "Косметика",
 };

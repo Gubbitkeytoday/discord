@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, Flag, Users, Server, DoorOpen, ScrollText, Sparkles, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2
+  X, Flag, Users, Server, DoorOpen, ScrollText, Sparkles, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2, Gem
 } from 'lucide-react';
 import { get, patch, post, put, del } from '../../api';
 import { localeTag, t } from '../../i18n/index.jsx';
 import { useDialog } from '../settings/primitives';
 import { reasonLabel, useStreamerMask, maskEmail } from './safety';
 import SeasonalAdminPanel from '../theme/SeasonalAdminPanel.jsx';
+import CosmeticPackManager from './cosmetics/CosmeticPackManager.jsx';
 
 /**
  * Instance administration: the people who run this deployment. Reached from
@@ -21,6 +22,7 @@ const TABS = [
   { key: 'servers', icon: Server },
   { key: 'registration', icon: DoorOpen },
   { key: 'seasonal', icon: Sparkles },
+  { key: 'cosmetics', icon: Gem },
   { key: 'audit', icon: ScrollText }
 ];
 
@@ -114,6 +116,7 @@ export default function AdminConsole({ currentUser, onClose, onToast }) {
           {tab === 'servers' && <ServersPanel onError={toastError} />}
           {tab === 'registration' && <RegistrationPanel onChanged={loadOverview} onError={toastError} onToast={onToast} />}
           {tab === 'seasonal' && <SeasonalAdminPanel onError={toastError} onToast={onToast} />}
+          {tab === 'cosmetics' && <CosmeticPackManager onToast={onToast} />}
           {tab === 'audit' && <AuditPanel onError={toastError} />}
         </div>
       </div>

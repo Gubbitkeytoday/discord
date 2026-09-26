@@ -38,6 +38,10 @@ import {
 } from './chat/messageStore';
 import { useBackClose, setCanonicalPath } from './chat/useBackClose';
 import { mentionsUser } from './utils/mentions';
+import { handleIdentityEvent } from './profile/store';
+import { recentAnchorRect } from './profile/anchor';
+import { resetMemberProfile } from './profile/api';
+import { recordRecentDestination } from './components/server/recentDestinations';
 
 // Code-split: each of these is a separate chunk, fetched on first use (and
 // warmed on idle after sign-in), so the first paint only pays for the chat.
@@ -63,6 +67,7 @@ const CreateChannelModal = lazyComponent(() => import('./components/CreateChanne
 const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
 const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
 const NotificationsInbox = lazyComponent(() => import('./components/NotificationsInbox'));
+const DiscoverPage = lazyComponent(() => import('./components/server/DiscoverPage'));
 
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
@@ -142,6 +147,22 @@ function takeSignOutNotice() {
     sessionStorage.removeItem(SIGN_OUT_NOTICE_KEY);
     return key || null;
   } catch { return null; }
+}
+
+// The quick switcher's "Recent" list lives in the account's layout
+// preferences. A write before the account's preferences have arrived would
+// send this device's defaults (no folders, no order) over the saved ones, so
+// visits are queued until then.
+let preferencesReady = false;
+let queuedRecent = null;
+function markPreferencesReady() {
+  preferencesReady = true;
+  if (queuedRecent) recordRecentDestination(queuedRecent);
+  queuedRecent = null;
+}
+function rememberRecent(entry) {
+  if (preferencesReady) recordRecentDestination(entry);
+  else queuedRecent = entry;
 }
 
 // Bumped with every db.js migration. The client compares it to the running
@@ -280,6 +301,13 @@ export default function App() {
   const mobileSidebarOpenRef = useRef(mobileSidebarOpen);
   mobileSidebarOpenRef.current = mobileSidebarOpen;
   const [selectedProfileUser, setSelectedProfileUser] = useState(null);
+  // Where the profile popout points: the row or name that was clicked.
+  const [profileAnchor, setProfileAnchor] = useState(null);
+  // Server Discovery replaces the server/home columns while it is open.
+  const [showDiscover, setShowDiscover] = useState(false);
+  // Going anywhere else (a server, a DM, a switcher pick, a notification)
+  // leaves Discover.
+  useEffect(() => { setShowDiscover(false); }, [activeServerId, activeChannelId]);
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [serverSettingsTab, setServerSettingsTab] = useState(null);
   const [viewerPermissions, setViewerPermissions] = useState([]);
@@ -471,8 +499,8 @@ export default function App() {
       setChannelSettings(c); setServerSettings(s);
       // Appearance, accessibility, voice, keybinds… all arrive with this call,
       // so there is no second round trip before the app looks right.
-      if (data?.preferences) hydratePreferences(data.preferences);
-      else loadPreferences();
+      if (data?.preferences) { hydratePreferences(data.preferences); markPreferencesReady(); }
+      else loadPreferences().finally(markPreferencesReady);
     }).catch(() => {});
     get(`/api/notifications/${userId}?limit=50`).then((rows) => setNotifications(Array.isArray(rows) ? rows : [])).catch(() => {});
   }, []);
@@ -782,6 +810,12 @@ export default function App() {
       : `/channels/${activeServerId}/${activeChannelId}`;
     if (!pendingJumpMessageId) setCanonicalPath(path);
     rememberLastChannel(activeServerId, activeChannelId);
+    // "Recent" in the quick switcher means visited, not only jumped to.
+    rememberRecent({
+      kind: activeChan.type === 'dm' || activeChan.type === 'group_dm' ? 'dm'
+        : activeChan.type === 'voice' || activeChan.type === 'stage' ? 'voice' : 'text',
+      id: activeChannelId
+    });
 
     // Discord voice channels carry a text channel too, and people use it
     // constantly — links, "brb", the thing you cannot say over a hot mic. So
@@ -1304,6 +1338,10 @@ export default function App() {
       voice_speaking: onVoiceSpeaking,
       voice_error: onVoiceError,
       user_updated: onUserUpdated,
+      // Collectibles, name styles, tags and badges: drop the cached identity
+      // so every list and open profile refetches it (batched).
+      identity_updated: handleIdentityEvent,
+      server_identity_updated: handleIdentityEvent,
       channel_created: onChannelCreated,
       channel_updated: onChannelUpdated,
       channel_deleted: onChannelDeleted,
@@ -2188,6 +2226,10 @@ export default function App() {
   const isForumChannel = activeChannel?.type === 'forum';
   const isOwner = currentServer?.owner_id === currentUserId;
 
+  // The server's roles with their styles (gradient, holographic, icon), for
+  // role-styled names in the member list and chat.
+  const rolesById = useMemo(() => new Map(roles.map((r) => [r.id, r])), [roles]);
+
   const memberColors = useMemo(() => {
     const map = new Map();
     for (const m of members) map.set(m.id, m.role_color);
@@ -2235,8 +2277,13 @@ export default function App() {
     ?? dmChannels.flatMap((d) => d.recipients ?? []).find((u) => u.id === userId)
     ?? (currentUser?.id === userId ? currentUser : null);
 
-  const openProfile = async (userId) => {
+  /**
+   * Open someone's profile popout, pointing at `anchorRect` (the row or name
+   * that was clicked) or, failing that, at whatever was just clicked.
+   */
+  const openProfile = async (userId, anchorRect = null) => {
     const local = resolveUser(userId);
+    setProfileAnchor(anchorRect && Number.isFinite(anchorRect.left) ? anchorRect : recentAnchorRect());
     if (local) setSelectedProfileUser(local);
     try {
       const full = await get(`/api/users/${userId}`);
@@ -2366,6 +2413,7 @@ export default function App() {
       onSearch={handleSearch}
       onTogglePin={handleTogglePin}
       members={activeServerId === 'home' ? homeMembers : members}
+      rolesById={activeServerId === 'home' ? null : rolesById}
       channels={channels}
       customEmojis={serverEmojis}
       externalEmojiGroups={externalEmojiGroups}
@@ -2746,17 +2794,37 @@ export default function App() {
           readStates={readStates}
           channels={channels}
           activeServerId={activeServerId}
-          onSelectServer={(id) => setActiveServerId(id)}
+          onSelectServer={(id) => { setShowDiscover(false); setActiveServerId(id); }}
           mobileOpen={mobileSidebarOpen}
           onOpenCreateServerModal={() => setShowCreateServerModal(true)}
-          onSelectHome={() => setActiveServerId('home')}
+          onSelectHome={() => { setShowDiscover(false); setActiveServerId('home'); }}
+          discoverActive={showDiscover}
+          onMarkServersRead={(serverIds) => {
+            const wanted = new Set(serverIds);
+            for (const [channelId, state] of Object.entries(readStates)) {
+              if (state && wanted.has(state.server_id) && (state.unread || state.mention_count)) handleMarkChannelRead(channelId);
+            }
+          }}
+          onOpenDiscover={() => { setShowDiscover(true); setMobileSidebarOpen(false); }}
           onJoinWithInvite={openJoinWithInvite}
           onServerContextMenu={(server, x, y) => setNotifPopover({ kind: 'server', id: server.id, x, y })}
           pendingFriendCount={friends.filter((f) => f.friend_status === 'pending' && f.direction === 'incoming').length}
         />
       </ErrorBoundary>
 
-      {activeServerId === 'home' ? (
+      {showDiscover ? (
+        <ErrorBoundary region="discover">
+          <main id="main-content" className="flex-1 flex min-w-0 min-h-0">
+            <DiscoverPage
+              onToast={pushToast}
+              onJoined={(detail) => { setShowDiscover(false); handleInviteAccepted(detail); }}
+              onOpenServer={(id) => { setShowDiscover(false); setActiveServerId(id); }}
+              onJoinWithInvite={openJoinWithInvite}
+              onClose={() => setShowDiscover(false)}
+            />
+          </main>
+        </ErrorBoundary>
+      ) : activeServerId === 'home' ? (
         <ErrorBoundary region="home">
         <HomeDirectMessages
           friends={friends}
@@ -2820,6 +2888,12 @@ export default function App() {
             <ChannelSidebar
               onPrefetchChannel={prefetchChannel}
               currentServer={currentServer}
+              socket={socket}
+              emojis={serverEmojis}
+              onJoinVoiceChannel={(channelId) => {
+                const voiceChannel = channels.find((c) => c.id === channelId);
+                if (voiceChannel) { handleJoinVoice(voiceChannel); pickChannel(voiceChannel.id); }
+              }}
               channels={channels}
               categories={serverCategories}
               voiceRosters={voiceRosters}
@@ -2944,6 +3018,8 @@ export default function App() {
               <ErrorBoundary region="members" resetKeys={[activeServerId]} className={SIDE_FALLBACK}>
                 <MemberList
                   members={members}
+                  serverId={activeServerId}
+                  rolesById={rolesById}
                   onSelectMember={openProfile}
                   onMemberContextMenu={(member, x, y) => openMemberMenu(member, x, y)}
                 />
@@ -2969,6 +3045,7 @@ export default function App() {
             } catch (err) { toastError(err); }
           }}
           onJoinWithInvite={(code) => { setShowCreateServerModal(false); setInviteCode(code); }}
+          onOpenDiscover={() => { setShowCreateServerModal(false); setShowDiscover(true); setMobileSidebarOpen(false); }}
         />
       )}
 
@@ -3127,6 +3204,22 @@ export default function App() {
           onRemoveTimeout={handleRemoveTimeout}
           onKick={handleKick}
           onBan={handleBan}
+          onResetProfile={(u) => {
+            const member = members.find((m) => m.id === u.id);
+            const name = member?.nickname || member?.display_name || u.display_name || u.username;
+            const serverId = activeServerId;
+            setConfirm({
+              title: t('profiles.resetTitle', { name }),
+              body: t('profiles.resetBody'),
+              confirmLabel: t('profiles.resetConfirm'),
+              withReason: true,
+              reasonLabel: t('profiles.resetReason'),
+              onConfirm: async (reason) => {
+                await resetMemberProfile(serverId, u.id, { reason });
+                pushToast(t('profiles.resetDone'), { type: 'success', ttl: 3000 });
+              }
+            });
+          }}
           onToast={pushToast}
         />
       )}
@@ -3260,7 +3353,14 @@ export default function App() {
 
       {selectedProfileUser && (
         <UserProfileModal
+          key={selectedProfileUser.id}
           user={selectedProfileUser}
+          anchorRect={profileAnchor}
+          onOpenServer={(id) => {
+            setSelectedProfileUser(null);
+            setShowDiscover(false);
+            if (servers.some((sv) => sv.id === id)) setActiveServerId(id);
+          }}
           currentUser={currentUser}
           serverId={activeServerId}
           onToast={pushToast}

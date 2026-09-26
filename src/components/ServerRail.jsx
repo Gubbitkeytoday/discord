@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Compass, FolderOpen } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Plus, Compass, FolderOpen, Link2 } from 'lucide-react';
 import { useUserSettings, getPreferences, updatePreferences } from '../hooks/useUserSettings';
 import { t } from '../i18n/index.jsx';
 import { serverIconOf, serverInitials } from '../utils/avatar';
 import BrandMark from './ui/BrandMark.jsx';
 import { MentionBadge } from './ui/Badge.jsx';
+import AnimatedServerIcon from './server/AnimatedServerIcon.jsx';
+import FolderSettingsPopover from './server/FolderSettingsPopover.jsx';
 
 const FOLDER_COLORS = ['#5865f2', '#57f287', '#fee75c', '#eb459e', '#ed4245', '#f47b67', '#3ba55c', '#faa61a'];
 
@@ -100,15 +103,20 @@ export default function ServerRail({
   serverSettings = {},
   readStates = {},
   channels = [],
-  activeServerId,
+  activeServerId: selectedServerId,
   onSelectServer,
   onOpenCreateServerModal,
   onSelectHome,
   onJoinWithInvite,
   onServerContextMenu,
+  onOpenDiscover,
+  discoverActive = false,
+  onMarkServersRead,
   pendingFriendCount = 0,
   mobileOpen = false
 }) {
+  // While Discover is open no server (nor Home) is the current page.
+  const activeServerId = discoverActive ? null : selectedServerId;
   const { prefs, update } = useUserSettings();
   const layout = prefs.layout ?? { serverFolders: [], serverOrder: [] };
   const rows = useMemo(() => buildRows(servers, layout), [servers, layout]);
@@ -158,12 +166,29 @@ export default function ServerRail({
     serverFolders: (layout.serverFolders ?? []).map((f) => (f.id === folderId ? { ...f, collapsed: !f.collapsed } : f))
   });
 
-  const renameFolder = (folderId) => {
+  // Folder Settings (name, colour, mark read, ungroup): right-click, or
+  // Shift+F10 / the context-menu key on a focused folder.
+  const [folderMenu, setFolderMenu] = useState(null); // { folderId, x, y }
+  const openFolderSettings = (folderId, x, y) => setFolderMenu({ folderId, x, y });
+  const menuFolder = folderMenu ? (layout.serverFolders ?? []).find((f) => f.id === folderMenu.folderId) : null;
+
+  const saveFolder = (folderId, { name, color }) => saveLayout({
+    ...layout,
+    serverFolders: (layout.serverFolders ?? []).map((f) => (f.id === folderId
+      ? { ...f, name: (name ?? '').trim().slice(0, 60), color: color ?? null }
+      : f))
+  });
+
+  /** Dissolve a folder: its servers take its place in the rail, in order. */
+  const ungroupFolder = (folderId) => {
     const folder = (layout.serverFolders ?? []).find((f) => f.id === folderId);
-    // A native prompt keeps this dependency-free; the name is cosmetic.
-    const name = window.prompt(t('rail.folderName'), folder?.name ?? '');
-    if (name === null) return;
-    saveLayout({ ...layout, serverFolders: (layout.serverFolders ?? []).map((f) => (f.id === folderId ? { ...f, name: name.trim().slice(0, 60) } : f)) });
+    if (!folder) return;
+    const order = orderFromRows(rows).flatMap((id) => (id === folderId ? folder.serverIds : [id]));
+    saveLayout({
+      ...layout,
+      serverFolders: (layout.serverFolders ?? []).filter((f) => f.id !== folderId),
+      serverOrder: order
+    });
   };
 
   const dragProps = (serverId, fromFolderId = null) => ({
@@ -203,7 +228,7 @@ export default function ServerRail({
   const navRef = useRef(null);
   const [rovingKey, setRovingKey] = useState(null);
   const [announcement, setAnnouncement] = useState('');
-  const activeKey = activeServerId === 'home' ? 'home' : `server:${activeServerId}`;
+  const activeKey = discoverActive ? 'explore' : activeServerId === 'home' ? 'home' : `server:${activeServerId}`;
   const itemKeys = useMemo(() => {
     const keys = ['home'];
     for (const row of rows) {
@@ -349,7 +374,15 @@ export default function ServerRail({
                 <RailButton
                   {...itemProps(`folder:${folder.id}`)}
                   onClick={() => toggleFolder(folder.id)}
-                  onContextMenu={(e) => { e.preventDefault(); renameFolder(folder.id); }}
+                  onContextMenu={(e) => { e.preventDefault(); openFolderSettings(folder.id, e.clientX, e.clientY); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      openFolderSettings(folder.id, rect.right + 8, rect.top);
+                    }
+                  }}
                   title={label}
                   label={railLabel(t('rail.folderLabel', { name: label }), { mentions: open ? 0 : mentions, unread: !open && anyUnread })}
                   expanded={open}
@@ -406,10 +439,43 @@ export default function ServerRail({
           <Plus className="w-6 h-6" aria-hidden="true" />
         </RailButton>
 
-        <RailButton {...itemProps('explore')} onClick={onJoinWithInvite} title={t('server.joinTitle')} accent>
-          <Compass className="w-6 h-6" aria-hidden="true" />
-        </RailButton>
+        {onOpenDiscover ? (
+          // Server Discovery: public servers on this instance.
+          <RailButton
+            {...itemProps('explore')}
+            onClick={onOpenDiscover}
+            title={t('srv.exploreDiscover')}
+            active={discoverActive}
+            activeClass="bg-d-online text-white"
+            accent
+          >
+            <Compass className="w-6 h-6" aria-hidden="true" />
+          </RailButton>
+        ) : (
+          <RailButton {...itemProps('explore')} onClick={onJoinWithInvite} title={t('server.joinTitle')} accent>
+            <Link2 className="w-6 h-6" aria-hidden="true" />
+          </RailButton>
+        )}
       </div>
+
+      {/* Portalled: the rail is a drawer (its own stacking context) on phones,
+          and the channel list paints over it on desktop. */}
+      {menuFolder && createPortal(
+        <FolderSettingsPopover
+          folder={menuFolder}
+          x={folderMenu.x}
+          y={folderMenu.y}
+          onSave={(values) => saveFolder(menuFolder.id, values)}
+          onMarkRead={onMarkServersRead ? () => onMarkServersRead(menuFolder.serverIds) : undefined}
+          onUngroup={() => ungroupFolder(menuFolder.id)}
+          onClose={() => {
+            const id = menuFolder.id;
+            setFolderMenu(null);
+            requestAnimationFrame(() => focusItem(`folder:${id}`));
+          }}
+        />,
+        document.body
+      )}
     </nav>
   );
 }
@@ -441,7 +507,9 @@ function ServerIcon({ server, active, unread, badge, muted, onSelect, onContextM
       dim={muted}
     >
       {serverIconOf(server) && !iconFailed ? (
-        <img src={serverIconOf(server)} alt="" width={48} height={48} decoding="async" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
+        // Animated icons stay on their first frame until hovered or open.
+        <AnimatedServerIcon server={server} active={active} alt="" width={48} height={48} decoding="async"
+          onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
       ) : (
         <span aria-hidden="true" className={initialsClass(initials)}>{initials}</span>
       )}

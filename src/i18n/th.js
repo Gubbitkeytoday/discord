@@ -2941,4 +2941,8 @@ export default {
   "apiError.INVALID_EMOJI": "ใช้อีโมจิเพียงตัวเดียว",
   "apiError.INVALID_EXPIRY": "เลือกเวลาที่จะล้างสถานะ",
   "apiError.UNKNOWN_COSMETIC": "ไอเท็มนี้ไม่มีให้ใช้แล้ว",
+
+  // --- integration (round 4) ---
+  "settings.identity": "ตัวตน",
+  "admin.tab.cosmetics": "ของตกแต่ง",
 };

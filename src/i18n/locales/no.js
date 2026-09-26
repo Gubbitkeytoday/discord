@@ -2909,4 +2909,8 @@ export default {
   "apiError.INVALID_EMOJI": "Bruk én emoji.",
   "apiError.INVALID_EXPIRY": "Velg når statusen skal fjernes.",
   "apiError.UNKNOWN_COSMETIC": "Elementet er ikke lenger tilgjengelig.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitet",
+  "admin.tab.cosmetics": "Kosmetikk",
 };

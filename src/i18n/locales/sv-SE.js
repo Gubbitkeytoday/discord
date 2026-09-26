@@ -2909,4 +2909,8 @@ export default {
   "apiError.INVALID_EMOJI": "Använd en enda emoji.",
   "apiError.INVALID_EXPIRY": "Välj när statusen ska rensas.",
   "apiError.UNKNOWN_COSMETIC": "Objektet är inte längre tillgängligt.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitet",
+  "admin.tab.cosmetics": "Kosmetik",
 };

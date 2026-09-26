@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "Tek bir emoji kullan.",
   "apiError.INVALID_EXPIRY": "Durumun ne zaman temizleneceğini seç.",
   "apiError.UNKNOWN_COSMETIC": "Bu öğe artık kullanılamıyor.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Kimlik",
+  "admin.tab.cosmetics": "Kozmetikler",
 };

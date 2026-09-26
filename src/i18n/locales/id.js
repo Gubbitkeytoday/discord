@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "Gunakan satu emoji saja.",
   "apiError.INVALID_EXPIRY": "Pilih kapan status dihapus.",
   "apiError.UNKNOWN_COSMETIC": "Item itu sudah tidak tersedia.",
+
+  // --- integration (round 4) ---
+  "settings.identity": "Identitas",
+  "admin.tab.cosmetics": "Kosmetik",
 };

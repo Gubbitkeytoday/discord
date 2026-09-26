@@ -11,6 +11,10 @@ import { proxiedImageUrl } from '../utils/media';
 import { useMessageRequests, MessageRequestRow, MessageRequestBar } from './admin/MessageRequests';
 import { BirthdateCard } from './admin/BirthdatePrompt';
 import { useStreamerMask, useAccountFlags } from './admin/safety';
+import AvatarWithDecoration from './profile/AvatarWithDecoration';
+import Nameplate from './profile/Nameplate';
+import DisplayName from './profile/DisplayName';
+import { useIdentities } from '../profile/store';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -75,6 +79,7 @@ export default function HomeDirectMessages({
   const [addFriendNote, setAddFriendNote] = useState('');
   const [addFriendResult, setAddFriendResult] = useState(null);
   const [filter, setFilter] = useState('');
+  const [hoveredDm, setHoveredDm] = useState(null);   // drives that row's avatar decoration
   const [showStatusMenu, setShowStatusMenu] = useState(false);
 
   const acceptedFriends = useMemo(
@@ -127,6 +132,13 @@ export default function HomeDirectMessages({
   const requests = useMessageRequests(requestKey);
   const requestIds = useMemo(() => new Set(requests.requests.map((r) => r.channel_id)), [requests.requests]);
   const shownDms = useMemo(() => visibleDms.filter((d) => !requestIds.has(d.id)), [visibleDms, requestIds]);
+  // One batched identity lookup for everyone on this page (DM partners and
+  // the friends list): decorations, nameplates and name styles.
+  const identityIds = useMemo(() => [...new Set([
+    ...shownDms.filter((d) => d.type === 'dm').map((d) => d.recipients?.[0]?.id),
+    ...visibleFriends.map((f) => f.id)
+  ].filter(Boolean))], [shownDms, visibleFriends]);
+  const identities = useIdentities(identityIds, null);
   const shownRequests = useMemo(() => {
     if (!filter.trim()) return requests.requests;
     const needle = filter.toLowerCase();
@@ -222,13 +234,20 @@ export default function HomeDirectMessages({
             const state = readStates[dm.id] ?? {};
             const hasUnread = Boolean(state.unread) && !isActive;
             const recipient = dm.recipients?.[0];
+            const identity = dm.type === 'dm' && recipient ? identities[recipient.id] : null;
 
             return (
               <div key={dm.id} className="relative group">
                 {hasUnread && (
                   <span aria-hidden="true" className="absolute -left-2 top-1/2 -translate-y-1/2 w-1 h-2 bg-white rounded-r-full" />
                 )}
-                <button
+                <Nameplate
+                  as="button"
+                  type="button"
+                  item={identity?.nameplate}
+                  scrim={isActive ? 'var(--color-d-active)' : 'var(--color-d-surface)'}
+                  onMouseEnter={() => setHoveredDm(dm.id)}
+                  onMouseLeave={() => setHoveredDm((cur) => (cur === dm.id ? null : cur))}
                   onClick={() => onSelectDm?.(dm.id)}
                   onPointerEnter={() => onPrefetchChannel?.(dm.id)}
                   onFocus={() => onPrefetchChannel?.(dm.id)}
@@ -243,19 +262,32 @@ export default function HomeDirectMessages({
                       : 'text-d-text3 hover:bg-d-hover/60 hover:text-d-text'
                   }`}
                 >
-                  <div className="relative shrink-0">
-                    <img src={proxiedImageUrl(dm.avatar_url || defaultAvatar(dm.recipients?.[0]?.id ?? dm.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
-                    {dm.type === 'dm' && (
-                      <span className="absolute -bottom-0.5 -right-0.5">
-                        <StatusIndicator status={recipient?.status} size={8} ring="var(--color-d-surface)" />
-                      </span>
-                    )}
-                  </div>
+                  {dm.type === 'dm' ? (
+                    <AvatarWithDecoration
+                      src={dm.avatar_url}
+                      userId={recipient?.id ?? dm.id}
+                      size={32}
+                      decoration={identity?.decoration}
+                      status={recipient?.status}
+                      ring={isActive ? 'var(--color-d-active)' : 'var(--color-d-surface)'}
+                      context="list"
+                      hovered={hoveredDm === dm.id}
+                    />
+                  ) : (
+                    <div className="relative shrink-0">
+                      <img src={proxiedImageUrl(dm.avatar_url || defaultAvatar(dm.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
+                    </div>
+                  )}
 
                   <div className="flex flex-col min-w-0 text-left flex-1">
-                    <span className={`text-sm truncate leading-tight ${hasUnread ? 'font-bold' : 'font-semibold'}`}>
-                      {dm.display_name}
-                    </span>
+                    <DisplayName
+                      name={dm.display_name}
+                      identity={dm.type === 'dm' ? identity : null}
+                      compact
+                      showTag={false}
+                      showNewMember={false}
+                      className={`text-sm leading-tight ${hasUnread ? 'font-bold' : 'font-semibold'}`}
+                    />
                     {dm.type === 'group_dm' && (
                       <span className="text-[11px] text-d-text3 leading-tight">
                         {t('dm.members', { count: (dm.recipients?.length ?? 0) + 1 })}
@@ -268,7 +300,7 @@ export default function HomeDirectMessages({
                       {state.mention_count}
                     </span>
                   )}
-                </button>
+                </Nameplate>
 
                 <button
                   onClick={(e) => { e.stopPropagation(); onCloseDm?.(dm.id); }}
@@ -560,14 +592,15 @@ export default function HomeDirectMessages({
                           onClick={() => onOpenProfile?.(friend.id)}
                           className="flex items-center gap-3 min-w-0 text-left flex-1"
                         >
-                          <div className="relative shrink-0">
-                            <img src={proxiedImageUrl(friend.avatar_url || defaultAvatar(friend.id))} alt="" className="w-10 h-10 rounded-full object-cover" />
-                            {!isBlockedTab && (
-                              <span className="absolute -bottom-0.5 -right-0.5">
-                                <StatusIndicator status={friend.status} size={10} ring="var(--color-d-canvas)" decorative />
-                              </span>
-                            )}
-                          </div>
+                          <AvatarWithDecoration
+                            src={friend.avatar_url}
+                            userId={friend.id}
+                            size={40}
+                            decoration={isBlockedTab ? null : identities[friend.id]?.decoration}
+                            status={isBlockedTab ? null : friend.status}
+                            ring="var(--color-d-canvas)"
+                            context="list"
+                          />
                           <div className="min-w-0">
                             <div className="font-bold text-d-strong text-sm truncate">
                               {friend.display_name || friend.username}

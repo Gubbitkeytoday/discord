@@ -6,17 +6,23 @@ import './server.css';
 /**
  * Collapse the banner once a scroller has moved past `threshold` px.
  *   const collapsed = useScrolledPast(channelListRef, 24);
+ *
+ * With hysteresis: once collapsed it only expands again at the very top.
+ * Collapsing makes the list taller, which can clamp its scrollTop back under
+ * the threshold; without this a short list would flicker open and shut.
+ * `ref` may be a ref object or the element itself (from a callback ref), so
+ * a list that mounts after the first render is still observed.
  */
 export function useScrolledPast(ref, threshold = 24) {
   const [past, setPast] = useState(false);
+  const el = ref && 'current' in ref ? ref.current : ref;
   useEffect(() => {
-    const el = ref?.current;
     if (!el) return undefined;
-    const onScroll = () => setPast(el.scrollTop > threshold);
+    const onScroll = () => setPast((was) => (was ? el.scrollTop > 0 : el.scrollTop > threshold));
     onScroll();
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
-  }, [ref, threshold]);
+  }, [el, threshold]);
   return past;
 }
 
@@ -51,9 +57,11 @@ export default function ServerBanner({ server, collapsed = false, height = 136, 
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-150 ${collapsed ? 'opacity-0' : 'opacity-100'}`}
       />
       {/* A scrim for the name on top, and a fade into the list below. */}
-      <div aria-hidden="true" className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/70 to-transparent" />
+      <div aria-hidden="true" className={`absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/70 to-transparent transition-opacity duration-150 ${collapsed ? 'opacity-0' : ''}`} />
       <div aria-hidden="true" className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-d-surface/60 to-transparent" />
-      <div className="relative z-[1] [&_*]:text-white [&_button]:hover:bg-black/20">{children}</div>
+      {/* Collapsed, the art is gone and the header is an ordinary bar again:
+          theme text colours, not white-on-scrim. */}
+      <div className={`relative z-[1] ${collapsed ? '' : '[&_*]:text-white [&_button]:hover:bg-black/20'}`}>{children}</div>
     </div>
   );
 }

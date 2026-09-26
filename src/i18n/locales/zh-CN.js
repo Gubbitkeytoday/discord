@@ -2879,4 +2879,8 @@ export default {
   "apiError.INVALID_EMOJI": "请只使用一个表情。",
   "apiError.INVALID_EXPIRY": "请选择何时清除状态。",
   "apiError.UNKNOWN_COSMETIC": "该物品已不可用。",
+
+  // --- integration (round 4) ---
+  "settings.identity": "身份标识",
+  "admin.tab.cosmetics": "装扮",
 };
