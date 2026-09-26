@@ -44,9 +44,10 @@ import ChatTab from './settings/ChatTab';
 import StreamerModeTab from './settings/StreamerModeTab';
 import ActivityTab from './settings/ActivityTab';
 import ProfileTab from './settings/ProfileTab';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
+import ConfirmModal from './ConfirmModal';
 import {
-  X, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
+  X, ArrowLeft, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
   Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot
 } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
@@ -98,7 +99,25 @@ export default function UserSettingsModal({
 }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [query, setQuery] = useState('');
-  const dialogRef = useFocusTrap(true, onClose);
+  // Leaving Profile with unsaved edits is refused, not silently discarded:
+  // the save bar turns red and shakes, as on Discord.
+  const [dirty, setDirty] = useState(false);
+  const [nudge, setNudge] = useState(0);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const guarded = (fn) => {
+    // On a phone the page may be hidden behind the list; show it so the
+    // warning is actually seen.
+    if (dirty) { setNudge((n) => n + 1); setMobilePane('content'); return false; }
+    fn();
+    return true;
+  };
+  // Phones cannot fit a 240px rail beside the page (the page was squeezed to
+  // ~110px and scrolled sideways), so below `md` it is Discord-mobile style:
+  // the list, then the page full-width with a Back button.
+  const [mobilePane, setMobilePane] = useState(initialTab !== 'profile' ? 'content' : 'nav');
+  const goTo = (key) => guarded(() => { setActiveTab(key); setMobilePane('content'); });
+  const requestClose = () => guarded(onClose);
+  const dialogRef = useDialog(requestClose);
   const navRef = useRef(null);
 
   const groups = useMemo(() => {
@@ -113,8 +132,8 @@ export default function UserSettingsModal({
   // hidden — so follow the first result once the current tab drops out.
   useEffect(() => {
     if (!query.trim() || visible.length === 0) return;
-    if (!visible.some((tab) => tab.key === activeTab)) setActiveTab(visible[0].key);
-  }, [query, visible, activeTab]);
+    if (!dirty && !visible.some((tab) => tab.key === activeTab)) setActiveTab(visible[0].key);
+  }, [query, visible, activeTab, dirty]);
 
   /** ↑/↓ walk the nav, the way Discord's settings sidebar does. */
   const onNavKeyDown = (event) => {
@@ -126,7 +145,7 @@ export default function UserSettingsModal({
       : Math.max(index - 1, 0);
     const target = visible[next];
     if (!target) return;
-    setActiveTab(target.key);
+    if (!goTo(target.key)) return;
     navRef.current?.querySelector(`[data-tab="${target.key}"]`)?.focus();
   };
 
@@ -146,8 +165,18 @@ export default function UserSettingsModal({
           the left. The sidebar colour still bleeds to the window edge; that is
           painted by the gradient on `.settings-surface`. */}
       <div className="flex w-full max-w-[var(--settings-max)]">
-        <div className="w-[var(--settings-rail)] shrink-0 overflow-y-auto overscroll-contain">
-        <div className="py-15 pr-2 pl-5 flex flex-col min-h-full">
+        <div className={`w-[var(--settings-rail)] max-md:w-full max-md:bg-d-surface shrink-0 overflow-y-auto overscroll-contain ${mobilePane === 'content' ? 'max-md:hidden' : ''}`}>
+        <div className="py-15 max-md:pt-4 pr-2 max-md:pr-4 pl-5 max-md:pl-4 flex flex-col min-h-full">
+          <div className="md:hidden mb-3 flex justify-end">
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label={t('common.close')}
+              className="rounded-full p-2 text-d-text2 hover:bg-d-hover hover:text-d-strong"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
           <div className="relative mb-4">
             <Search
               className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-d-text3"
@@ -176,7 +205,7 @@ export default function UserSettingsModal({
                   <button
                     key={tab.key}
                     data-tab={tab.key}
-                    onClick={() => setActiveTab(tab.key)}
+                    onClick={() => goTo(tab.key)}
                     aria-current={activeTab === tab.key ? 'page' : undefined}
                     className={`mb-0.5 flex w-full items-start gap-3 rounded px-2.5 py-1.5 text-left
                       text-base font-medium transition-colors focus:outline-none
@@ -201,7 +230,7 @@ export default function UserSettingsModal({
 
             <div className="my-4 h-px bg-d-divider" />
             <button
-              onClick={onSignOut}
+              onClick={() => guarded(() => setConfirmSignOut(true))}
               className="flex w-full items-center gap-3 rounded px-2.5 py-1.5 text-base font-medium
                 text-d-text2 transition-colors hover:bg-d-danger hover:text-white"
             >
@@ -217,20 +246,30 @@ export default function UserSettingsModal({
       </div>
 
       {/* --- content ---------------------------------------------------------- */}
-      <div className="relative flex flex-1 min-w-0 justify-start overflow-y-auto overscroll-contain">
-        <div className="w-full max-w-[740px] min-w-0 py-15 pl-10 pr-2">
+      <div className={`relative flex flex-1 min-w-0 justify-start max-md:bg-d-canvas overflow-y-auto overscroll-contain ${mobilePane === 'nav' ? 'max-md:hidden' : ''}`}>
+        <div className="w-full max-w-[740px] min-w-0 py-15 pl-10 pr-2 max-md:px-4 max-md:pt-14">
+          <button
+            type="button"
+            onClick={() => setMobilePane('nav')}
+            className="md:hidden absolute left-2 top-4 flex items-center gap-1 rounded px-2 py-2 text-sm font-medium
+              text-d-text2 hover:bg-d-hover hover:text-d-strong"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {t('common.back')}
+          </button>
           {activeTab === 'profile' && (
             <ProfileTab
               currentUser={currentUser}
               onSaveProfile={onSaveProfile}
               onSetStatus={onSetStatus}
               onToast={onToast}
+              onDirtyChange={setDirty}
+              nudge={nudge}
             />
           )}
           {activeTab === 'account' && (
             <AccountSecurityTab currentUser={currentUser} onToast={onToast} onSignOut={onSignOut} />
           )}
-          {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} />}
+          {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} onToast={onToast} />}
           {activeTab === 'developer' && <ApplicationsTab servers={servers} onToast={onToast} />}
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
           {activeTab === 'appearance' && <AppearanceTab />}
@@ -245,7 +284,7 @@ export default function UserSettingsModal({
         {/* Discord's close affordance: outlined circle with ESC written under it. */}
         <div className="sticky top-15 shrink-0 pr-6 pl-2 hidden md:block">
           <button
-            onClick={onClose}
+            onClick={requestClose}
             aria-label={t('common.close')}
             className="group flex w-9 flex-col items-center gap-1"
           >
@@ -264,7 +303,7 @@ export default function UserSettingsModal({
 
         {/* Narrow windows lose the gutter, so the close button moves inline. */}
         <button
-          onClick={onClose}
+          onClick={requestClose}
           aria-label={t('common.close')}
           className="absolute right-4 top-4 rounded-full p-2 text-d-text2 hover:bg-d-hover
             hover:text-d-strong md:hidden"
@@ -273,6 +312,16 @@ export default function UserSettingsModal({
         </button>
       </div>
       </div>
+
+      {confirmSignOut && (
+        <ConfirmModal
+          title={t('auth.signOut')}
+          body={t('settings.signOutConfirm')}
+          confirmLabel={t('auth.signOut')}
+          onConfirm={() => onSignOut?.()}
+          onClose={() => setConfirmSignOut(false)}
+        />
+      )}
     </div>
   );
 }

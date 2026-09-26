@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Loader2, Search, X } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 
@@ -17,7 +17,7 @@ export default function CreateGroupDmModal({ friends = [], existing = null, onCr
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const alreadyIn = useMemo(
     () => new Set((existing?.recipients ?? []).map((r) => r.id)),

@@ -14,7 +14,7 @@ import {
   ChevronDown, Image as ImageIcon, MessageSquare, Check, Pencil, Trash2, Settings2, Lock, Users, List, LayoutGrid
 } from 'lucide-react';
 import { get, post, put, patch, del, upload } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { avatarOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
@@ -242,7 +242,7 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
   const [files, setFiles] = useState([]);       // File[]
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
   const fileInput = useRef(null);
   const requireTag = Boolean(channel?.require_tag);
 
@@ -396,7 +396,7 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
 function EditTagsModal({ post, tags, canModerate, onClose, onSaved, onToast }) {
   const [selected, setSelected] = useState(post.tags.map((tag) => tag.id));
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const save = async () => {
     setBusy(true);
@@ -451,7 +451,7 @@ function ManageTagsModal({ channel, tags, onClose, onChanged, onToast }) {
     default_layout: channel.default_layout || 'list',
     require_tag: Boolean(channel.require_tag)
   });
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const run = async (fn) => {
     setBusy(true);

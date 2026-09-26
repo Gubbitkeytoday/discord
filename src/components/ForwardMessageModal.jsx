@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Hash, Loader2, Search, Send, Users, X } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 /**
@@ -12,7 +12,7 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
   const [selected, setSelected] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const serverName = (id) => servers.find((s) => s.id === id)?.name ?? '';
 
