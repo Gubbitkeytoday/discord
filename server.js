@@ -62,6 +62,8 @@ import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
 import createPushRouter from './routes/push.js'; // push
+import passkeysRouter from './routes/passkeys.js'; // passkeys
+import translationRouter from './routes/translation.js'; // translation
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
   revalidateRooms, emitToChannelViewers, emitToRelated
@@ -241,6 +243,8 @@ app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
 app.use('/api', createPushRouter({ io })); // push
+app.use('/api', passkeysRouter); // passkeys
+app.use('/api', translationRouter); // translation
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)
 // is fetched by the server, so viewers' browsers never contact third-party

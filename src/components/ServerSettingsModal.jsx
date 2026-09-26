@@ -13,7 +13,7 @@ import WebhooksTab from './settings/WebhooksTab';
 import ChannelPermissionsTab from './settings/ChannelPermissionsTab';
 import OnboardingTab from './settings/OnboardingTab';
 import InsightsTab from './settings/InsightsTab';
-import { t, localeTag } from '../i18n/index.jsx';
+import { t, localeTag, useLocaleCode } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
 import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
@@ -120,11 +120,13 @@ export default function ServerSettingsModal({
     [viewerPermissions, isOwner]
   );
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const groups = useMemo(
     () => tabGroups()
       .map((group) => ({ ...group, tabs: group.tabs.filter((entry) => !entry.perm || can(entry.perm)) }))
       .filter((group) => group.tabs.length > 0),
-    [can]
+    [can, locale]
   );
   const visibleKeys = groups.flatMap((group) => group.tabs.map((entry) => entry.key));
   const [tab, setTab] = useState(() => (visibleKeys.includes(initialTab) ? initialTab : visibleKeys[0] ?? 'members'));

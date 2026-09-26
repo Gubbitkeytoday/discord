@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Volume2, AtSign, Server } from 'lucide-react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, serverIconOf } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
 
@@ -24,6 +24,8 @@ export default function QuickSwitcher({
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const entries = useMemo(() => [
     ...channels
       .filter((c) => c.type !== 'category')
@@ -42,7 +44,7 @@ export default function QuickSwitcher({
       label: s.name, hint: t('autocomplete.serverEmoji'),
       avatar: serverIconOf(s), icon: Server
     }))
-  ], [channels, dms, servers]);
+  ], [channels, dms, servers, locale]);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase().replace(/^[#@]/, '');
