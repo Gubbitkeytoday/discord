@@ -27,6 +27,47 @@ const SOUND_PLAYERS = {
   call: playMentionSound
 };
 
+// --- screen share & attention ------------------------------------------------
+
+let streaming = false;
+/** App tells us when the user is sharing their screen. */
+export function setScreenSharing(value) {
+  streaming = Boolean(value);
+}
+
+/** "Mute notifications while streaming": nothing private pops up on a shared screen. */
+function silencedByStream(prefs) {
+  return streaming && prefs.notifications.muteWhileStreaming;
+}
+
+let flashTimer = null;
+let flashBaseTitle = null;
+/**
+ * The web's taskbar flash: while the tab is in the background, alternate the
+ * tab title until the user looks at it. Browsers do not let a page flash the
+ * OS taskbar itself; a blinking tab title is what they allow.
+ */
+export function flashAttention(label) {
+  const prefs = getPreferences();
+  if (!prefs.notifications.taskbarFlash || document.visibilityState === 'visible') return false;
+  if (flashTimer) return true;
+  flashBaseTitle = document.title;
+  let on = false;
+  flashTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? `● ${label}` : flashBaseTitle;
+  }, 1000);
+  const stop = () => {
+    if (document.visibilityState !== 'visible') return;
+    clearInterval(flashTimer);
+    flashTimer = null;
+    document.title = flashBaseTitle;
+    document.removeEventListener('visibilitychange', stop);
+  };
+  document.addEventListener('visibilitychange', stop);
+  return true;
+}
+
 /** Ask the browser for permission. Only ever called from a click. */
 export async function requestNotificationPermission() {
   if (typeof Notification === 'undefined') return 'unsupported';
@@ -48,6 +89,7 @@ export function playSound(event, { force = false } = {}) {
   if (!force) {
     if (prefs.streamerMode.enabled && prefs.streamerMode.disableSounds) return false;
     if (prefs.notifications.sounds?.[event] === false) return false;
+    if (silencedByStream(prefs) && (event === 'message' || event === 'mention')) return false;
   }
   const player = SOUND_PLAYERS[event];
   if (!player) return false;
@@ -68,6 +110,8 @@ export function notifyMessage({ title, body, icon, tag, muted = false, status, o
   if (muted) return false;
   if (status === 'dnd') return false;
   if (streamerMode.enabled && streamerMode.disableNotifications) return false;
+  if (silencedByStream(prefs)) return false;
+  flashAttention(title);
   if (!notifications.desktopEnabled) return false;
   if (notificationPermission() !== 'granted') return false;
   // A notification for the window you are already looking at is just noise.
@@ -99,11 +143,24 @@ export function speakMessage({ author, content, isCurrentChannel }) {
   return speak(`${author} says ${content}`, { rate: prefs.accessibility.ttsRate });
 }
 
+/**
+ * Play back a message sent with /tts, if Accessibility › Text-to-speech
+ * allows playback on this account.
+ */
+export function speakTtsMessage({ author, content }) {
+  const prefs = getPreferences();
+  if (!prefs.accessibility.ttsEnabled || !content) return false;
+  if (prefs.streamerMode.enabled && prefs.streamerMode.disableSounds) return false;
+  return speak(`${author} says ${content}`, { rate: prefs.accessibility.ttsRate });
+}
+
 /** Reflect unread counts in the tab title, if the user wants a badge. */
 export function applyUnreadBadge(mentionCount) {
   const prefs = getPreferences();
   const base = 'Antigravity';
-  document.title = prefs.notifications.unreadBadge && mentionCount > 0
+  const title = prefs.notifications.unreadBadge && mentionCount > 0
     ? `(${mentionCount}) ${base}`
     : base;
+  if (flashTimer) flashBaseTitle = title;
+  else document.title = title;
 }

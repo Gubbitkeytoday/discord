@@ -37,10 +37,10 @@ import { api, get, post, put, patch, del, upload, setApiIdentity, localizeError 
 import { maskOf } from './utils/permissionCatalog';
 import {
   useUserSettings, loadPreferences, hydratePreferences, applyCategoryFromServer,
-  updatePreferences
+  updatePreferences, onPreferenceSaveError
 } from './hooks/useUserSettings';
 import { useKeybinds } from './hooks/useKeybinds';
-import { playSound, notifyMessage, speakMessage, applyUnreadBadge } from './utils/notifier';
+import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
 import { t } from './i18n/index.jsx';
 
 // Same origin in production (the API serves the SPA); the Vite dev server
@@ -183,6 +183,10 @@ export default function App() {
   const [showInbox, setShowInbox] = useState(false);
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const { prefs } = useUserSettings();
+  // A preference that failed to save has already been rolled back; say so.
+  useEffect(() => onPreferenceSaveError(({ error }) => {
+    pushToast(t('settings.saveFailedReverted', { reason: error?.message ?? '' }), { type: 'error', ttl: 6000 });
+  }), [pushToast]);
 
   // The gateway will not let an unidentified socket join a room, and `identify`
   // is async server-side — so joins must wait for the `identified` reply rather
@@ -603,6 +607,9 @@ export default function App() {
       }));
 
     const onNewMessage = (msg) => {
+      if (msg.tts && msg.channel_id === activeChannelIdRef.current) {
+        speakTtsMessage({ author: msg.display_name ?? msg.username ?? '', content: msg.content });
+      }
       if (msg.channel_id === activeChannelIdRef.current) {
         setMessages((prev) => {
           const pendingIdx = msg.nonce ? prev.findIndex((m) => m.pending && m.nonce === msg.nonce) : -1;
@@ -1171,7 +1178,8 @@ export default function App() {
     }]);
 
     socket.emit('send_message', {
-      channel_id: activeChannelId, content, attachments, reply_to_id, nonce, sticker_id: sticker?.id ?? null
+      channel_id: activeChannelId, content, attachments, reply_to_id, nonce, sticker_id: sticker?.id ?? null,
+      ...(extra.tts ? { tts: true } : {})
     }, (ack) => {
       if (ack && !ack.ok) {
         setMessages((prev) => prev.map((m) =>
@@ -1409,12 +1417,14 @@ export default function App() {
   const handleLeaveVoice = () => {
     if (!currentVoiceChannel) return;
     socket.emit('leave_voice', { channelId: currentVoiceChannel.id });
+    setScreenSharing(false);
     setCurrentVoiceChannel(null);
     setActiveVoiceParticipants([]);
     // Staying put: a voice channel now carries a text channel, so hanging up
     // leaves you reading it rather than teleporting you somewhere else.
   };
   const handleVideoStateChange = useCallback(({ isVideo, isStreaming }) => {
+    setScreenSharing(Boolean(isStreaming));
     if (!currentVoiceChannel) return;
     socket.emit('voice_state_change', { channelId: currentVoiceChannel.id, isVideo, isStreaming });
   }, [currentVoiceChannel]);

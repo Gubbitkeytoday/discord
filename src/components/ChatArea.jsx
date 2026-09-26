@@ -26,6 +26,8 @@ import { VoiceNotePlayer, VoiceNoteRecorder, VoiceNoteButton } from './VoiceNote
 import SuperReaction, { motionAllowed } from './SuperReaction';
 import { runSlashCommand, parseSlashInput } from '../utils/slashCommands';
 import { t } from '../i18n/index.jsx';
+import { convertEmoticons } from '../utils/emoticons';
+import StillImage, { isAnimatedImage } from './StillImage';
 import { useUserSettings } from '../hooks/useUserSettings';
 import ComposerAutocomplete, { detectTrigger, buildOptions } from './ComposerAutocomplete';
 
@@ -426,13 +428,15 @@ export default function ChatArea({
         return;
       }
       if (command.empty) { clearComposer(); return; }
-      onSendMessage(command.content, attachments, replyToMsg?.id, { tts: command.tts });
+      // /tts only speaks when Accessibility › Text-to-speech allows it;
+      // otherwise it is sent as an ordinary message, as Discord does.
+      onSendMessage(command.content, attachments, replyToMsg?.id, { tts: Boolean(command.tts && a11yPrefs.ttsEnabled) });
       playMessageIncomingSound();
       clearComposer();
       return;
     }
 
-    onSendMessage(inputText, attachments, replyToMsg?.id);
+    onSendMessage(chatPrefs.convertEmoticons ? convertEmoticons(inputText) : inputText, attachments, replyToMsg?.id);
     playMessageIncomingSound();
     clearComposer();
   };
@@ -1154,17 +1158,17 @@ export default function ChatArea({
                   )}
 
                   {Boolean(msg.sticker) && (
-                    <img
+                    // Sticker animation: always, on hover ("interaction"), or
+                    // never — frozen on the first frame.
+                    <StillImage
                       src={msg.sticker.url}
+                      animate={a11yPrefs.stickerAnimation === 'always'
+                        || msg.sticker.format === 'png'}
+                      playOnHover={a11yPrefs.stickerAnimation === 'interaction'}
                       alt={msg.sticker.name}
                       title={msg.sticker.name}
-                      className={`mt-1 w-40 h-40 object-contain ${
-                        a11yPrefs.stickerAnimation === 'interaction' ? 'hover:animate-none' : ''
-                      }`}
+                      className="mt-1 w-40 h-40 object-contain"
                       loading="lazy"
-                      // "Never" freezes the sticker on its first frame the same
-                      // way the browser does for a paused GIF.
-                      style={a11yPrefs.stickerAnimation === 'never' ? { animationPlayState: 'paused' } : undefined}
                     />
                   )}
 
@@ -1177,7 +1181,7 @@ export default function ChatArea({
                         embed.type === 'rich'
                           ? <RichEmbed key={i} embed={embed} />
                           : chatPrefs.showLinkPreviews
-                            ? <LinkEmbed key={i} embed={embed} onOpenImage={setLightboxImg} />
+                            ? <LinkEmbed key={i} embed={embed} onOpenImage={setLightboxImg} autoplayGifs={a11yPrefs.autoplayGifs} />
                             : null
                       ))}
                     </div>
@@ -1202,6 +1206,7 @@ export default function ChatArea({
                           spoilerMode={chatPrefs.renderSpoilers}
                           isOwn={isOwn}
                           safetyHold={safetyFilters(msg)}
+                          autoplayGifs={a11yPrefs.autoplayGifs}
                         />
                         )
                       ))}
@@ -1591,6 +1596,8 @@ export default function ChatArea({
             />
           )}
 
+{/* Appearance › "Show send message button". Enter always sends. */}
+          {prefs.appearance.showSendButton && (
           <button
             type="submit"
             disabled={(!inputText.trim() && attachments.length === 0) || !canSend || isArchived}
@@ -1604,6 +1611,7 @@ export default function ChatArea({
           >
             <Send className="w-4 h-4" />
           </button>
+          )}
           </>
           )}
           </div>
@@ -1677,7 +1685,7 @@ export default function ChatArea({
  */
 function Attachment({
   attachment, onOpenImage, showMedia = true, showImages = true,
-  spoilerMode = 'click', isOwn = false, safetyHold = false
+  spoilerMode = 'click', isOwn = false, safetyHold = false, autoplayGifs = true
 }) {
   const att = typeof attachment === 'string'
     ? { url: attachment, filename: attachment.split('/').pop(), file_type: 'file' }
@@ -1705,8 +1713,9 @@ function Attachment({
           width: att.width ? Math.min(att.width, 384) : undefined
         }}
       >
-        <img
+        <StillImage
           src={att.url}
+          animate={autoplayGifs || !isAnimatedImage({ url: att.url, mimetype: att.mimetype, filename: att.filename })}
           alt={att.description || att.filename}
           width={att.width || undefined}
           height={att.height || undefined}

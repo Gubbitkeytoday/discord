@@ -890,8 +890,8 @@ export default {
   'notif.unsupported': 'เบราว์เซอร์นี้แสดงการแจ้งเตือนบนเดสก์ท็อปไม่ได้',
   'notif.unreadBadge': 'แสดงจำนวนที่ยังไม่อ่านบนชื่อแท็บ',
   'notif.unreadBadgeHint': 'แสดงจำนวนครั้งที่มีคนกล่าวถึงคุณ',
-  'notif.taskbarFlash': 'กะพริบทาสก์บาร์เมื่อมีคนกล่าวถึง',
-  'notif.muteWhileStreaming': 'ปิดทุกเสียงขณะเปิดโหมดสตรีมเมอร์',
+  'notif.taskbarFlash': 'กะพริบแท็บเบราว์เซอร์เมื่อมีข้อความใหม่หรือมีคนกล่าวถึง',
+  'notif.muteWhileStreaming': 'ปิดการแจ้งเตือนขณะแชร์หน้าจอ',
   'notif.muteWhileStreamingHint': 'กันไม่ให้เสียงเตือนส่วนตัวออกไปในหน้าจอที่แชร์',
   'notif.sounds': 'เสียง',
   'notif.soundsHint': 'กดเล่นเพื่อฟังก่อนตัดสินใจ',
@@ -1673,4 +1673,5 @@ export default {
   'mod.bulkDeleted_one': 'ลบไปแล้ว {count} ข้อความ',
   'insights.lastDays_one': '{n} วันล่าสุด',
   'roles.create': 'สร้างบทบาท',
+  'settings.saveFailedReverted': 'บันทึกการตั้งค่าไม่สำเร็จ จึงเปลี่ยนกลับเป็นค่าเดิม {reason}',
 };

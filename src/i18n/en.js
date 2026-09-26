@@ -890,8 +890,8 @@ export default {
   'notif.unsupported': 'This browser cannot show desktop notifications.',
   'notif.unreadBadge': 'Unread count in the tab title',
   'notif.unreadBadgeHint': 'Shows the number of mentions waiting for you.',
-  'notif.taskbarFlash': 'Flash the taskbar on a new mention',
-  'notif.muteWhileStreaming': 'Silence everything while streamer mode is on',
+  'notif.taskbarFlash': 'Flash the browser tab on a new message or mention',
+  'notif.muteWhileStreaming': 'Mute notifications while sharing your screen',
   'notif.muteWhileStreamingHint': 'Keeps a private ping off a shared screen.',
   'notif.sounds': 'Sounds',
   'notif.soundsHint': 'Press play to hear one before deciding.',
@@ -1673,4 +1673,5 @@ export default {
   'mod.bulkDeleted_one': 'Deleted {count} message',
   'insights.lastDays_one': 'Last {n} day',
   'roles.create': 'Create role',
+  'settings.saveFailedReverted': 'Could not save your setting, so it was changed back. {reason}',
 };
