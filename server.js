@@ -61,10 +61,14 @@ import * as pollService from './services/polls.js';
 import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
+import passkeysRouter from './routes/passkeys.js'; // passkeys
+import translationRouter from './routes/translation.js'; // translation
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
-  revalidateRooms, emitToChannelViewers, emitToRelated
+  revalidateRooms, emitToChannelViewers, emitToRelated,
+  realtimeServerOptions, drainRealtime, closeRealtimeBackends, realtimeHealth, holdsLease
 } from './realtime.js';
+import syncRouter from './routes/sync.js'; // realtime-scale
 import { requireUser } from './lib/httpUtils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -105,7 +109,9 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
-  maxHttpBufferSize: 1e6 // messages only — file bytes go over HTTP, not the socket
+  // Payload cap (file bytes go over HTTP, not the socket) and connection
+  // state recovery — see realtime.js.
+  ...realtimeServerOptions()
 });
 
 // Behind a proxy, req.ip must come from X-Forwarded-For or every rate limit
@@ -171,6 +177,10 @@ app.get('/api/ready', asyncRoute(async (req, res) => {
     res.status(503).json({ status: 'draining' });
     return;
   }
+  if (!realtimeHealth().ready) {
+    res.status(503).json({ status: 'not_ready', realtime: realtimeHealth() });
+    return;
+  }
   const database = await dbHealth();
   if (!database.reachable) {
     res.status(503).json({ status: 'not_ready', database });
@@ -221,7 +231,8 @@ app.get('/api/health', asyncRoute(async (_req, res) => {
     code_schema_version: SCHEMA_VERSION,
     storage_root: STORAGE_ROOT,
     uptime_seconds: Math.round(process.uptime()),
-    connected_sockets: io.engine.clientsCount
+    connected_sockets: io.engine.clientsCount,
+    realtime: realtimeHealth()
   });
 }));
 
@@ -239,6 +250,9 @@ app.get('/api/meta/permissions', (_req, res) => {
 app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
+app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
+app.use('/api', passkeysRouter); // passkeys
+app.use('/api', translationRouter); // translation
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)
 // is fetched by the server, so viewers' browsers never contact third-party
@@ -907,15 +921,20 @@ app.put('/api/messages/:messageId/reactions/:emoji', requireUser, writeRateLimit
 }));
 
 app.get('/api/search/messages', requireUser, asyncRoute(async (req, res) => {
-  res.json(await messageService.searchMessages({
+  const limit = parseLimit(req.query.limit, { fallback: 25, max: 100 });
+  const results = await messageService.searchMessages({
     query: req.query.q,
     channelId: req.query.channelId ?? null,
     serverId: req.query.serverId ?? null,
     authorId: req.query.authorId ?? null,
     hasAttachment: req.query.hasAttachment === 'true',
-    limit: parseLimit(req.query.limit, { fallback: 25, max: 100 }),
-    viewerId: req.userId
-  }));
+    limit,
+    viewerId: req.userId,
+    // Cursor pagination: pass the previous page's X-Next-Cursor as ?before=.
+    before: typeof req.query.before === 'string' ? req.query.before : null
+  });
+  if (results.length >= limit) res.setHeader('X-Next-Cursor', results[results.length - 1].id);
+  res.json(results);
 }));
 
 // --- read state & notifications ---------------------------------------------
@@ -2085,7 +2104,7 @@ app.use(errorHandler);
 
 // --- realtime & lifecycle ----------------------------------------------------
 
-registerRealtime(io);
+await registerRealtime(io);
 
 // Sweep abandoned uploads and expired files periodically.
 const stopGC = startGarbageCollector({ intervalMs: 6 * 60 * 60 * 1000, dryRun: false });
@@ -2122,6 +2141,8 @@ const REMINDER_LEAD_MS = 15 * 60 * 1000;
 const remindedEvents = new Set();
 const eventReminders = setInterval(async () => {
   try {
+    // Once per cluster when several instances share Redis.
+    if (!(await holdsLease('event-reminders', 120_000))) return;
     const soon = await eventService.upcomingWithin(REMINDER_LEAD_MS);
     for (const event of soon) {
       if (remindedEvents.has(event.id)) continue;
@@ -2177,8 +2198,13 @@ async function shutdown(signal, exitCode = 0) {
     clearInterval(housekeeping);
     clearInterval(afkSweep);
     clearInterval(eventReminders);
+    // Tell sockets to reconnect elsewhere, close them recoverably, stop
+    // accepting; idle keep-alive connections go now, in-flight requests finish.
+    await drainRealtime(io);
+    httpServer.closeIdleConnections?.();
     await new Promise((resolve) => io.close(resolve));
     await new Promise((resolve) => httpServer.close(resolve));
+    await closeRealtimeBackends();
     await closeDB();
     clearTimeout(forceExit);
     console.log('   drained cleanly.');

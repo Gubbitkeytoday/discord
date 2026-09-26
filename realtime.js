@@ -14,9 +14,15 @@ import * as userService from './services/users.js';
 import * as linkEmbeds from './services/linkEmbeds.js';
 import { resolveSession, SESSION_COOKIE } from './lib/auth.js';
 import { config } from './lib/config.js';
-import { assertChannelAccess, canInChannel } from './services/access.js';
+import {
+  assertChannelAccess, canInChannel, loadGuildPermissionContext
+} from './services/access.js';
 import { resolveBotToken } from './services/applications.js';
-import { checkSocketLimit } from './lib/rateLimit.js';
+import { checkSocketLimitShared, createFloodGuard } from './lib/rateLimit.js';
+import {
+  initRedis, attachSocketAdapter, redisConfigured, redisHealth, holdsLease, closeRedis
+} from './lib/redis.js';
+import * as presence from './lib/presence.js';
 import { resolvePermissions } from './services/guilds.js';
 import { ApiError, publicError } from './lib/httpUtils.js';
 import { sessionEvents } from './lib/sessionEvents.js';
@@ -30,6 +36,12 @@ const typing = new Map();        // channelId -> Map<userId, timeoutId>
 const socketsByUser = new Map(); // userId -> Set<socketId>
 
 const TYPING_TTL_MS = 8000;
+// A client re-sends typing_start every few seconds while the user types. Each
+// re-send only refreshes the expiry; the room hears about it at most once per
+// this interval, which is the difference between O(keystrokes x viewers) and
+// O(viewers) fan-out for a busy channel.
+const TYPING_REBROADCAST_MS = 3000;
+const typingSentAt = new Map();  // `${channelId}:${userId}` -> last broadcast
 
 // Soundboard rate limit. Per user rather than per channel: one person spamming
 // should not stop everyone else, and a held key must not machine-gun the room.
@@ -86,7 +98,185 @@ async function authenticateSocket(socket, { userId, token, botToken }) {
 // without a selective-forwarding unit.
 const MESH_LIMIT = Number(process.env.VOICE_MESH_LIMIT) || 8;
 
-export function registerRealtime(io) {
+// --- scaling & reliability ---------------------------------------------------
+
+/** Brief-disconnect window in which a client resumes with its missed events. */
+export const RECOVERY_WINDOW_MS = Math.max(0, Number(process.env.SOCKET_RECOVERY_MS ?? 120_000));
+/** Largest single socket frame accepted (bytes). File bytes go over HTTP. */
+export const SOCKET_MAX_PAYLOAD_BYTES = Math.max(16_384, Number(process.env.SOCKET_MAX_PAYLOAD_BYTES) || 512 * 1024);
+
+/**
+ * Socket.IO server options owned by the gateway. server.js spreads these into
+ * `new Server(...)`.
+ *
+ * Connection state recovery: a client that drops for less than
+ * RECOVERY_WINDOW_MS reconnects with the same socket id, its rooms and data,
+ * and receives every room broadcast it missed. guardRecovery() re-checks the
+ * session and every room before a restore is allowed — a permission revoked
+ * while the client was away turns the restore into a fresh connection (the
+ * client then re-identifies and catches up over REST), so a replayed packet can
+ * never leak a channel the user has just lost.
+ */
+export function realtimeServerOptions() {
+  return {
+    maxHttpBufferSize: SOCKET_MAX_PAYLOAD_BYTES,
+    ...(RECOVERY_WINDOW_MS > 0
+      ? { connectionStateRecovery: { maxDisconnectionDuration: RECOVERY_WINDOW_MS, skipMiddlewares: false } }
+      : {})
+  };
+}
+
+const clustered = () => redisConfigured();
+const timers = [];
+let draining = false;
+
+/** Is a live session still behind this socket's stored identity? */
+async function identityStillValid(data) {
+  if (data.applicationId) return false;          // bots re-identify with their token
+  if (data.sessionId) {
+    const row = await getQuery(
+      `SELECT s.expires_at, u.deleted_at AS user_deleted
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.id = ? AND s.user_id = ? AND s.revoked_at IS NULL`,
+      [data.sessionId, data.userId]
+    );
+    if (!row || row.user_deleted) return false;
+    const expires = Date.parse(row.expires_at);
+    return !Number.isFinite(expires) || expires > Date.now();
+  }
+  return Boolean(config.allowDevIdentity);
+}
+
+/**
+ * Should this stored session be resumed? Every room the socket held was an
+ * access decision taken while it was connected; take each one again now.
+ */
+export async function recoveryAllowed(session) {
+  const data = session?.data ?? {};
+  const rooms = session?.rooms ?? [];
+  const userId = data.userId;
+  if (!userId) return rooms.every((room) => room === session.sid);
+  if (!(await identityStillValid(data))) return false;
+  for (const room of rooms) {
+    if (room === session.sid || room === `user-${userId}`) continue;
+    // Voice state is torn down on disconnect; the voice client rejoins itself.
+    if (room.startsWith('voice-') || room.startsWith('user-') || room.startsWith('application-')) return false;
+    const server = await getQuery(`SELECT id FROM servers WHERE id = ? AND deleted_at IS NULL`, [room]);
+    if (server) {
+      const resolved = await resolvePermissions({ userId, serverId: room }).catch(() => null);
+      if (!resolved?.isMember) return false;
+      continue;
+    }
+    if (!(await canInChannel({ channelId: room, userId, permission: 'VIEW_CHANNEL' }))) return false;
+  }
+  return true;
+}
+
+/** Wrap the adapter's restoreSession with recoveryAllowed(). */
+function guardRecovery(io) {
+  const adapter = io.of('/').adapter;
+  if (typeof adapter?.restoreSession !== 'function' || adapter.__agGuarded) return;
+  const original = adapter.restoreSession.bind(adapter);
+  adapter.restoreSession = async (pid, offset) => {
+    const session = await original(pid, offset);
+    if (!session) return session;
+    try {
+      return (await recoveryAllowed(session)) ? session : null;
+    } catch (err) {
+      console.warn('session recovery check failed:', err.message);
+      return null;
+    }
+  };
+  adapter.__agGuarded = true;
+}
+
+/** A restored socket skipped `identify`; put it back in the books. */
+async function onRecovered(io, socket) {
+  const userId = socket.data.userId;
+  if (!userId) return;
+  if (!socketsByUser.has(userId)) socketsByUser.set(userId, new Set());
+  socketsByUser.get(userId).add(socket.id);
+  socket.data.voiceChannelId = null;
+  const count = await presence.addConnection(userId, socket.id);
+  if (count === 1) {
+    const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
+    const wanted = current?.status === 'invisible' ? 'invisible'
+      : (['online', 'idle', 'dnd'].includes(socket.data.chosenStatus) ? socket.data.chosenStatus : 'online');
+    const user = await userService.setPresence({ userId, status: wanted });
+    await emitToRelated(io, userId, 'presence_updated',
+      { userId, status: user.status === 'invisible' ? 'offline' : user.status });
+  }
+  await userService.touchLastSeen(userId);
+}
+
+/** Periodic cluster chores; nothing to do on a single node. */
+function startClusterTimers(io) {
+  if (!clustered()) return;
+  const beat = setInterval(() => {
+    presence.heartbeat().catch((err) => console.warn('presence heartbeat failed:', err.message));
+  }, Math.floor(presence.PRESENCE_TTL_MS / 3));
+  const reaper = setInterval(async () => {
+    try {
+      if (!(await holdsLease('presence-reaper', 60_000))) return;
+      for (const userId of await presence.reap()) {
+        const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
+        if (current && current.status !== 'invisible' && current.status !== 'offline') {
+          await userService.setPresence({ userId, status: 'offline' });
+          await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
+        }
+      }
+      // Voice rows whose socket no longer exists anywhere in the cluster (an
+      // instance crashed mid-call). A single node wipes these at boot instead.
+      const live = new Set((await io.fetchSockets()).map((s) => s.id));
+      const cutoff = Date.now() - 60_000;
+      const rows = await allQuery(`SELECT user_id, channel_id, socket_id, joined_at FROM voice_states`);
+      for (const row of rows) {
+        if (live.has(row.socket_id) || !(Date.parse(row.joined_at) < cutoff)) continue;
+        await runQuery(`DELETE FROM voice_states WHERE user_id = ? AND socket_id = ?`, [row.user_id, row.socket_id]);
+        await broadcastVoice(io, row.channel_id);
+      }
+    } catch (err) {
+      console.warn('cluster sweep failed:', err.message);
+    }
+  }, 30_000);
+  beat.unref?.();
+  reaper.unref?.();
+  timers.push(beat, reaper);
+}
+
+/**
+ * Graceful drain, called by server.js on SIGTERM before io.close(). Clients
+ * are told to come back (after a small random delay, so a rolling deploy does
+ * not cause a reconnect stampede); io.close() then ends every socket with a
+ * *recoverable* reason, so a client that reconnects — to another instance,
+ * with Redis — inside the recovery window resumes with the events it missed.
+ * Presence is deliberately not flipped offline: the user is about to be back,
+ * and on a cluster the TTL reaper catches anyone who is not.
+ */
+export async function drainRealtime(io) {
+  draining = true;
+  for (const t of timers.splice(0)) clearInterval(t);
+  io.emit('server_draining', { reconnect: true, retry_after_ms: 250 + Math.floor(Math.random() * 1750) });
+  // Let the frame flush before the transports close.
+  await new Promise((r) => setTimeout(r, 100));
+}
+
+/** Close the shared Redis client last, after io.close() persisted sessions. */
+export async function closeRealtimeBackends() {
+  await closeRedis();
+}
+
+export async function registerRealtime(io) {
+  // Optional Redis/Valkey: cross-instance fan-out, recovery across instances,
+  // shared rate limits and presence. Without REDIS_URL nothing changes.
+  const redis = await initRedis();
+  if (redis) {
+    await attachSocketAdapter(io, redis);
+    console.log('🔀 realtime: Redis Streams adapter enabled (multi-instance mode)');
+  }
+  guardRecovery(io);
+  startClusterTimers(io);
+
   // Sessions ended elsewhere (logout, revoke, password change) take their
   // sockets with them.
   sessionEvents.on('revoked', (payload) => {
@@ -94,6 +284,28 @@ export function registerRealtime(io) {
   });
 
   io.on('connection', (socket) => {
+    // --- flood protection ----------------------------------------------------
+    // Cheap per-connection budgets for every inbound event; a connection that
+    // keeps flooding after being throttled is dropped. See lib/rateLimit.js.
+    const guard = createFloodGuard();
+    socket.use((packet, next) => {
+      const verdict = guard.check(packet[0]);
+      if (verdict === 'ok') return next();
+      const ack = packet[packet.length - 1];
+      if (typeof ack === 'function') ack({ ok: false, code: 'RATE_LIMITED', error: 'Slow down' });
+      if (verdict === 'disconnect') {
+        socket.emit('rate_limited', { reason: 'flood' });
+        socket.disconnect(true);
+      }
+      return undefined;
+    });
+
+    // A resumed connection keeps its identity and rooms (re-validated by
+    // guardRecovery) but skips `identify`, so re-register it.
+    if (socket.recovered) {
+      onRecovered(io, socket).catch((err) => console.error('recovery bookkeeping failed:', err.message));
+    }
+
     // --- identity ------------------------------------------------------------
     // The client announces who it is; replace with session-token validation
     // when auth lands (see lib/httpUtils.js identify()).
@@ -113,6 +325,8 @@ export function registerRealtime(io) {
       socket.data.userId = userId;
       if (!socketsByUser.has(userId)) socketsByUser.set(userId, new Set());
       socketsByUser.get(userId).add(socket.id);
+      // Cluster-wide connection count (a Map on a single node).
+      const connections = await presence.addConnection(userId, socket.id);
 
       // A user's own room makes it easy to push notifications to every device.
       socket.join(`user-${userId}`);
@@ -121,7 +335,7 @@ export function registerRealtime(io) {
 
       // First socket for this user means they just came online. A user who
       // chose "invisible" stays invisible to others, as on Discord.
-      if (socketsByUser.get(userId).size === 1) {
+      if (connections === 1) {
         const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
         const status = current?.status === 'invisible' ? 'invisible' : 'online';
         const user = await userService.setPresence({ userId, status });
@@ -174,7 +388,8 @@ export function registerRealtime(io) {
         }
         // The gateway bypasses Express, so it needs its own budget or the HTTP
         // write limit is trivially sidestepped by sending over the socket.
-        const budget = checkSocketLimit(userId, 'send_message', { limit: 30, windowMs: 10_000 });
+        // Shared across instances when Redis is configured.
+        const budget = await checkSocketLimitShared(userId, 'send_message', { limit: 30, windowMs: 10_000 });
         if (!budget.allowed) {
           ack?.({
             ok: false, code: 'RATE_LIMITED',
@@ -267,7 +482,13 @@ export function registerRealtime(io) {
       // permanent "… is typing" in everyone else's UI.
       channelTyping.set(userId, setTimeout(() => clearTyping(io, channelId, userId), TYPING_TTL_MS));
 
-      socket.to(channelId).emit('typing', { channelId, userId, displayName });
+      const sentKey = `${channelId}:${userId}`;
+      const last = typingSentAt.get(sentKey) ?? 0;
+      if (Date.now() - last < TYPING_REBROADCAST_MS) return;
+      typingSentAt.set(sentKey, Date.now());
+      socket.to(channelId).emit('typing', {
+        channelId, userId, displayName: typeof displayName === 'string' ? displayName.slice(0, 64) : undefined
+      });
     });
 
     socket.on('typing_stop', ({ channelId } = {}) => {
@@ -542,6 +763,12 @@ export function registerRealtime(io) {
 
     socket.on('disconnect', async () => {
       const userId = socket.data.userId;
+      // Draining for a deploy: the client is told to reconnect (probably to
+      // another instance) - do not flap everyone offline on the way out.
+      if (draining) {
+        socketsByUser.get(userId)?.delete(socket.id);
+        return;
+      }
 
       const voiceRow = await getQuery(
         `SELECT channel_id FROM voice_states WHERE socket_id = ?`, [socket.id]
@@ -554,10 +781,12 @@ export function registerRealtime(io) {
       if (!userId) return;
       const sockets = socketsByUser.get(userId);
       sockets?.delete(socket.id);
+      if (sockets && sockets.size === 0) socketsByUser.delete(userId);
+      const remaining = sockets ? await presence.removeConnection(userId, socket.id) : 1;
 
-      // Only go offline once the user's *last* tab or device disconnects.
-      if (sockets && sockets.size === 0) {
-        socketsByUser.delete(userId);
+      // Only go offline once the user's *last* tab or device disconnects -
+      // on any instance, when several share Redis.
+      if (sockets && remaining === 0) {
         await userService.touchLastSeen(userId);
         // Keep an explicit "invisible" so it survives the next sign-in.
         const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
@@ -601,6 +830,9 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
   const serverChannels = serverId
     ? new Set((await allQuery(`SELECT id FROM channels WHERE server_id = ?`, [serverId])).map((c) => c.id))
     : null;
+  // Guild scope: one bulk permission context answers every member/channel
+  // question below, instead of ~5 queries per (user, room) pair.
+  const ctx = serverId ? await loadGuildPermissionContext(serverId).catch(() => null) : null;
   if (!sockets) {
     // A socket can sit in a channel room without the guild room, so both.
     const rooms = serverId ? [serverId, ...serverChannels] : channelIds;
@@ -619,8 +851,9 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
     for (const room of [...sock.rooms]) {
       if (room === sock.id || room.startsWith('user-') || room.startsWith('application-')) continue;
       if (serverId && room === serverId) {
-        const member = await check(userId, room, async () =>
-          (await resolvePermissions({ userId, serverId })).isMember);
+        const member = await check(userId, room, async () => (ctx
+          ? ctx.members.some((m) => m.user_id === userId)
+          : (await resolvePermissions({ userId, serverId })).isMember));
         if (!member) sock.leave(room);
         continue;
       }
@@ -638,8 +871,9 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
       }
       if (channelIds && !channelIds.includes(room)) continue;
       if (serverChannels && !channelIds && !serverChannels.has(room)) continue;
-      const allowed = await check(userId, room, () =>
-        canInChannel({ channelId: room, userId, permission: 'VIEW_CHANNEL' }));
+      const allowed = await check(userId, room, async () => ((ctx && serverChannels?.has(room))
+        ? ctx.can(userId, room, 'VIEW_CHANNEL')
+        : canInChannel({ channelId: room, userId, permission: 'VIEW_CHANNEL' })));
       if (!allowed) sock.leave(room);
     }
   }
@@ -673,10 +907,36 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
  */
 export async function emitToRelated(io, userId, event, payload, selfPayload = undefined) {
   if (!io || !userId) return;
-  const related = await userService.listUsers(userId);
-  const rooms = related.map((u) => `user-${u.id}`).filter((room) => room !== `user-${userId}`);
+  const rooms = (await relatedUserIds(userId))
+    .filter((id) => id !== userId)
+    .map((id) => `user-${id}`);
+  // One broadcast to the union of rooms: one adapter publish (one XADD with
+  // Redis) per presence change, not one per related user.
   if (rooms.length) io.to(rooms).emit(event, payload);
   io.to(`user-${userId}`).emit(event, selfPayload === undefined ? payload : selfPayload);
+}
+
+/**
+ * Ids of everyone who may know `userId` — same scope as userService.listUsers
+ * (shared guild, shared DM, friendship) but ids only, without sorting or
+ * profile columns: this runs on every presence change.
+ */
+async function relatedUserIds(userId) {
+  const rows = await allQuery(
+    `SELECT them.user_id AS id FROM server_members them
+       JOIN server_members me ON me.server_id = them.server_id
+      WHERE me.user_id = ? AND me.left_at IS NULL AND them.left_at IS NULL
+     UNION
+     SELECT them.user_id FROM channel_recipients them
+       JOIN channel_recipients me ON me.channel_id = them.channel_id
+      WHERE me.user_id = ?
+     UNION
+     SELECT friend_id FROM friends WHERE user_id = ?
+     UNION
+     SELECT user_id FROM friends WHERE friend_id = ?`,
+    [userId, userId, userId, userId]
+  );
+  return rows.map((r) => r.id);
 }
 
 /** Remove one socket from a voice room: state row, room, peers told. */
@@ -722,19 +982,25 @@ export async function disconnectSessions(io, { sessionIds = null, userId = null,
  */
 export async function emitToChannelViewers(io, channel, event, payload = channel) {
   if (!channel?.server_id) return;
-  const sockets = await io.in(channel.server_id).fetchSockets();
-  const verdicts = new Map();
-  const channelId = channel.id;
-  for (const sock of sockets) {
-    const userId = sock.data?.userId;
-    if (!userId) continue;
-    if (!verdicts.has(userId)) {
-      verdicts.set(userId, channel.type === 'category'
-        ? true
-        : await canInChannel({ channelId, userId, permission: 'VIEW_CHANNEL' }));
-    }
-    if (verdicts.get(userId)) sock.emit(event, payload);
+  // Visibility is computed once for the whole guild from a single permission
+  // context (a handful of queries), not per socket; the event then goes out
+  // as ONE room broadcast that excludes the members who may not see the
+  // channel. No fetchSockets() round trip — which, with several instances,
+  // would be a cluster-wide request per event — and the broadcast is
+  // recorded for connection-state recovery like any other room event.
+  if (channel.type === 'category') {
+    io.to(channel.server_id).emit(event, payload);
+    return;
   }
+  const ctx = await loadGuildPermissionContext(channel.server_id);
+  if (!ctx) return;
+  const hidden = [];
+  for (const m of ctx.members) {
+    if (!ctx.can(m.user_id, channel.id, 'VIEW_CHANNEL')) hidden.push(`user-${m.user_id}`);
+  }
+  // Identified sockets that are not (or no longer) members never pass the
+  // guild room's join check / revalidateRooms, so members are the whole set.
+  io.to(channel.server_id).except(hidden).emit(event, payload);
 }
 
 function clearTyping(io, channelId, userId) {
@@ -742,6 +1008,7 @@ function clearTyping(io, channelId, userId) {
   if (!channelTyping?.has(userId)) return;
   clearTimeout(channelTyping.get(userId));
   channelTyping.delete(userId);
+  typingSentAt.delete(`${channelId}:${userId}`);
   if (channelTyping.size === 0) typing.delete(channelId);
   io.to(channelId).emit('typing_stop', { channelId, userId });
 }
@@ -821,17 +1088,16 @@ export function fanOutMessage(io, message) {
   };
   // createMessage already worked out who may see this channel; reusing that
   // list keeps a private channel's activity out of the guild-wide room.
+  // One broadcast to the union of the audience's user rooms (one adapter
+  // publish, one XADD with Redis) rather than one emit per member.
+  const toUsers = (ids) => {
+    if (ids.length) io.to(ids.map((id) => `user-${id}`)).except(message.channel_id).emit('channel_activity', activity);
+  };
   if (Array.isArray(message.audience)) {
-    for (const userId of message.audience) {
-      io.to(`user-${userId}`).except(message.channel_id).emit('channel_activity', activity);
-    }
+    toUsers(message.audience);
   } else if (!message.server_id) {
     allQuery(`SELECT user_id FROM channel_recipients WHERE channel_id = ?`, [message.channel_id])
-      .then((rows) => {
-        for (const { user_id } of rows) {
-          io.to(`user-${user_id}`).except(message.channel_id).emit('channel_activity', activity);
-        }
-      })
+      .then((rows) => toUsers(rows.map((r) => r.user_id)))
       .catch(() => {});
   }
   pushNotifications(io, message);
@@ -881,6 +1147,9 @@ export async function sweepAfk(io) {
       // No record means we have not observed this user since the process
       // started (a voice_state that survived a restart). Start their clock
       // now rather than moving them on the first sweep.
+      // Speaking timestamps are per process: on a cluster, only the instance
+      // holding the user's socket can judge them idle.
+      if (clustered() && !socketsByUser.has(state.user_id)) continue;
       if (!lastSpokeAt.has(state.user_id)) { lastSpokeAt.set(state.user_id, Date.now()); continue; }
       if (Date.now() - lastSpokeAt.get(state.user_id) < timeoutMs) continue;
 
@@ -908,10 +1177,34 @@ export async function sweepAfk(io) {
 }
 
 export async function resetVolatileState() {
-  await runQuery(`DELETE FROM voice_states`);
-  await runQuery(`UPDATE users SET status = 'offline' WHERE status != 'invisible'`);
+  // On a cluster (REDIS_URL) the other instances' calls and presence are
+  // live: one instance booting must not wipe them. Stale rows left by a
+  // crashed instance are reaped by the TTL/voice sweep in startClusterTimers.
+  if (!clustered()) {
+    await runQuery(`DELETE FROM voice_states`);
+    await runQuery(`UPDATE users SET status = 'offline' WHERE status != 'invisible'`);
+  }
   // In-memory maps outlive a restart in tests, where the module is not reloaded.
   typing.clear();
+  typingSentAt.clear();
   soundCooldown.clear();
   lastSpokeAt.clear();
+}
+
+export { holdsLease } from './lib/redis.js';
+
+/**
+ * Gateway mode for /api/health and /api/ready. Deliberately terse (no hosts,
+ * no error text): /api/health is public.
+ */
+export function realtimeHealth() {
+  const redis = redisHealth();
+  return {
+    mode: redis.enabled ? 'cluster' : 'single',
+    redis: redis.enabled ? (redis.connected ? 'connected' : 'disconnected') : 'disabled',
+    recovery_window_ms: RECOVERY_WINDOW_MS,
+    // A cluster member that lost Redis cannot fan out to the other
+    // instances; it should leave the load-balancer pool until it is back.
+    ready: !redis.enabled || redis.connected
+  };
 }

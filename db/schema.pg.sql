@@ -414,6 +414,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_author  ON messages(user_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_reply   ON messages(reply_to_id);
 CREATE INDEX IF NOT EXISTS idx_messages_pinned  ON messages(channel_id) WHERE pinned = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_nonce ON messages(channel_id, user_id, nonce) WHERE nonce IS NOT NULL;
+-- realtime-scale (v34): catch-up sync counts edits/deletions per channel since a cursor.
+CREATE INDEX IF NOT EXISTS idx_messages_edited  ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL;
 
 -- Message search: a trigram GIN index on the content itself.
 --

@@ -14,7 +14,7 @@ import { getFileType } from '../lib/mediaProbe.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { computeBasePermissions, ALL_PERMISSIONS, has } from '../lib/permissions.js';
 import * as automod from './automod.js';
-import { assertChannelAccess, canInChannel } from './access.js';
+import { assertChannelAccess, canInChannel, readableChannelIds } from './access.js';
 import { validatePollInput, writePollRows, attachPolls } from './polls.js';
 import { parseSearchQuery, hasFilters, periodBounds } from '../lib/searchQuery.js';
 
@@ -987,7 +987,7 @@ const escapeLike = (text) => text.replace(/[\\%_]/g, '\\$&');
 /** Full-text search, optionally scoped to a channel or a server. */
 export async function searchMessages({
   query, channelId = null, serverId = null, authorId = null, hasAttachment = false,
-  limit = 25, viewerId = null
+  limit = 25, viewerId = null, before = null
 }) {
   // `from:`, `in:`, `has:` and the date operators are part of the query string
   // itself, exactly as they are on Discord.
@@ -1005,6 +1005,22 @@ export async function searchMessages({
   if (serverId)  { where.push('m.server_id = ?');  filterParams.push(serverId); }
   if (authorId)  { where.push('m.user_id = ?');    filterParams.push(authorId); }
   if (hasAttachment) where.push('EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)');
+  // Cursor pagination: the next page is everything older than the last id of
+  // this one. Ids are snowflakes, so this is stable under concurrent inserts.
+  if (before) { where.push('m.id < ?'); filterParams.push(String(before)); }
+
+  // Permissions are applied *inside* the query, before LIMIT: the viewer's
+  // readable channels are computed in bulk and the rows are restricted to
+  // them. Filtering after LIMIT (as this used to) returned short or empty
+  // pages whenever the newest matches sat in channels the viewer cannot see,
+  // and made "load more" impossible to implement correctly.
+  if (viewerId) {
+    let readable = await readableChannelIds(viewerId, { serverId });
+    if (channelId) readable = readable.filter((id) => id === channelId);
+    if (!readable.length) return [];
+    where.push(`m.channel_id IN (${readable.map(() => '?').join(',')})`);
+    filterParams.push(...readable);
+  }
 
   // --- operator filters ------------------------------------------------------
   // Names are resolved to ids here rather than in the parser, because a name
@@ -1137,21 +1153,6 @@ export async function searchMessages({
         ORDER BY m.id DESC LIMIT ?`,
       [`%${escapeLike(term)}%`, ...filterParams, cap]
     );
-  }
-  // Results are filtered to channels the viewer can actually see — a search
-  // must never leak content from a private channel or someone else's DM.
-  if (viewerId) {
-    const verdicts = new Map();
-    const visible = [];
-    for (const row of rows) {
-      if (!verdicts.has(row.channel_id)) {
-        verdicts.set(row.channel_id, await canInChannel({
-          channelId: row.channel_id, userId: viewerId, permission: 'READ_MESSAGE_HISTORY'
-        }));
-      }
-      if (verdicts.get(row.channel_id)) visible.push(row);
-    }
-    rows = visible;
   }
   return hydrate(rows, viewerId);
 }
