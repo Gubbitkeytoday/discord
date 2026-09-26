@@ -4,6 +4,17 @@ Everything needed to run this in production, in the order you need it. If you
 only read one section, read [Before you go live](#5-before-you-go-live) — the app
 refuses to start on most misconfigurations, but not all of them are fatal.
 
+**Pick your path:**
+
+| You have | Go to |
+| --- | --- |
+| A spare PC / VM on your LAN, just trying it out | [2a. 5-minute LAN quickstart](#2a-5-minute-lan-quickstart) |
+| A VPS or server with a domain, ports 80/443 free | [2. Docker Compose](#2-quick-start-with-docker-compose) |
+| A Synology / QNAP NAS (ports 80/443 already taken) | [2b. NAS (Synology / QNAP)](#2b-nas-synology--qnap) |
+| Node.js and your own reverse proxy | [3. Without Docker](#3-without-docker) |
+
+Every environment variable is listed in [16. Environment reference](#16-environment-reference).
+
 ---
 
 ## 1. What you are deploying
@@ -18,9 +29,17 @@ installs). Both run the same code and the same migrations; see
 [PostgreSQL](#11-postgresql) for setup, migrating an existing SQLite database,
 backups and tuning.
 
-Either way the process keeps rate limits, presence, typing indicators and
-Socket.IO rooms **in memory**, so run **one app instance** — scale it
-vertically. (See [Scaling](#8-scaling).)
+By default the process keeps rate limits, presence, typing indicators and
+Socket.IO rooms **in memory**, so one app instance serves everyone — scale it
+vertically first. With PostgreSQL plus Redis/Valkey (`REDIS_URL`, the compose
+`scale` profile) several instances share that state; see
+[Running several instances](#running-several-instances).
+
+Optional pieces, each off until configured: a TURN relay (coturn, `turn`
+profile), a LiveKit SFU for large voice/video rooms (`livekit`), self-hosted
+translation (LibreTranslate, `translate`), Web Push notifications (VAPID keys),
+passkeys (WebAuthn), and a Grafana/Tempo/Loki/Prometheus stack
+(`observability`).
 
 | Piece | Where it lives |
 | --- | --- |
@@ -40,6 +59,10 @@ itself.
 
 ```bash
 cp .env.example .env
+npm run secrets -- --write     # fills STORAGE_URL_SECRET, POSTGRES_PASSWORD, ADMIN_TOKEN,
+                               # TURN/LiveKit secrets and VAPID keys; never overwrites a set value
+                               # (no Node on the host? `npm run secrets` prints them for pasting,
+                               #  or: openssl rand -base64 32 / openssl rand -hex 24)
 ```
 
 Then edit `.env` — at minimum:
@@ -48,13 +71,16 @@ Then edit `.env` — at minimum:
 NODE_ENV=production
 PUBLIC_URL=https://chat.example.com
 DOMAIN=chat.example.com
-STORAGE_URL_SECRET=<openssl rand -base64 32>
-ADMIN_TOKEN=<openssl rand -base64 32>
 ALLOW_DEV_IDENTITY=0
 SECURE_COOKIES=1
 CORS_ORIGIN=
-POSTGRES_PASSWORD=<openssl rand -hex 24>   # URL-safe: it is spliced into DATABASE_URL
+# and, from npm run secrets: STORAGE_URL_SECRET, ADMIN_TOKEN, POSTGRES_PASSWORD
 ```
+
+`.env.example` ships `POSTGRES_PASSWORD=` **empty on purpose**: `docker compose`
+refuses to start ("set POSTGRES_PASSWORD in .env") until you set one, so the
+database never comes up with a published example password. Use URL-safe
+characters (it is spliced into `DATABASE_URL`).
 
 `POSTGRES_PASSWORD` is fixed into the database volume on the very first start;
 changing it later means `ALTER ROLE antigravity PASSWORD '…'` inside Postgres
@@ -68,11 +94,13 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-Optional demo data (six accounts, three servers, sample messages — password
-`antigravity123`):
+Optional demo data (five accounts, one of them a bot, three servers, sample
+messages — password `antigravity123`). Production refuses to seed unless you ask
+for it explicitly, because anyone can then sign in as the seeded owner; only do
+this on a throwaway instance:
 
 ```bash
-docker compose exec app node db/seed.js
+docker compose exec -e SEED_DATABASE=1 app node db/seed.js
 ```
 
 Point your DNS A/AAAA record at the host before the first start, or Caddy cannot
@@ -81,6 +109,117 @@ complete the ACME challenge.
 **HTTPS is not optional for voice.** Browsers expose the microphone and camera
 only on `https://` origins (and `localhost`). Served over plain `http://` from a
 LAN IP, text chat works but joining voice shows "Voice and video need HTTPS".
+
+**Image size.** The runtime image carries production dependencies only. The
+client-side packages (React, Tailwind, Vite and its esbuild/rollup binaries,
+lucide icons, fonts, livekit-client, the WebAuthn browser helper) are
+`devDependencies`: the build stage installs them to run `npm run build`, then
+`npm prune --omit=dev` drops them — about 110 MB less `node_modules`, and no
+Go-built esbuild binary for scanners to flag. `npm ci --omit=dev && npm start`
+therefore works on a bare host too, as long as `dist/` was built somewhere with
+the dev dependencies (CI checks both).
+
+---
+
+## 2a. 5-minute LAN quickstart
+
+For a home server or a spare PC, reachable only inside your network. Plain HTTP,
+so **no voice/video** (browsers require HTTPS for the microphone) and **never
+expose it to the internet** like this.
+
+```bash
+git clone https://github.com/Gubbitkeytoday/discord.git antigravity && cd antigravity
+npm ci && npm run build
+cat > .env <<'EOF'
+NODE_ENV=production
+SERVE_STATIC=1
+PUBLIC_URL=http://192.168.1.20:3001      # this machine's LAN address
+SECURE_COOKIES=0                          # plain http: a Secure cookie would be dropped
+ALLOW_DEV_IDENTITY=0
+CORS_ORIGIN=
+EOF
+npm run secrets | grep STORAGE_URL_SECRET >> .env
+npm start
+```
+
+Open `http://192.168.1.20:3001` from any device on the LAN and register — the
+first account is an ordinary user; create a server and share its invite link.
+SQLite is used (no `DATABASE_URL`), so the database is one file (`discord.db`)
+and `npm run backup` backs it up.
+
+Why `SECURE_COOKIES=0`: production defaults it on, and browsers silently drop
+`Secure` cookies on `http://` (except `localhost`). Sign-up then *looks*
+successful and every reload lands back on the login screen. The server prints a
+red **CONFIGURATION PROBLEM** box at boot when `SECURE_COOKIES` is on and
+`PUBLIC_URL` is plain http on a non-localhost address — if you see it, this is
+why. Once you put TLS in front, set `SECURE_COOKIES=1` and an `https://`
+`PUBLIC_URL`.
+
+With Docker instead of Node on the host: follow section 2 with the `no-proxy`
+profile and `APP_BIND=0.0.0.0` (next section), plus the same `SECURE_COOKIES=0`
+and `PUBLIC_URL`.
+
+---
+
+## 2b. NAS (Synology / QNAP)
+
+DSM (and QTS) already run a web server on ports 80 and 443, so the default
+compose stack's Caddy fails with "address already in use". Two ways around it:
+
+**A. Let the NAS terminate TLS (recommended on DSM).** Run the stack without
+Caddy and point DSM's reverse proxy at the app.
+
+1. Install **Container Manager** (DSM 7.2) and copy this repository to a shared
+   folder, e.g. `/volume1/docker/antigravity` (File Station, or `git clone` over
+   SSH).
+2. In that folder: `cp .env.example .env`, set the values from section 2, then
+   also:
+   ```bash
+   PUBLIC_URL=https://chat.example.synology.me
+   TRUST_PROXY=2          # DSM's proxy + the app-direct forwarder
+   APP_PORT=3001          # published on 127.0.0.1 only
+   ```
+3. Start it over SSH (`sudo docker compose --profile no-proxy up -d app-direct`)
+   or as a Container Manager **Project** from this folder with the same command.
+   Naming `app-direct` starts the app and PostgreSQL but **not** Caddy.
+4. **DDNS:** Control Panel › External Access › DDNS › Add → Synology, pick a
+   hostname such as `chat-example.synology.me` (any DDNS provider works).
+5. **Certificate:** Control Panel › Security › Certificate › Add → Let's
+   Encrypt for that hostname.
+6. **Reverse proxy:** Control Panel › Login Portal › Advanced › Reverse Proxy ›
+   Create. Source: HTTPS, the hostname, port 443. Destination: HTTP,
+   `localhost`, port `3001`. Then **Custom Header › Create › WebSocket** — it
+   adds `Upgrade` and `Connection`; without them realtime falls back to slow
+   polling. Under Advanced Settings raise the proxy timeouts to 300 s so large
+   uploads are not cut off.
+7. **Router:** forward TCP 443 (and 80, for Let's Encrypt renewals) to the NAS.
+   Nothing else is needed for text chat.
+8. Assign the certificate to the reverse-proxy hostname (Certificate ›
+   Settings).
+
+QNAP: the same with QTS's **Web Server › Reverse Proxy** (or Container Station
+plus nginx Proxy Manager). Enable WebSocket support on the rule.
+
+**B. Keep Caddy on other ports.** Set `HTTP_PORT=8080` and `HTTPS_PORT=8443` in
+`.env`, run `docker compose up -d`, and forward the router's **80 → 8080** and
+**443 → 8443** (TCP, plus UDP 443 → 8443 for HTTP/3). Caddy gets its own Let's
+Encrypt certificate for `DOMAIN`, so `DOMAIN` must resolve to your public IP
+(DDNS as in step 4).
+
+**Voice on a NAS:** add the `turn` profile and, because the NAS sits behind the
+router's NAT, set `TURN_EXTERNAL_IP=<public-ip>/<nas-lan-ip>` and forward
+**3478/udp+tcp** and **49160-49200/udp** to the NAS. See
+[TURN](#4-voice-and-video-turn).
+
+**Backups on a NAS:** Hyper Backup cannot see named Docker volumes (they live
+under `/volume1/@docker`). Run `scripts/ops/docker-backup.sh backup
+/volume1/backup/antigravity` from a scheduled task (Control Panel › Task
+Scheduler › User-defined script, as root) and let Hyper Backup copy that folder
+off the box. See [Backups](#backups).
+
+**Build time:** there is no prebuilt image yet, so the NAS builds it (installs
+dependencies and runs Vite): several minutes on a DS920+, and 2 GB+ of free RAM
+helps. Building on a PC and `docker save | ssh nas docker load` works too.
 
 ---
 
@@ -152,18 +291,27 @@ directly. Plan for it before launch.
 
 ```bash
 # .env
-TURN_SECRET=<openssl rand -hex 32>
+TURN_SECRET=<npm run secrets>
 TURN_URLS=turn:chat.example.com:3478?transport=udp,turn:chat.example.com:3478?transport=tcp
-# Only on cloud VMs with 1:1 NAT (AWS, GCP, Azure, Oracle): public[/private]
-TURN_EXTERNAL_IP=203.0.113.10/10.0.0.5
+STUN_URLS=stun:chat.example.com:3478     # coturn answers STUN too; unset = Google's STUN
+# Behind ANY NAT — a cloud VM with 1:1 NAT (AWS, GCP, Azure, Oracle) *or* a
+# home/office router in front of a NAS/PC: public[/private]
+TURN_EXTERNAL_IP=203.0.113.10/192.168.1.20
 
 docker compose --profile turn up -d
 ```
 
-Open in the host firewall **and** the cloud security group: `3478/udp`,
-`3478/tcp`, and the relay range `49160-49200/udp` (≈ 20 concurrent relayed
-users; widen `--min-port/--max-port` in the compose file for more). The coturn
-container uses host networking, so these are the host's ports.
+Open in the host firewall **and** the cloud security group — or forward on
+your router, when the host is behind one: `3478/udp`, `3478/tcp`, and the
+relay range `49160-49200/udp` (≈ 20 concurrent relayed users; widen
+`--min-port/--max-port` in the compose file for more). The coturn container
+uses host networking, so these are the host's ports. The bundled coturn has no
+TLS certificate, so it listens for `turn:` only (TLS and DTLS are switched off);
+do not list `turns:` URLs unless you front it with your own certificate.
+
+Without `STUN_URLS` the client uses Google's public STUN servers, which means
+every caller's IP address is sent to Google. Point it at your coturn to keep
+calls entirely on your infrastructure.
 
 `TURN_SECRET` is the coturn *shared secret* (TURN REST API). The app never hands
 it to browsers — it mints a credential per user that expires, so a leaked
@@ -178,17 +326,12 @@ On every voice join the client calls `GET /api/voice/ice-servers` and expects:
   "iceTransportPolicy": "all" }
 ```
 
-If that endpoint is missing or fails, the client falls back to the build-time
-`VITE_ICE_SERVERS` (a JSON array, baked in by `npm run build`; static TURN
-credentials only, and visible to anyone who loads the page), and then to public
-STUN only.
-
-> **Server support.** `/api/voice/ice-servers` has to be implemented in
-> `server.js` (a ~25-line route: read `STUN_URLS`, `TURN_URLS`, `TURN_SECRET`,
-> `TURN_TTL_SECONDS`, `ICE_TRANSPORT_POLICY`; mint
-> `username = "<unix-expiry>:<userId>"`,
-> `credential = base64(HMAC-SHA1(TURN_SECRET, username))`). Until it exists,
-> only the `VITE_ICE_SERVERS` fallback can carry TURN.
+The server implements it (`server.js`, `GET /api/voice/ice-servers`): it reads
+`STUN_URLS`, `TURN_URLS`, `TURN_SECRET`, `TURN_TTL_SECONDS` and
+`ICE_TRANSPORT_POLICY`, and mints a per-user TURN REST credential
+(`username = "<unix-expiry>:<userId>"`,
+`credential = base64(HMAC-SHA1(TURN_SECRET, username))`). If the request fails
+the client falls back to public STUN only.
 
 ### Checking it works
 
@@ -358,6 +501,12 @@ is true, because each one is a real vulnerability rather than a style preference
 It **warns** but starts on these — check them yourself:
 
 - `SECURE_COOKIES=0` → session cookies sent over plain HTTP
+- `SECURE_COOKIES` on (the production default) while `PUBLIC_URL` is plain
+  `http://` on a non-localhost address → printed as a red **CONFIGURATION
+  PROBLEM** box: browsers drop the Secure session cookie, so every sign-in is
+  forgotten on reload. Put TLS in front, or set `SECURE_COOKIES=0` for a LAN test
+- `PUBLIC_URL` unset → assumed `http://localhost:<port>`; same cookie problem
+  when people open the server by IP
 - `PUBLIC_URL` not `https://`
 - `ADMIN_TOKEN` unset → maintenance and report-triage endpoints stay disabled
 - `METRICS_TOKEN` unset → `/metrics` is not served at all in production
@@ -446,26 +595,59 @@ npm run backup:restore backups/discord-20260801-040845.db -- --force
 The previous database is renamed aside rather than deleted. Migrations run
 automatically on the next connect.
 
-**In Docker with PostgreSQL** (the compose default): the app image is
-distroless and ships no `pg_dump`, so dump the database from the `postgres`
-container, which always has tools matching the server, and copy the uploads
-out of the app container (`docker compose cp` works without a shell):
+**In Docker** (either engine), use `scripts/ops/docker-backup.sh` from the
+folder holding `docker-compose.yml`. It needs only `docker compose` and `sh` on
+the host:
 
 ```bash
-mkdir -p backups
+scripts/ops/docker-backup.sh backup ./backups            # → ./backups/<stamp>/{discord.dump|discord.db, uploads/}
+scripts/ops/docker-backup.sh verify ./backups/<stamp>    # reads the whole archive
+scripts/ops/docker-backup.sh drill ./backups             # backup + restore into a scratch DB + compare counts
+scripts/ops/docker-backup.sh restore ./backups/<stamp>   # stops app (and app-2), restores, starts it
+# copy ./backups off the host — a backup on the same disk is not a backup
+```
+
+With PostgreSQL (the compose default) it runs `pg_dump --format=custom` **inside
+the `postgres` container**: the app image is distroless and ships no `pg_dump`,
+while the database container always has tools matching the server. The dump
+streams to the host over `docker compose exec -T`. Uploads are copied out with
+`docker compose cp`, which reads the container filesystem directly (no shell
+needed, works on a stopped container). Restore runs `pg_restore --clean
+--if-exists --single-transaction` (a failed restore changes nothing) and copies
+the uploads back as root with the image's own `node`, then hands them to the
+app user (uid 1000), which `docker cp` would not do.
+
+The same by hand, if you prefer:
+
+```bash
 docker compose exec -T postgres pg_dump -U antigravity -d antigravity --format=custom \
   > backups/discord-$(date +%Y%m%d-%H%M%S).dump
 docker compose cp app:/data/uploads ./backups/uploads-$(date +%F)
-# copy them off the host — a backup on the same disk is not a backup
+# restore:
+docker compose stop app
+docker compose exec -T postgres pg_restore -U antigravity -d antigravity \
+  --clean --if-exists --no-owner --single-transaction < backups/<file>.dump
+docker compose start app
 ```
 
-Restore: `docker compose stop app` (and `app-2` with the `scale` profile), then
-`docker compose exec -T postgres pg_restore -U antigravity -d antigravity --clean --if-exists --single-transaction < backups/<file>.dump`,
-then `docker compose start app`.
+**Restore drill.** An untested backup is not a backup. `drill` restores the new
+dump into a throwaway database next to the live one (`createdb drill_<time>`),
+compares user/message counts and the schema version with the live database, and
+drops it again; the live data is never touched. Run it after changing anything
+about backups, and monthly from cron. On this branch the drill was exercised
+end to end against PostgreSQL 16 (backup → verify → drill → wipe messages →
+restore → counts back).
 
-**In Docker with SQLite** (`DATABASE_URL=` empty), snapshots go to the
-`app-backups` volume (`BACKUP_DIR=/backups`), separate from the data volume, so
-recreating the container keeps them:
+Nightly, from the host's cron:
+
+```bash
+15 3 * * * cd /srv/antigravity && scripts/ops/docker-backup.sh backup /srv/backups >> /var/log/antigravity-backup.log 2>&1
+```
+
+**In Docker with SQLite** (`DATABASE_URL=` empty), `docker-backup.sh` detects
+it and snapshots with `VACUUM INTO` inside the app container. Done by hand,
+snapshots go to the `app-backups` volume (`BACKUP_DIR=/backups`), separate from
+the data volume, so recreating the container keeps them:
 
 ```bash
 docker compose exec app node scripts/backup.mjs create --files
@@ -790,6 +972,24 @@ appears to come from the proxy.
 
 **Refusing to start** — read the list it prints; each line names the variable and
 what to set. This is `lib/config.js` doing its job.
+
+**Sign-up works, but every reload goes back to the login screen** — the session
+cookie is `Secure` and the page is plain `http://` (not localhost), so the
+browser drops it. The boot log shows a red CONFIGURATION PROBLEM box. Serve it
+over HTTPS, or set `SECURE_COOKIES=0` for a LAN-only test.
+
+**`docker compose up` says "set POSTGRES_PASSWORD in .env"** — intended: the
+example file leaves it empty. `npm run secrets -- --write` fills it (keep it: it
+is fixed into the database volume on the first start).
+
+**Caddy: "address already in use" on 80/443** — something else (a NAS's own web
+server) owns the ports. Use `HTTP_PORT`/`HTTPS_PORT` or the `no-proxy` profile:
+[NAS (Synology / QNAP)](#2b-nas-synology--qnap).
+
+**Requests hang when Redis/Valkey stalls** — they should not: every Redis
+command times out after `REDIS_COMMAND_TIMEOUT_MS` (500 ms), after which rate
+limits and presence use per-instance memory until Redis answers a PING again.
+`/api/health` shows `redis.stalled: true` meanwhile.
 
 **Uploads rejected at ~1 MB** — that is nginx's `client_max_body_size` default,
 not the app.
@@ -1214,7 +1414,9 @@ notification** checklist.
 ### Container hardening
 
 The image is `gcr.io/distroless/nodejs24-debian13:nonroot`: no shell, no
-package manager, non-root (uid 1000), `tini` as PID 1, a `HEALTHCHECK` on `/api/live`,
+package manager, non-root (uid 1000), `tini` as PID 1, production
+`node_modules` only (client packages are devDependencies, pruned after the
+build), a `HEALTHCHECK` on `/api/live`,
 OCI labels (`org.opencontainers.image.revision` = git sha). It runs with a
 read-only root filesystem — the app writes only to `/data` and `/backups`:
 
@@ -1233,7 +1435,8 @@ Optional ffmpeg for the media pipeline: `docker build --build-arg WITH_FFMPEG=1 
 
 There is no shell, so debug with `docker compose exec app node -e "…"` or
 `docker debug` rather than `sh`. CI publishes an SPDX SBOM for every build,
-scans the image (grype; fails on fixable critical CVEs) and, when the
+scans the image (grype; fails on fixable critical CVEs and prints the findings
+as a table in the job log and summary) and, when the
 `REGISTRY_IMAGE` repository variable is set, pushes on `main` and signs the
 image keylessly with cosign. Verify before deploying:
 
@@ -1272,6 +1475,13 @@ cosign verify <registry>/<image>@<digest> \
   and, if `REDIS_URL` is set, on Redis. `/api/health` and `/metrics` are
   backward compatible.
 
+- **This polish release:** client-only packages moved to `devDependencies`.
+  Bare-metal installs that ran `npm ci --omit=dev` *and then* `npm run build`
+  must build first (or build in CI) — the runtime needs nothing from them. The
+  `.env.example` now leaves `POSTGRES_PASSWORD` empty and `LOG_LEVEL` unset;
+  an existing `.env` is unaffected. `TRUST_PROXY` in compose now honours `.env`
+  (default still `1`).
+
 ### Any release
 
 1. Read the release notes for schema changes; **back up first** (migrations are forward-only).
@@ -1280,3 +1490,318 @@ cosign verify <registry>/<image>@<digest> \
 4. Roll back by redeploying the previous image; restore the backup only if a
    migration ran and the old code cannot read the new schema
    (`ops/runbooks/restore-from-backup.md`).
+
+---
+
+## 16. Environment reference
+
+Generated from `.env.example` (sections and comments) by
+`node scripts/ops/env-check.mjs --write`; CI (`npm run env:check`) fails when a
+variable the code reads is missing from `.env.example` or this table is stale.
+"Example / default" is the value `.env.example` shows (a commented-out line is
+an example, not a default).
+
+<!-- env-reference:start -->
+<!-- Generated from .env.example by `node scripts/ops/env-check.mjs --write`. Edit .env.example, not this table. -->
+
+
+**runtime**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `NODE_ENV` | `development` |  |
+| `PORT` | `3001` | ↑ same group as above |
+| `HOST` | `0.0.0.0` | ↑ same group as above |
+| `PUBLIC_URL` | `http://localhost:5173` | Absolute, externally visible URL. Used in invite links, e-mails and the CSP. Production: your real https:// origin. |
+| `TRUST_PROXY` | `loopback` | How many reverse proxies sit in front of this process. Behind exactly one (nginx, Caddy, a cloud load balancer) use 1. Trusting more hops than you actually have lets a client forge its own IP and escape rate limiting. 'loopback' is the development default; production defaults to 1. Compose `no-proxy` profile behind a NAS reverse proxy: 2. |
+| `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated allow-list. Leave EMPTY in production when this process also serves the SPA — the client is then same-origin and needs no CORS at all. '*' is refused in production. |
+
+**serving the built client**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `SERVE_STATIC` | `0` | On in production: one process, one port, no separate web server. In development the Vite dev server handles this instead. |
+| `STATIC_DIR` | `dist` | ↑ same group as above |
+
+**database**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `DB_PATH` | `./discord.db` | Two engines, one code path: * DATABASE_URL unset → SQLite file at DB_PATH (zero-config, one process, fine for small communities) * DATABASE_URL=postgres://… → PostgreSQL 13+ (recommended for production: concurrent writers, pg_dump backups, several app instances if you add a shared socket adapter — see DEPLOYMENT.md) The schema is created and migrated automatically on boot either way. Moving an existing SQLite database over: npm run db:migrate-to-pg. |
+| `DATABASE_URL` | `postgres://antigravity:change-me@localhost:5432/antigravity` | ↑ same group as above |
+| `DATABASE_SSL` | `verify-full` | TLS to the database. disable \| require (encrypt, don't verify) \| verify-full (encrypt and verify; add DATABASE_SSL_CA for a private CA). An ?sslmode= in DATABASE_URL works too; this variable wins when both are set. |
+| `DATABASE_SSL_CA` | `/etc/ssl/certs/rds-ca.pem` | ↑ same group as above |
+| `DB_POOL_MAX` | `10` | Connection pool, per app process. Keep DB_POOL_MAX × instances below the server's max_connections (minus superuser_reserved_connections). |
+| `DB_POOL_MIN` | `0` | ↑ same group as above |
+| `DB_POOL_IDLE_MS` | `30000` | ↑ same group as above |
+| `DB_CONNECT_TIMEOUT_MS` | `10000` | ↑ same group as above |
+| `DB_STATEMENT_TIMEOUT_MS` | `30000` | Server-side limits applied to every connection (milliseconds). |
+| `DB_LOCK_TIMEOUT_MS` | `10000` | ↑ same group as above |
+| `DB_IDLE_IN_TX_TIMEOUT_MS` | `60000` | ↑ same group as above |
+| `DB_TX_ISOLATION` | `serializable` | Transactions run SERIALIZABLE and are retried on serialization failures / deadlocks this many times. Leave the isolation alone unless you know why. |
+| `DB_TX_RETRIES` | `8` | ↑ same group as above |
+| `DB_APPLICATION_NAME` | `antigravity-discord` | ↑ same group as above |
+| `SQL_DEBUG` | `1 (SQLite only: verbose driver stack traces)` |  |
+
+**file storage**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `STORAGE_ROOT` | `./public/uploads` |  |
+| `STORAGE_PUBLIC_BASE` | `/uploads` | ↑ same group as above |
+| `STORAGE_URL_SECRET` | `dev-insecure-storage-secret` | Signs private-file URLs. MUST be replaced in production — with the value below, anyone who has read this repository can forge a link to any file. openssl rand -base64 32 |
+| `ADMIN_TOKEN` |  | Required to enable /api/files/maintenance/* (GC, integrity check) and report triage. Generate the same way as above. |
+
+**authentication**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `ALLOW_DEV_IDENTITY` | `1` | The x-user-id shortcut: any request can claim to be any user. Development only — production refuses to start unless this is 0. |
+| `SECURE_COOKIES` | `0` | Adds the Secure flag to session cookies. Default: on in production. Browsers DROP Secure cookies on plain http:// (except localhost), so with this on, opening the server as http://192.168.x.x signs everyone straight back out (the server prints a red CONFIGURATION PROBLEM box at boot when PUBLIC_URL is http:// and not localhost). Testing on a LAN without TLS: SECURE_COOKIES=0 and PUBLIC_URL=http://<lan-ip>:3001. Never run it that way on the internet. |
+| `SESSION_TTL_DAYS` | `30` | Session lifetime (absolute, from sign-in) and idle limit, in days. |
+| `SESSION_IDLE_DAYS` | `14` | ↑ same group as above |
+
+**mail (password reset, e-mail verification)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `MAIL_TRANSPORT` | `console` | console (default, logs only) \| file \| smtp Production with `console` (or unset): password reset and e-mail verification are switched off (503 MAIL_NOT_CONFIGURED) — configure SMTP to enable them. Reset/verification tokens are only ever echoed in API responses in development with the console transport. |
+| `MAIL_FROM` | `Antigravity Discord <no-reply@antigravity.local>` | ↑ same group as above |
+| `MAIL_FILE` | `mail.log` | ↑ same group as above |
+| `SMTP_HOST` | `smtp.example.com` | ↑ same group as above |
+| `SMTP_PORT` | `587` | ↑ same group as above |
+| `SMTP_USER` |  | ↑ same group as above |
+| `SMTP_PASS` |  | ↑ same group as above |
+| `SMTP_EHLO` | `chat.example.com` | Name sent in EHLO (some relays reject "localhost"). |
+
+**object storage**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `S3_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` | Leave unset to keep files on local disk. Any S3-compatible endpoint works (AWS S3, Cloudflare R2, Backblaze B2, MinIO) — the signer is SigV4. |
+| `S3_BUCKET` | `antigravity-media` | ↑ same group as above |
+| `S3_REGION` | `auto` | ↑ same group as above |
+| `S3_ACCESS_KEY_ID` |  | ↑ same group as above |
+| `S3_SECRET_ACCESS_KEY` |  | ↑ same group as above |
+| `S3_SESSION_TOKEN` |  | Temporary credentials (STS) only. |
+| `S3_FORCE_PATH_STYLE` | `1` | ↑ same group as above |
+| `S3_DIRECT_UPLOAD` | `post` | Browser → bucket uploads (POST /api/media/uploads). post = presigned POST policy (S3, MinIO, B2); put = presigned PUT (Cloudflare R2 has no POST Object — picked automatically for *.r2.cloudflarestorage.com); off = disabled. The bucket needs CORS allowing POST/PUT from your origin, and the CSP connect-src must allow the bucket origin (see DEPLOYMENT.md §7). |
+| `STORAGE_PUBLIC_BASE` | `https://cdn.example.com` | Serve public objects straight from a CDN / public bucket URL. Unset, public files are redirected to short-lived presigned URLs via /uploads/<key>. |
+
+**media pipeline**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `MEDIA_WIDTHS` | `160,480,960,1920` | Images: EXIF/GPS stripped, WebP renditions at MEDIA_WIDTHS, AVIF in the background (effort 2: ~1.4 s for a 1920px rendition on one core; sharp's default effort 4 is ~9 s). Videos: poster + probe via system ffmpeg. |
+| `MEDIA_AVIF` | `1` | ↑ same group as above |
+| `MEDIA_AVIF_EFFORT` | `2` | ↑ same group as above |
+| `MEDIA_AVIF_QUALITY` | `50` | ↑ same group as above |
+| `MEDIA_WEBP_QUALITY` | `78` | ↑ same group as above |
+| `MEDIA_MAX_PIXELS` | `100000000` | Decompression-bomb limits, checked from the header before any decode. |
+| `MEDIA_MAX_DIMENSION` | `16384` | ↑ same group as above |
+| `MEDIA_MAX_ANIMATED_PIXELS` | `200000000` | ↑ same group as above |
+| `MEDIA_SYNC_BUDGET_MS` | `0` | How long a multipart upload waits for its renditions before answering 'processing' (0 = answer at once; dimensions + thumbhash are always included). |
+| `MEDIA_JOB_CONCURRENCY` | `2` | Background jobs processed at once by this process. |
+| `MEDIA_FFMPEG` | `1` | ffmpeg/ffprobe for video posters, dimensions and duration (optional). |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | ↑ same group as above |
+| `FFPROBE_PATH` | `/usr/bin/ffprobe` | ↑ same group as above |
+| `STORAGE_QUOTA_BYTES` |  | Per-user storage quota in bytes for everyone (0 = unlimited). Unset, the per-user users.storage_quota column (default 5 GiB) applies. |
+
+**voice**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `VOICE_MESH_LIMIT` | `8` | Full-mesh participant cap. Beyond this an SFU is required: every extra peer costs each participant another upstream, so the mesh stops scaling. |
+
+**internationalisation**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `DEFAULT_LOCALE` | `en` | The client picks the UI language from the visitor's browser languages and remembers an explicit choice; it falls back to English. 32 locales ship (Discord's set: en-US, en-GB, th, ja, zh-CN, zh-TW, ko, de, fr, es-ES, es-419, pt-BR, …; full list in src/i18n/locales/_registry.js). DEFAULT_LOCALE is read by lib/config.js but not yet used by the client. |
+
+**observability**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `LOG_FORMAT` | `pretty` | pretty (human, development) \| json (one object per line, for a log aggregator). Default: json in production, pretty otherwise. Compose forces json. |
+| `LOG_LEVEL` | `info` | error \| warn \| info \| debug. Default: info in production, debug otherwise — left unset here so a copied .env does not put production on debug. |
+| `ENABLE_METRICS` | `1` | Prometheus text exposition at /metrics, behind `Authorization: Bearer <token>`. In production the endpoint exists only when METRICS_TOKEN is set; in development it is open when no token is set. |
+| `METRICS_TOKEN` |  | ↑ same group as above |
+
+**images**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `CSP_IMG_SOURCES` | `https://cdn.example.com` | Remote images (avatars, icons, link previews) are served through the same-origin proxy /api/media/proxy?url=…, and the CSP allows images from 'self' only. Add origins here if you serve uploads from a CDN that is not STORAGE_PUBLIC_BASE (comma-separated). |
+| `MEDIA_PROXY_MAX_BYTES` | `8388608` | ↑ same group as above |
+| `MEDIA_PROXY_CACHE_BYTES` | `67108864` | ↑ same group as above |
+| `SHUTDOWN_TIMEOUT_MS` | `15000` | How long SIGTERM waits for in-flight requests before forcing exit. |
+
+**static client (SERVE_STATIC=1)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `STATIC_COMPRESS` | `1` | JS/CSS/HTML/SVG are compressed (brotli, else gzip) once per build and kept in memory, for installs without a compressing proxy in front. 0 = off. |
+| `STATIC_COMPRESS_CACHE_BYTES` | `33554432` | ↑ same group as above |
+
+**docker compose**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `DOMAIN` | `mychat.synology.me (DSM › External Access › DDNS).` | Domain Caddy requests a certificate for. Use `localhost` for a local self-signed cert instead of a public ACME one. Dynamic DNS works too, e.g. |
+| `DOMAIN` | `localhost` | ↑ same group as above |
+| `POSTGRES_PASSWORD` |  | REQUIRED for docker compose — deliberately empty, so `docker compose up` refuses to start until you set one ("set POSTGRES_PASSWORD in .env"). URL-safe characters only (it is spliced into DATABASE_URL): `npm run secrets` prints one. Baked into the database volume on the very first start. To stay on SQLite under compose instead, set DATABASE_URL= (empty). |
+| `HTTP_PORT` | `80` | Host ports Caddy publishes. Change them when something else already owns 80/443 (a Synology/QNAP NAS) and forward the router's 80/443 to these. |
+| `HTTPS_PORT` | `443` | ↑ same group as above |
+| `APP_BIND` | `127.0.0.1` | `no-proxy` profile (docker compose --profile no-proxy up -d app-direct): the app on plain HTTP at APP_BIND:APP_PORT, no Caddy. 127.0.0.1 = reachable only by a reverse proxy on the same host (DSM); 0.0.0.0 = the whole LAN. |
+| `APP_PORT` | `3001` | ↑ same group as above |
+
+**seed data**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `SEED_DATABASE` | `0` | Development databases are seeded with demo accounts that all share the password in db/seed.js. Production never seeds unless this is set to 1 — leave it unset there, or anyone can sign in as the seeded server owner. `npm run seed` (node db/seed.js) follows the same rule: refused in production unless SEED_DATABASE=1, and a no-op on a database that already has users. |
+
+**voice / video (WebRTC)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `STUN_URLS` | `stun:stun.l.google.com:19302` | Served to signed-in clients by GET /api/voice/ice-servers. STUN servers, comma-separated. Unset = Google's public STUN, which means every caller's IP address is sent to Google. With the compose `turn` profile, coturn answers STUN too: STUN_URLS=stun:chat.example.com:3478 |
+| `TURN_URLS` | `turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp` | TURN relay (coturn with use-auth-secret / static-auth-secret). When both are set, each client gets short-lived REST credentials derived from the secret; the secret itself never leaves the server. The compose coturn has no TLS certificate, so list turn: (UDP and TCP) only, not turns:. |
+| `TURN_SECRET` |  | ↑ same group as above |
+| `TURN_EXTERNAL_IP` | `203.0.113.10/192.168.1.20` | compose `turn` profile: public IP, or public/private when the host is behind NAT (cloud VM *or* a home/office router in front of a NAS). |
+| `TURN_TTL_SECONDS` | `86400` | Lifetime of issued TURN credentials, in seconds. |
+| `ICE_TRANSPORT_POLICY` | `all` | 'relay' forces all media through TURN (hides client IPs); default 'all'. |
+
+**voice / video: LiveKit SFU (optional)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `LIVEKIT_URL` | `wss://lk.example.com` | When LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are all set, voice, video, screen share and stage channels use the LiveKit SFU instead of the peer-to-peer mesh (no VOICE_MESH_LIMIT, simulcast, adaptive stream). Leave them unset to keep the mesh. GET /api/voice/config tells clients which. Compose: `docker compose --profile livekit up -d` + DEPLOYMENT.md. Public WebSocket URL browsers connect to (TLS in production). |
+| `LIVEKIT_API_KEY` | `antigravity` | Key name and secret (secret: 32+ chars, `openssl rand -hex 32`). The compose profile passes these to the LiveKit container; livekit.yaml's webhook.api_key must equal the key name. |
+| `LIVEKIT_API_SECRET` |  | ↑ same group as above |
+| `LIVEKIT_HOST` | `http://livekit:7880` | Server API URL the app calls (moderation, permissions). Defaults to LIVEKIT_URL with ws→http; inside compose use the internal address. |
+| `LIVEKIT_DOMAIN` | `lk.example.com` | Hostname Caddy serves LiveKit signalling on (see Caddyfile). |
+| `LIVEKIT_TOKEN_TTL_SECONDS` | `600` | Room token lifetime (60–3600 s). LiveKit refreshes tokens of connected participants itself, so this only bounds how long an unused token is valid. |
+| `LIVEKIT_ROOM_LIMIT` | `0` | Cap per room on top of each channel's own user limit; 0 = none. |
+| `LIVEKIT_VIDEO_CODEC` | `auto` | Preferred camera/screen codec: auto (AV1 → VP9 → VP8 by browser support, always with a VP8 backup layer), vp8, vp9, av1, h264. |
+| `LIVEKIT_E2EE` | `0` | Media encryption with a per-room key derived from LIVEKIT_E2EE_SECRET (or the API secret). Protects media from the SFU operator, not from this app server. |
+| `LIVEKIT_E2EE_SECRET` |  | ↑ same group as above |
+
+**backups**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `BACKUP_DIR` | `./backups` | Where database/file backup snapshots are written (backup tooling). |
+| `PG_DUMP` | `/usr/lib/postgresql/16/bin/pg_dump` | PostgreSQL client binaries for scripts/backup.mjs (default: from PATH). Must be the server's major version or newer. In Docker use scripts/ops/docker-backup.sh instead: it runs pg_dump in the postgres container. |
+| `PG_RESTORE` | `/usr/lib/postgresql/16/bin/pg_restore` | ↑ same group as above |
+
+**realtime scale-out (optional)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://valkey:6379` | Unset = single instance, everything in memory (the default). Set to run several app instances behind one proxy: Socket.IO Redis Streams adapter (cross-instance fan-out + connection-state recovery across instances), shared rate limits, presence with TTL heartbeats. Valkey or Redis >= 6.2. Requires PostgreSQL. See DEPLOYMENT.md §8 "Running several instances". |
+| `REDIS_KEY_PREFIX` | `ag:` | Key prefix, so one Valkey can serve several deployments. |
+| `REDIS_CONNECT_TIMEOUT_MS` | `5000` | First connection attempt (ms). A configured but unreachable Redis fails boot. |
+| `REDIS_COMMAND_TIMEOUT_MS` | `500` | Per-command timeout (ms). A Redis that stops answering (paused, overloaded, black-holed network) trips a breaker: rate limits and presence fall back to this instance's memory until a PING (every REDIS_STALL_PROBE_MS) answers. |
+| `REDIS_STALL_PROBE_MS` | `1000` | ↑ same group as above |
+| `CADDYFILE` | `./Caddyfile.scale` | compose `scale` profile: two sticky upstreams instead of one. |
+| `WORKER_ID` | `0` | Each instance needs a distinct snowflake worker id (0-31); compose sets it. |
+| `SOCKET_RECOVERY_MS` | `120000` | How long a dropped client may resume with its missed events (ms; 0 = off). |
+| `SOCKET_MAX_PAYLOAD_BYTES` | `524288` | Largest single socket frame accepted (bytes). Files go over HTTP. |
+| `PRESENCE_TTL_MS` | `90000` | Presence heartbeat TTL on a cluster: a crashed instance's users go offline after roughly this long (ms). |
+| `SOCKET_STREAM_MAXLEN` | `20000` | Replay history kept in the Redis stream (entries, approximate). |
+| `PRESENCE_OFFLINE_GRACE_MS` | `5000` | Offline is announced only after this long without any connection (ms). |
+| `SESSION_CACHE_TTL_MS` | `30000` | Resolved-session cache (ms); default 30000 in production, 0 elsewhere. |
+| `SESSION_TOUCH_INTERVAL_MS` | `300000` | ↑ same group as above |
+| `MESSAGE_WRITE_CONCURRENCY` | `32` | Message write admission: in flight / waiting / longest wait (ms). |
+| `MESSAGE_WRITE_QUEUE` | `256` | ↑ same group as above |
+| `MESSAGE_WRITE_MAX_WAIT_MS` | `5000` | ↑ same group as above |
+| `UV_THREADPOOL_SIZE` | `16` | libuv pool (scrypt + sqlite3 + fs); default max(16, 2 x cores). |
+| `RATE_LIMIT_READ_PER_MIN` | `600` | Rate limits (per user unless noted). |
+| `RATE_LIMIT_MUTATE_PER_MIN` | `600` | ↑ same group as above |
+| `RATE_LIMIT_UPLOAD_PER_MIN` | `30` | ↑ same group as above |
+| `RATE_LIMIT_LOGIN_PER_5MIN` | `10` | per IP + username |
+| `RATE_LIMIT_LOGIN_IP_PER_5MIN` | `60` | per IP |
+| `RATE_LIMIT_WRITE_PER_MIN` | `60` | message sends / edits over HTTP |
+| `RATE_LIMIT_REGISTER_PER_HOUR` | `10` | new accounts per IP |
+| `SOCKET_FLOOD_MULTIPLIER` | `1` | Socket flood guard: multiply every per-event budget (load tests only). |
+| `PERM_CACHE_GUILDS` | `2000` | Guilds whose permission data is cached in memory (LRU). |
+
+**passkeys (WebAuthn)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `PASSKEYS_ENABLED` | `1` | Off unless PASSKEYS_ENABLED=1, RP_ID or PUBLIC_URL is set (PASSKEYS_ENABLED=0 always wins). RP_ID is the registrable domain passkeys are bound to — changing it later orphans every registered passkey. Both default from PUBLIC_URL. |
+| `RP_ID` | `chat.example.com` | ↑ same group as above |
+| `RP_ORIGIN` | `http://localhost:5173).` | Allowed page origins, comma-separated (add the Vite dev origin in development: |
+| `RP_ORIGIN` | `https://chat.example.com` | ↑ same group as above |
+| `RP_NAME` | `Antigravity Discord` | ↑ same group as above |
+
+**message translation**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `LIBRETRANSLATE_URL` | `http://libretranslate:5000` | Browsers with the built-in Translator API translate on-device and need none of this. Server-side providers are tried in order; unset = not used. Self-hosted LibreTranslate (docker compose --profile translate up -d): |
+| `LIBRETRANSLATE_API_KEY` |  | ↑ same group as above |
+| `LT_LOAD_ONLY` | `en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id` | compose `translate` profile: languages to download (each is a model of a few hundred MB) and LibreTranslate's own API-key switch (then set the key above). |
+| `LT_API_KEYS` | `false` | ↑ same group as above |
+| `DEEPL_API_KEY` |  | keys ending in :fx use the free API host |
+| `DEEPL_API_URL` |  | override the DeepL host (proxy / regional endpoint) |
+| `ANTHROPIC_API_KEY` |  | Claude as a last resort |
+| `TRANSLATION_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | ↑ same group as above |
+| `TRANSLATION_PROVIDERS` | `libretranslate,deepl,anthropic` | Order / subset of providers: |
+| `TRANSLATION_SERVER_ENABLED` | `1` | 0 turns off /api/translate entirely |
+| `TRANSLATION_CLIENT_ENABLED` | `1` | 0 hides on-device translation too |
+| `TRANSLATION_CACHE_TTL_HOURS` | `168` | ↑ same group as above |
+| `TRANSLATION_RATE_PER_MIN` | `20` | provider calls (cache misses) per user |
+| `TRANSLATION_REQUESTS_PER_MIN` | `120` | all translate requests per user |
+
+**Web Push / PWA notifications (services/push.js)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `VAPID_PUBLIC_KEY` |  | Off unless all three VAPID values are set. Generate once: npm run push:keys Rotating the key pair invalidates every browser subscription (they re-subscribe on their next visit). Keep the private key out of the client and out of logs. |
+| `VAPID_PRIVATE_KEY` |  | ↑ same group as above |
+| `VAPID_SUBJECT` | `mailto:ops@example.com` | ↑ same group as above |
+| `PUSH_ENDPOINT_HOSTS` | `fcm.googleapis.com,updates.push.services.mozilla.com,web.push.apple.com,notify.windows.com` | Push services the server will POST to (host suffixes). Default: FCM, Mozilla, Apple, WNS. Never allow arbitrary hosts — the endpoint URL comes from browsers. |
+| `PUSH_USER_LIMIT_PER_MIN` | `30` | pushes per user per minute (topic collapses the rest) |
+| `PUSH_TTL_SECONDS` | `14400` | how long a push service keeps an undelivered push |
+| `PUSH_APP_NAME` | `Antigravity` | title of "hidden content" pushes |
+| `PUSH_EXTRA_CA_FILE` | `/etc/ssl/certs/corporate-ca.pem` | PUBLIC_URL (above) is used for the link a notification opens. Extra CA bundle for reaching push services through a TLS-intercepting proxy. |
+| `PUSH_ALLOW_INSECURE_ENDPOINTS` | `0` | Development/tests only: allow http:// and non-allow-listed push endpoints. |
+
+**observability**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` |  | Everything here is optional and off by default. See DEPLOYMENT.md, "Observability". LOG_LEVEL accepts trace\|debug\|info\|warn\|error\|fatal\|silent. OpenTelemetry traces + metrics + logs over OTLP/HTTP. Unset = the SDK is not even loaded. Needs the preload (the Docker image always uses it): NODE_OPTIONS="--import ./lib/otel-preload.mjs" npm start With the compose `observability` profile: http://lgtm:4318 |
+| `OTEL_SERVICE_NAME` | `antigravity-discord` | ↑ same group as above |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sample 10% of new traces in production (parent decisions are respected). |
+| `OTEL_TRACES_SAMPLER_ARG` | `0.1` | ↑ same group as above |
+| `OTEL_LOGS_EXPORTER` | `none` | keep logs on stdout only |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` |  | Per-signal endpoints, when traces and metrics go to different collectors: |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` |  | ↑ same group as above |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `15000` | ms |
+| `OTEL_SDK_DISABLED` | `true` | load nothing even if an endpoint is set |
+| `GRAFANA_ADMIN_PASSWORD` |  | Grafana admin password for the compose `observability` profile. |
+| `SENTRY_DSN` |  | Error tracking (Sentry protocol: self-hosted GlitchTip or Sentry). Server errors (5xx, crashes) are sent with PII scrubbed. SENTRY_BROWSER_DSN is public by design (it ships to browsers); use a separate project for it. Browser reports are tunnelled through /api/telemetry/errors. |
+| `SENTRY_BROWSER_DSN` |  | ↑ same group as above |
+| `SENTRY_ENVIRONMENT` | `production` | ↑ same group as above |
+| `APP_RELEASE` |  | Release tag for error reports; the Docker image sets it to the git sha. Falls back to GIT_SHA, then SOURCE_COMMIT (set by some PaaS builders). |
+| `GIT_SHA` |  | ↑ same group as above |
+| `SOURCE_COMMIT` |  | ↑ same group as above |
+| `WEB_VITALS_ENABLED` | `1` | Core Web Vitals from browsers (anonymous; name/value/rating only). |
+| `WEB_VITALS_SAMPLE_RATE` | `0.25` | ↑ same group as above |
+| `RATE_LIMIT_VITALS_PER_MIN` | `30` | ↑ same group as above |
+| `READY_DISK_MIN_FREE_MB` | `256` | Readiness (/api/ready): 503 below this much free disk where uploads or the SQLite file live; "low" (still ready) below the warn level. |
+| `READY_DISK_WARN_FREE_MB` | `1024` | ↑ same group as above |
+
+**example bot (scripts/example-bot.mjs)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `API_BASE` | `http://localhost:3001` | Only read by the example bot, not by the server. |
+| `BOT_TOKEN` |  | ↑ same group as above |
+
+<!-- env-reference:end -->

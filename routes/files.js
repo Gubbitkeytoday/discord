@@ -62,6 +62,28 @@ function toDescriptor(file) {
   };
 }
 
+/**
+ * The client's filename, decoded as UTF-8.
+ *
+ * Browsers send `filename="สลิป.png"` as raw UTF-8 bytes, but busboy (under
+ * multer) decodes multipart parameters as latin1 unless the uploader is built
+ * with `defParamCharset: 'utf8'`, so Thai, CJK or emoji names arrived as
+ * mojibake ("à¸ªà¸¥à¸´à¸›.png"). Re-read those latin1 code units as UTF-8 bytes.
+ * Only when every code unit is a byte and the bytes are valid UTF-8, so a name
+ * that was already decoded correctly (or is genuinely latin1) is unchanged.
+ */
+const utf8Strict = new TextDecoder('utf-8', { fatal: true });
+export function decodeUploadFilename(name) {
+  const value = String(name ?? '');
+  // eslint-disable-next-line no-control-regex
+  if (!/[\u0080-ÿ]/.test(value) || /[^\u0000-ÿ]/.test(value)) return value;
+  try {
+    return utf8Strict.decode(Buffer.from(value, 'latin1'));
+  } catch {
+    return value;
+  }
+}
+
 function uploadOptions(req, category) {
   return {
     category,
@@ -77,7 +99,7 @@ async function handleSingle(req, res, category, field) {
   if (!req.file) throw new ApiError(`No ${field} uploaded`, { code: 'NO_FILE' });
   const file = await storeFile({
     buffer: req.file.buffer,
-    originalName: req.file.originalname,
+    originalName: decodeUploadFilename(req.file.originalname),
     declaredMime: req.file.mimetype,
     ...uploadOptions(req, category)
   });
@@ -137,13 +159,13 @@ router.post('/upload/attachments', requireUser, uploadAttachment.array('files', 
     try {
       const stored = await storeFile({
         buffer: f.buffer,
-        originalName: f.originalname,
+        originalName: decodeUploadFilename(f.originalname),
         declaredMime: f.mimetype,
         ...uploadOptions(req, 'attachments')
       });
       attachments.push(toDescriptor(stored));
     } catch (err) {
-      failed.push({ filename: f.originalname, error: err.message, code: err.code ?? 'STORAGE_ERROR' });
+      failed.push({ filename: decodeUploadFilename(f.originalname), error: err.message, code: err.code ?? 'STORAGE_ERROR' });
     }
   }
 

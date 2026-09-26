@@ -2,14 +2,21 @@
 
 เอกสารนี้อธิบายรากฐานทั้งหมดที่วางไว้ เพื่อให้พัฒนาต่อได้โดยไม่ต้องรื้อ
 
+> **ภาพรวมปัจจุบัน (schema v38):** ข้อ 1–44 เขียนตามลำดับเวลาที่ของแต่ละชิ้นเข้ามา บางข้อ
+> (เช่น "SQLite อย่างเดียว", "ไม่มี SFU", "ยังไม่ได้ build Docker") ถูกแทนที่ไปแล้ว — อ่าน
+> [ข้อ 45](#45-ภาพรวมปัจจุบัน-schema-v38) ก่อนเพื่อดูว่าตอนนี้ระบบมีอะไรบ้าง
+
 ---
 
 ## 1. โครงไฟล์
 
 ```
-db.js                    connection, promise helpers, transaction, migration runner
-db/schema.sql            schema เต็มทุกตาราง (baseline ของ DB ใหม่)
-db/seed.js               ข้อมูลตัวอย่างสำหรับ dev
+db.js                    driver selection (SQLite / PostgreSQL), promise helpers, transaction, migration runner
+db/schema.sql            schema เต็มทุกตาราง (baseline ของ DB ใหม่, SQLite)
+db/schema.pg.sql         baseline เดียวกันสำหรับ PostgreSQL
+db/sqlite.js, db/postgres.js, db/dialect.js   driver สองตัว + SQL ที่ต่างกันระหว่าง engine
+db/migrations/*.js       DDL ของ migration ช่วงหลัง (passkeys, translation, realtime-scale)
+db/seed.js               ข้อมูลตัวอย่างสำหรับ dev — และเป็นคำสั่ง `npm run seed` ด้วย
 
 lib/snowflake.js         ID generator แบบ Discord (64-bit, k-sortable)
 lib/permissions.js       permission bitfield + การคำนวณสิทธิ์ตาม role/overwrite
@@ -18,7 +25,11 @@ lib/mediaDuration.js     อ่านความยาว audio/video จาก
 lib/httpUtils.js         ApiError, asyncRoute, identify, error handler
 lib/auth.js              scrypt + session token
 lib/totp.js              TOTP (RFC 6238) สำหรับ 2FA
-lib/rateLimit.js         token bucket
+lib/rateLimit.js         token bucket (ในหน่วยความจำ หรือ Lua script บน Redis)
+lib/redis.js             Redis/Valkey (ไม่บังคับ): adapter ของ Socket.IO, bus, lease, timeout + breaker
+lib/presence.js          นับ connection ต่อ user ข้าม instance (TTL heartbeat)
+lib/staticAssets.js      เสิร์ฟ dist/ แบบบีบอัด (brotli/gzip) + cache header
+lib/telemetry.js         OpenTelemetry + error tracking
 lib/mailer.js            console / file / smtp transport
 lib/s3Client.js          S3-compatible client + AWS SigV4
 
@@ -48,7 +59,10 @@ scripts/storage.js       CLI: stats / gc / verify / reindex
 scripts/a11y-audit.mjs   ตรวจ accessibility อัตโนมัติ
 scripts/jsx-check.mjs    ตรวจโครงสร้าง JSX / import / component ที่ไม่ได้ประกาศ (ไม่ต้องใช้ bundler)
 scripts/i18n-audit.mjs   ตรวจว่า key ที่ใช้มีครบทั้ง en/th และไม่มีข้อความไทยฝังในโค้ด
-scripts/test*.mjs        integration tests (3 ไฟล์ + harness ร่วม)
+scripts/test*.mjs        integration tests (หลายไฟล์ + harness ร่วม, รันทั้ง SQLite และ PostgreSQL)
+scripts/e2e/             Playwright: core flows, passkeys, PWA, integration
+scripts/load/            load test (k6 + socket.io-client) — ผลอยู่ใน docs/PERFORMANCE.md
+scripts/ops/             secrets.mjs, docker-backup.sh, env-check.mjs
 ```
 
 ---
@@ -200,8 +214,15 @@ GC ยังรันอัตโนมัติทุก 6 ชั่วโม�
 
 ## 3. ฐานข้อมูล
 
-SQLite + **WAL** (reader ไม่ถูก block ตอนมีคนเขียน), `foreign_keys=ON`,
-`busy_timeout=5000` ทุกตารางมี FK ครบและมี index บน read path จริง
+สองแบบ โค้ดชุดเดียวกัน (`db/dialect.js` เก็บส่วนที่ SQL ต่างกัน):
+
+- **SQLite** (ไม่ตั้ง `DATABASE_URL`) + **WAL** (reader ไม่ถูก block ตอนมีคนเขียน), `foreign_keys=ON`,
+  `busy_timeout=5000` — เหมาะกับเครื่องเดียว ชุมชนเล็ก ไม่ต้องตั้งค่าอะไร
+- **PostgreSQL** (`DATABASE_URL=postgres://…`, ค่าเริ่มต้นใน docker compose) — connection pool,
+  transaction แบบ SERIALIZABLE พร้อม retry, `pg_trgm` สำหรับค้นหา, migration ถือ advisory lock
+  จึงรันพร้อมกันหลาย instance ได้
+
+ทุกตารางมี FK ครบและมี index บน read path จริง (รายการตารางด้านล่างเป็นชุดแรก — ตอนนี้มีมากกว่านี้)
 
 45 ตาราง ครอบคลุม:
 
@@ -343,6 +364,9 @@ Error ทุกตัวรูปแบบเดียวกัน: `{ error, co
 ---
 
 ## 8. Environment
+
+> รายการเต็ม (ทุกตัวแปรที่โค้ดอ่าน) อยู่ใน `.env.example` และตารางที่ generate แล้วใน
+> DEPLOYMENT.md §16 — CI (`npm run env:check`) ตรวจว่าไม่มีตัวไหนหลุด ตัวอย่างข้างล่างเป็นชุดแรกเท่านั้น
 
 ```
 PORT=3001
@@ -547,7 +571,9 @@ MP4/MOV จาก atom `mvhd` · WebM/MKV จาก Segment Info · MP3 จา�
 ถ้าตั้ง `channels.user_limit` ต่ำกว่านั้น ระบบใช้ค่าที่น้อยกว่า
 
 การรองรับห้องใหญ่กว่านี้ต้องมี **SFU** (media server อย่าง mediasoup/LiveKit)
-ซึ่งเป็นคนละสถาปัตยกรรม ไม่ใช่โค้ดที่เพิ่มเข้ามาได้
+ซึ่งเป็นคนละสถาปัตยกรรม — **ตอนนี้มีแล้ว:** ตั้ง `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`
+(compose profile `livekit`) แล้ว voice/video/stage จะใช้ LiveKit แทน mesh (`services/livekit.js`,
+`src/voice/`) ถ้าไม่ตั้งก็ยังเป็น mesh เหมือนเดิม
 
 ---
 
@@ -655,7 +681,7 @@ label/description มาจาก `perm.<NAME>` / `appearance.<key>` ตอน r
 |---|---|
 | **ทดสอบกับ screen reader จริง** | NVDA (Windows) หรือ VoiceOver (macOS) และคนฟัง — `npm run a11y` ตรวจได้ทุกอย่างที่ตรวจอัตโนมัติได้แล้ว แต่แทนการฟังจริงไม่ได้ |
 | **DAST scan (hawkscan)** | `hawk` CLI + StackHawk API key — ติดตั้งด้วย `brew install stackhawk/cli/hawk && hawk init --browser` แล้วสแกนได้ทันที |
-| **build image จริงจาก `Dockerfile`** | Docker daemon — Docker Desktop ในเครื่องนี้ไม่ได้รัน (`npipe:////./pipe/dockerDesktopLinuxEngine` ต่อไม่ได้) ตัว `Dockerfile`/`docker-compose.yml`/`Caddyfile` เขียนครบและ review แล้ว แต่ **ยังไม่ได้ build ยืนยันด้วยตาตัวเอง** — เปิด Docker Desktop แล้วรัน `npm run docker:up` |
+| ~~**build image จริงจาก `Dockerfile`**~~ | CI build image ทุก commit แล้ว boot แบบ read-only root filesystem และยิง `/api/live` + สแกนด้วย grype; `docker compose config` ตรวจทุก profile — ข้อนี้ไม่ใช่ข้อจำกัดอีกต่อไป (ยังไม่มี image สำเร็จรูปที่ publish ให้ดึง เว้นแต่ตั้ง `REGISTRY_IMAGE`) |
 | ~~**`npm run build` ของ client**~~ | ยืนยันแล้ว: `npm ci && npm run build` และ `npm test` (281 ข้อ) ผ่านบน Linux/Node 22 — ข้อนี้ไม่ใช่ข้อจำกัดอีกต่อไป |
 
 รวมถึง **SFU** ในหัวข้อ 15 ที่เป็นข้อจำกัดเชิงสถาปัตยกรรม ไม่ใช่งานที่ค้าง
@@ -1451,8 +1477,9 @@ so it renders in the reader's language rather than the sender's.
 
 `lib/searchQuery.js` is pure: a string in, `{ term, filters, unknown }` out. No
 database, no permissions, no async — which is what makes the awkward cases
-(`from:"Mai Suwan"`, a `:)` that is not an operator, `before:yesterday`)
-testable without a server. Names become ids in `searchMessages`, because that
+(`from:"Mai Suwan"`, a `:)` that is not an operator, `before:someday`)
+testable without a server. (`today`, `yesterday` and `tomorrow` are accepted
+now; an unusable date comes back in `warnings` with a hint, see §45.) Names become ids in `searchMessages`, because that
 needs the database and an id must never be guessed from user text. An
 unresolvable name narrows to nothing rather than widening to everything, and an
 unusable operator value is left in the search text instead of being dropped
@@ -1540,3 +1567,34 @@ It does now, so hanging up leaves you where you are. Conversely the room only
 renders when you are actually connected to *that* channel — browsing a voice
 channel you have not joined shows its chat and a Join button, which is what
 Discord does and what the old code could not express.
+
+---
+
+## 45. ภาพรวมปัจจุบัน (schema v38)
+
+สรุปสิ่งที่ระบบมีจริงตอนนี้ แทนข้อความเก่าในข้อก่อน ๆ ที่เขียนไว้ตอนของยังไม่ครบ
+(The current shape of the system, superseding older statements above.)
+
+| ส่วน | ตอนนี้ | ไฟล์หลัก |
+| --- | --- | --- |
+| ฐานข้อมูล | SQLite (WAL) หรือ PostgreSQL 13+ โค้ดชุดเดียว, migration v1–v38 อัตโนมัติ; `GET /api/health` บอก schema version | `db.js`, `db/*.js`, `db/migrations/` |
+| หลาย instance | Redis/Valkey (`REDIS_URL`): Socket.IO Redis Streams adapter (fan-out + connection-state recovery ข้าม instance), rate limit และ presence ร่วมกัน, bus สำหรับ invalidate cache, lease สำหรับงานที่ต้องรันครั้งเดียว | `lib/redis.js`, `lib/presence.js`, `lib/rateLimit.js`, `Caddyfile.scale` |
+| Redis ค้าง | ทุกคำสั่งมี timeout (`REDIS_COMMAND_TIMEOUT_MS`, 500 ms); timeout ครั้งแรกเปิด breaker → `getRedis()` คืน `null` ทุกคนใช้ state ในเครื่องทันที แล้ว PING ทุก 1 วิจนกว่าจะตอบ (`/api/health` แสดง `stalled`) — ทดสอบด้วย `SIGSTOP` จริงใน `scripts/test-ops-61.mjs` | `lib/redis.js` |
+| Voice/video | mesh (≤ `VOICE_MESH_LIMIT`) หรือ LiveKit SFU; TURN credential ต่อผู้ใช้จาก `GET /api/voice/ice-servers` (coturn profile `turn`) | `services/livekit.js`, `src/voice/`, `server.js` |
+| แจ้งเตือน | Web Push (VAPID) ไปยัง PWA ที่ติดตั้ง + service worker/offline shell | `services/push.js`, `public/sw.js`, `public/manifest.webmanifest` |
+| บัญชี | password (scrypt) + TOTP + **passkeys (WebAuthn)** | `routes/passkeys.js`, `services/passkeys.js` |
+| แปลข้อความ | ในเบราว์เซอร์ (Translator API) หรือฝั่งเซิร์ฟเวอร์: LibreTranslate → DeepL → Claude, cache ต่อข้อความ | `services/translation.js` |
+| Media pipeline | ลบ EXIF/GPS, rendition WebP/AVIF + `srcset`, thumbhash, กัน decompression bomb, poster/ความยาววิดีโอ (ffmpeg ถ้ามี), อัปโหลดตรงไป bucket | `services/mediaPipeline.js`, `lib/imageVariants.js`, `storageService.js` |
+| ไฟล์แนบในข้อความ | ประวัติข้อความส่ง `thumbhash`, `width/height` (ค่าจาก pipeline ไม่ใช่ค่าตอนส่ง), `renditions`/`srcset`, `display_url`, `poster_url`, `media_status`, `download_url` — โหลด files/variants/renditions ทีเดียว 3 query ต่อหน้า (เดิม 3 query ต่อไฟล์) | `services/messages.js` (`attachmentToWire`, `loadFilesWithUrls`) |
+| Idempotent send | `nonce` ใช้ unique index `idx_messages_nonce` โดยตรง (`INSERT … ON CONFLICT DO NOTHING`) ไม่ต้อง SELECT ก่อนทุกข้อความ; retry ที่ติด slowmode ได้ข้อความเดิมกลับไป | `services/messages.js` |
+| ค้นหา | FTS5 trigram / `pg_trgm`; operator รวม `today`/`yesterday`/`tomorrow`; วันที่ที่อ่านไม่ออกคืน `warnings` พร้อมคำแนะนำ | `lib/searchQuery.js` |
+| Observability | pino JSON log, prom-client `/metrics`, OpenTelemetry, error tracking (Sentry protocol), Web Vitals, dashboard + alert ใน `ops/` | `lib/telemetry.js`, `services/observability.js` |
+| i18n | 32 ภาษา (ชุดเดียวกับ Discord) — en/th ครบ, ที่เหลือแปลจาก sweep | `src/i18n/` |
+| เสิร์ฟ client | Node เสิร์ฟ `dist/` เอง: `assets/*` immutable, shell `no-cache`, บีบอัด brotli/gzip ครั้งเดียวต่อไฟล์เก็บใน memory (สำหรับเครื่องที่ไม่มี Caddy ข้างหน้า) | `lib/staticAssets.js` |
+| Config | ปฏิเสธการบูตถ้าไม่ปลอดภัย; กล่องแดงเตือนเมื่อ Secure cookie + `PUBLIC_URL` เป็น http ที่ไม่ใช่ localhost (ล็อกอินแล้วหลุดเงียบ ๆ) | `lib/config.js` |
+| Deploy | compose: app + PostgreSQL + Caddy; profile `turn`, `livekit`, `scale`, `translate`, `observability`, `no-proxy` (NAS); `HTTP_PORT`/`HTTPS_PORT` | `docker-compose.yml`, `Caddyfile*` |
+| Ops scripts | `npm run secrets`, `scripts/ops/docker-backup.sh` (backup/verify/restore/drill), `npm run env:check`, `npm run seed` | `scripts/ops/`, `db/seed.js` |
+| Image | distroless Node 24, non-root, read-only rootfs; client packages เป็น devDependencies จึงถูก prune ออก (~110 MB และไม่มี esbuild binary) | `Dockerfile` |
+
+ข้อจำกัดที่ยังอยู่ (ตรงกับ README): ข้อความไม่เข้ารหัส end-to-end, ไม่มีแอป native, ไม่มีหน้า admin
+ระดับ instance/โหมดปิดรับสมัคร, TURN ไม่ได้เปิดเป็นค่าเริ่มต้น, ยังไม่มี image สำเร็จรูป

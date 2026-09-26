@@ -1,139 +1,173 @@
 # Antigravity Discord
 
 A self-hosted, Discord-style chat server: text channels, threads, forums, DMs,
-voice/video, roles and permissions, moderation, and a small bot API. It is one
-Node.js process with an embedded SQLite database and a React single-page app,
-built for small communities that want to run their own server.
+voice/video, roles and permissions, moderation, and a small bot API. One
+Node.js process serves the API, the WebSocket gateway and a React single-page
+app. The database is PostgreSQL (the Docker default) or an embedded SQLite file.
+Everything else is optional and self-hostable: a TURN relay, a LiveKit SFU,
+Web Push, passkeys, machine translation, Redis for several instances, and an
+observability stack.
 
-It is **not** affiliated with Discord Inc., is **not** API-compatible with
-Discord (Discord bots and clients will not work against it), and is a
-single-node system. Read [Status and limitations](#status-and-limitations)
-before you deploy it for real people.
+It is **not** affiliated with Discord Inc. and is **not** API-compatible with
+Discord (Discord bots and clients will not work against it). Read
+[Status and limitations](#status-and-limitations) before you deploy it for real
+people.
 
 ## สรุปภาษาไทย
 
-- **คืออะไร:** แชตแบบ Discord ที่ติดตั้งเองได้ รันเป็น Node.js process เดียว ใช้ SQLite ในเครื่อง มีห้องข้อความ, thread, forum, DM, voice/video, role/สิทธิ์, AutoMod, audit log และ bot API แบบง่าย รองรับภาษาไทยทั้ง UI และการค้นหาข้อความ (FTS5 trigram)
-- **ข้อจำกัดสำคัญ:** voice เป็น WebRTC แบบ full mesh จำกัด 8 คนต่อห้อง (`VOICE_MESH_LIMIT`), ยังไม่มี TURN server ในโค้ด (ใช้ได้แค่ STUN ของ Google — ผู้ใช้หลัง NAT/ไฟร์วอลล์บางแบบจะต่อเสียงไม่ติด), ไม่มีการเข้ารหัส end-to-end, ไม่มี push notification / แอปมือถือ, และรันได้เครื่องเดียว (SQLite + Socket.IO ในหน่วยความจำ)
+- **คืออะไร:** แชตแบบ Discord ที่ติดตั้งเองได้ มีห้องข้อความ, thread, forum, DM, โทรใน DM, voice/video, stage, role/สิทธิ์, AutoMod, audit log และ bot API แบบง่าย UI มี 32 ภาษา (รวมไทย) ค้นหาข้อความภาษาไทยได้ (trigram)
+- **ฐานข้อมูล:** PostgreSQL (ค่าเริ่มต้นใน Docker) หรือ SQLite ไฟล์เดียว — schema ถูกสร้าง/migrate อัตโนมัติ (ตอนนี้ v38)
+- **ส่วนเสริม (เปิดเมื่อตั้งค่า):** TURN (coturn) สำหรับคนที่อยู่หลัง NAT, LiveKit SFU สำหรับห้องเสียง/วิดีโอใหญ่, แจ้งเตือนมือถือผ่าน Web Push + ติดตั้งเป็น PWA, passkey (WebAuthn), แปลข้อความ (LibreTranslate/DeepL/Claude หรือในเบราว์เซอร์), Redis/Valkey สำหรับรันหลาย instance, Grafana/Tempo/Loki/Prometheus
+- **ข้อจำกัด:** ข้อความไม่ได้เข้ารหัสแบบ end-to-end, ยังไม่มีแอป native (ใช้ PWA), ยังไม่มีหน้า admin ระดับ instance และการปิดรับสมัคร, voice แบบ mesh จำกัด 8 คนถ้าไม่เปิด LiveKit, ยังไม่มี image สำเร็จรูปให้ดึง (ต้อง build เอง)
 - **เริ่มใช้งาน (dev):** `npm ci` → `cp .env.example .env` → `npm run seed` → `npm run server` และ `npm run dev` แล้วเปิด http://localhost:5173 (บัญชีทดสอบ `AlexPro` / `antigravity123`)
-- **Production:** ดู [DEPLOYMENT.md](DEPLOYMENT.md) — ต้องตั้ง `ALLOW_DEV_IDENTITY=0`, `STORAGE_URL_SECRET` ใหม่, `SECURE_COOKIES=1` ไม่งั้นเซิร์ฟเวอร์จะไม่ยอมสตาร์ต
+- **ทดลองในวง LAN (5 นาที):** ดู [DEPLOYMENT.md §2a](DEPLOYMENT.md#2a-5-minute-lan-quickstart) — ถ้าเปิดผ่าน `http://IP` ต้องตั้ง `SECURE_COOKIES=0` ไม่งั้นล็อกอินแล้วรีเฟรชจะหลุด (เซิร์ฟเวอร์จะขึ้นกล่องสีแดงเตือนตอนบูต)
+- **Synology/QNAP:** ดู [DEPLOYMENT.md §2b](DEPLOYMENT.md#2b-nas-synology--qnap) — ใช้ profile `no-proxy` แล้วให้ reverse proxy ของ DSM ทำ HTTPS (อย่าลืม custom header WebSocket)
+- **Production:** ดู [DEPLOYMENT.md](DEPLOYMENT.md) — `npm run secrets -- --write` สร้างรหัสลับทั้งหมดให้, ต้องตั้ง `ALLOW_DEV_IDENTITY=0` และ `PUBLIC_URL` เป็น https ไม่งั้นเซิร์ฟเวอร์ไม่ยอมสตาร์ตหรือเตือน; สำรองข้อมูลใน Docker ด้วย `scripts/ops/docker-backup.sh`
 - **รายละเอียดเชิงลึก:** [ARCHITECTURE.md](ARCHITECTURE.md) (ส่วนใหญ่เป็นภาษาไทย)
 
 ---
 
 ## Status and limitations
 
-What has been verified on this commit (Node 22, Linux):
+What is checked on every commit by CI (Node 22 and 24, Linux):
 
 | Check | Result |
 | --- | --- |
-| `npm ci && npm run build` | builds (Vite warns that the main chunk is > 500 kB) |
-| `npm test` | 281 tests in 70 suites, all passing (~7 s) |
-| `npm run a11y` | static audit reports no problems (names, ARIA, alt text, contrast). This is a linter, not a screen-reader test. |
-| `npm run i18n:audit`, `jsx:check`, `parse:check` | pass |
-| Docker image / `docker compose` | **not verified** in CI or by the maintainers' last pass — build it yourself before relying on it |
-| `npm audit --omit=dev` | 0 advisories (sqlite3 6, sharp 0.35, patched `qs`); re-run before each release |
+| `npm ci && npm run build` | builds; the client is code-split (lazy settings, voice, forum, modals) |
+| `npm test` (SQLite) and `npm run test:pg` (PostgreSQL 16) | the same integration suites, each file booting its own server; all passing |
+| `npm run e2e`, `e2e:integration`, `e2e:passkeys`, `e2e:pwa` | Playwright/Chromium against a real server: core flows, passkey sign-in, translation, reconnect catch-up, installable PWA and offline shell |
+| `npm run a11y`, `i18n:audit`, `jsx:check`, `parse:check`, `env:check` | pass. `a11y` is a static linter, not a screen-reader test |
+| Docker image | built, booted read-only and probed on `/api/live` in CI; SBOM + grype scan (fails on fixable critical CVEs); signed and pushed only when a registry is configured |
+| `docker compose config` | every profile validated in CI; an empty `POSTGRES_PASSWORD` is refused |
+| `npm audit --omit=dev` | no critical advisories (gate); re-run before each release |
 
 Known limitations — read these before inviting users:
 
-- **Voice/video is peer-to-peer full mesh.** Every participant uploads a stream
-  to every other participant, so rooms are capped at `VOICE_MESH_LIMIT`
-  (default 8) and the server refuses the 9th joiner with `VOICE_FULL`. There is
-  no SFU. Stage channels use the same mesh (audience members join suppressed).
-- **No TURN server is configured.** ICE servers are hard-coded to Google's
-  public STUN servers in `src/hooks/useVoicePeers.js`. Calls between users on
-  symmetric NAT, carrier-grade NAT or strict corporate firewalls will fail to
-  connect. For real-world use you need to run a TURN server (e.g. coturn) and
-  add it to that list; there is no environment variable for this yet.
-- **No end-to-end encryption.** Media is DTLS-SRTP encrypted peer-to-peer, and
-  messages are stored in plaintext in SQLite. (Discord itself now runs its DAVE
-  E2EE protocol on all non-stage calls.)
-- **Single node.** SQLite has one writer, and Socket.IO rooms, presence and rate
-  limit buckets live in process memory. You cannot run two instances behind a
-  load balancer. Rate-limit counters reset on restart.
-- **No push notifications, no native mobile/desktop apps, no PWA manifest.**
-  Notifications use the browser Notification API and only fire while a tab is
-  open. The layout is responsive down to phone width.
+- **No end-to-end encryption for messages.** Messages are stored in plaintext
+  in the database so that search, AutoMod and reports work. Calls are
+  DTLS-SRTP encrypted in transit; with LiveKit, optional media E2EE
+  (`LIVEKIT_E2EE=1`) keeps the SFU operator out, not this app's server.
+- **Voice without LiveKit is a peer-to-peer mesh**, capped at
+  `VOICE_MESH_LIMIT` (default 8) people per room. The LiveKit SFU (`livekit`
+  compose profile) removes the cap and adds simulcast. Either way you want a
+  **TURN relay** for users behind carrier-grade NAT or strict firewalls: the
+  server mints short-lived TURN credentials (`TURN_URLS`, `TURN_SECRET`) and the
+  compose `turn` profile runs coturn, but it is not on by default. Without
+  `STUN_URLS` the client uses Google's public STUN servers.
+- **No native mobile/desktop apps.** The client is an installable PWA with Web
+  Push notifications (VAPID keys; on iPhone only after "Add to Home Screen",
+  iOS 16.4+).
+- **No instance administration UI.** The first account is an ordinary user;
+  anyone who can reach the server can register (rate-limited per IP). There is
+  no invite-only registration mode, global ban or user list yet; `ADMIN_TOKEN`
+  unlocks file maintenance and report triage over the API only.
+- **No prebuilt image is published by default.** `docker compose up --build`
+  builds it on your machine (several minutes on a small NAS). CI can push a
+  signed image to your registry when `REGISTRY_IMAGE` is set.
+- **Scaling out needs PostgreSQL + Redis/Valkey.** One instance keeps
+  presence, rate limits and Socket.IO rooms in memory. Several instances share
+  them through Redis (`REDIS_URL`, compose `scale` profile); if Redis stalls,
+  each instance falls back to its own memory until it answers again.
 - **Bot API is its own design.** Bots authenticate with `Authorization: Bot
-  <token>` against this server's REST API and receive interactions over
-  Socket.IO. There is no OAuth2, no gateway intents, and discord.js / discord.py
-  will not work. See `scripts/example-bot.mjs`.
-- **Email** (verification, password reset) logs to the console unless you set
-  `MAIL_TRANSPORT=smtp`.
+  <token>` and receive interactions over Socket.IO. No OAuth2, gateway intents
+  or sharding; discord.js / discord.py will not work. See `scripts/example-bot.mjs`.
+- **No SSO/LDAP.** Accounts are local (password, TOTP, passkeys).
+- **E-mail** (verification, password reset) only logs to the console until you
+  configure SMTP; in production those features answer 503 until then.
 
 ## Features
 
 Verified present in the code (see ARCHITECTURE.md for how each works):
 
-- **Messaging:** Markdown (bold, italics, code blocks, spoilers, quotes),
-  replies, edits with history, deletes, pins, reactions, forwarding, mentions
-  (`@user`, `@role`, `@everyone`, `@here`) with an inbox and unread tracking,
-  attachments, voice notes, stickers and custom emoji, link previews (with an
-  SSRF guard), polls, built-in slash commands (`/shrug`, `/me`, `/spoiler`, ...).
-  A failed send can be retried manually.
-- **Search:** SQLite FTS5 with the `trigram` tokenizer, so substring search works
-  for Thai/CJK. Operators: `from:`, `mentions:`, `in:`, `has:`, `before:`,
-  `after:`, `during:`, `pinned:`.
+- **Messaging:** Markdown (bold, italics, code blocks, spoilers, quotes,
+  headings, lists, masked links), replies, edits with history, deletes, pins,
+  reactions and Super Reactions, forwarding, mentions (`@user`, `@role`,
+  `@everyone`, `@here`) with an inbox and unread tracking, attachments, voice
+  notes, stickers and custom emoji, link previews (with an SSRF guard), polls,
+  built-in slash commands. Sends are idempotent (client nonce) and a dropped
+  connection catches up on reconnect.
+- **Search:** SQLite FTS5 `trigram` or PostgreSQL `pg_trgm`, so substring search
+  works for Thai/CJK. Operators: `from:`, `mentions:`, `in:`, `has:`, `before:`,
+  `after:`, `during:` (dates, months, years, and `today` / `yesterday` /
+  `tomorrow`), `pinned:`.
 - **Channels:** text, voice, announcement (with cross-server following),
-  forum (tags, list/gallery layout), media, stage, categories; public and
-  private threads with auto-archive; slowmode; NSFW and spoiler channel
-  click-through gates.
-- **Servers:** roles with Discord's permission bit layout (36 of Discord's
-  flags implemented), channel permission overwrites, role hierarchy checks,
-  invites and vanity URLs, verification levels, membership screening, welcome
-  screen, onboarding prompts, server templates, scheduled events, soundboard,
-  insights, public widget, raid protection, per-server profiles, server folders.
+  forum (tags, list/gallery), media, stage, categories; public and private
+  threads with auto-archive; slowmode; NSFW and spoiler gates.
+- **Servers:** Discord's permission bit layout, channel overwrites, role
+  hierarchy, invites and vanity URLs, verification levels, membership
+  screening, welcome screen, onboarding, templates, scheduled events,
+  soundboard, insights, public widget, raid protection, per-server profiles,
+  server folders.
 - **Moderation:** AutoMod (keyword, regex, link, mention-spam and spam triggers;
-  block/alert/timeout actions; role and channel exemptions), kick/ban/unban,
-  timeouts (max 28 days), member/message reports queue, audit log.
-- **Accounts:** registration and login, scrypt password hashing, session tokens
-  stored as SHA-256 hashes, TOTP 2FA with backup codes, session list and
-  revoke, friends and blocking, DMs and group DMs, DM calls, profile privacy,
-  private notes, settings synced across devices, JSON data export, account
-  deletion (anonymising).
+  block/alert/timeout; exemptions), kick/ban/unban, timeouts, reports queue,
+  audit log.
+- **Accounts:** registration and login, scrypt password hashing, hashed session
+  tokens, TOTP 2FA with backup codes, **passkeys (WebAuthn)** for sign-in and
+  step-up, session list and revoke, friends and blocking, DMs, group DMs, DM
+  calls, profile privacy, notes, synced settings, JSON data export, account
+  deletion.
 - **Voice/video:** mic, camera, screen share, push-to-talk, automatic input
-  sensitivity, per-user volume up to 200%, camera blur, spatial audio.
-- **Bots:** applications with bot tokens, guild/global slash commands,
-  context-menu commands, interactions with embeds and buttons, incoming
-  webhooks.
-- **UI:** themes (dark, onyx, light, ash, follow system), English and Thai
-  (switchable at runtime), keyboard shortcuts, quick switcher.
-- **Operations:** content-addressed file storage with dedupe and magic-byte
-  type checks, optional S3/R2 backend, signed private file URLs, `/api/health`
-  and `/api/ready`, Prometheus `/metrics`, JSON logs, graceful shutdown, online
-  backup/restore scripts, storage GC/verify scripts.
+  sensitivity, per-user volume up to 200 %, camera blur, spatial audio; P2P mesh
+  or LiveKit SFU (AV1/VP9/VP8, simulcast, optional media E2EE); TURN credentials
+  per user.
+- **Media pipeline:** EXIF/GPS stripped, WebP/AVIF renditions with `srcset`,
+  thumbhash placeholders, decompression-bomb limits, video posters and duration
+  (optional ffmpeg), direct-to-bucket uploads on S3/R2/B2/MinIO.
+- **Notifications:** per-server/channel levels, mentions inbox, Web Push to
+  installed PWAs and desktop browsers (VAPID, no third-party account), offline
+  app shell.
+- **Translation:** on-device (browser Translator API) or server-side through
+  self-hosted LibreTranslate, DeepL or Claude, cached per message.
+- **UI:** themes (dark, onyx, light, ash, follow system), 32 languages
+  (Discord's set, switchable at runtime; Thai is complete), keyboard shortcuts
+  with rebinding, quick switcher.
+- **Operations:** health/readiness endpoints, Prometheus `/metrics`, pino JSON
+  logs with request ids, OpenTelemetry traces/metrics/logs, Sentry-protocol
+  error tracking (GlitchTip), Web Vitals, bundled Grafana dashboards and alert
+  rules, graceful drain, online backup/restore (SQLite `VACUUM INTO`,
+  `pg_dump`) plus a Docker backup/restore/drill script, storage GC/verify,
+  content-addressed storage with dedupe and magic-byte checks, signed private
+  URLs, compressed static serving (brotli/gzip) when no proxy compresses.
 
-### Compared with Discord
+### Compared with Discord, Matrix and Revolt
 
-| Area | Status here |
-| --- | --- |
-| Text chat, threads, forums, reactions, pins, polls, search filters | Present |
-| Roles, overwrites, audit log, bans, timeouts, slowmode, AutoMod | Present (AutoMod has no ML/keyword presets) |
-| Onboarding, screening, welcome screen, templates, events | Present |
-| Stage channels | Partial — mesh-based, 8-person cap, no speaker requests at scale |
-| Voice/video scale | Partial — P2P mesh, no SFU, no TURN |
-| Bots / slash commands / interactions | Partial — own API, not Discord-compatible; no OAuth2, intents or modals ecosystem |
-| Rate limit headers | Partial — `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`; no `Reset`/`Bucket` |
-| NSFW gating | Partial — click-through warning, no age verification |
-| 2FA | Partial — TOTP + backup codes; no passkeys/WebAuthn or SMS |
-| Rich presence / activities, Go Live to many viewers | Missing (custom status only) |
-| Push notifications, mobile/desktop apps, PWA | Missing |
-| E2E encrypted calls (DAVE) | Missing |
-| OAuth2 / "Login with", gateway intents, sharding | Missing |
-| Boosts, Nitro, monetisation | Missing (schema columns only) |
+How this project stacks up for a small self-hosted community. "Revolt" is the
+self-hostable Revolt/Stoat stack; "Matrix" is Synapse + Element.
+
+| | Antigravity (this) | Discord | Matrix (Synapse + Element) | Revolt / Stoat |
+| --- | --- | --- | --- | --- |
+| Self-hostable | Yes: one Node process + PostgreSQL (or SQLite); `docker compose` | No | Yes, heavier (Synapse, Postgres, often a separate call stack) | Yes, `docker compose` (several services + MongoDB) |
+| Discord-style servers, roles, channel overwrites | Yes, Discord's permission bits | — | Rooms/spaces with power levels | Yes |
+| Threads, forums, polls, events, onboarding | Yes | Yes | Threads; no forums/onboarding | Partial |
+| Search incl. Thai/CJK substrings | Yes (trigram) | Yes | Limited server-side search | Basic |
+| Voice/video | Mesh ≤ 8, or LiveKit SFU; TURN via coturn | SFU, large rooms, Go Live | Element Call (LiveKit) | LiveKit-based |
+| E2EE | Media only (LiveKit option); messages no | DAVE for calls; messages no | Yes, messages and calls | No |
+| Mobile | Installable PWA + Web Push | Native apps | Native apps | Native apps |
+| Federation | No | No | Yes | No |
+| Passkeys | Yes | Yes | Via the homeserver's SSO/OIDC provider | Not documented |
+| Bots | Own REST + Socket.IO API, slash commands, components | Huge ecosystem | Appservices/bots, bridges | Own API |
+| Instance admin UI, registration control | **No** (API tokens only) | n/a | Yes (Synapse Admin API, registration config) | Limited (invite-only registration) |
+| Moderation | AutoMod, reports, audit log, timeouts | Richer AutoMod, ML | Per-room moderation, policy lists | Basic |
+| Translation built in | Yes (self-hosted or on-device) | No | No | No |
+| Observability shipped | Prometheus, OTel, dashboards, alerts | n/a | Prometheus metrics | Limited |
+
+If you need E2EE for text or federation, choose Matrix. If you need native
+mobile apps today, Discord or Revolt. This project fits a community that wants
+Discord's structure, runs its own box, and is fine with a PWA.
 
 ## Quickstart (development)
 
-Requirements: **Node.js 20.17 or newer** (22 recommended; the server uses
-`process.loadEnvFile`), npm 10, and a platform where the `sqlite3` prebuilt
-binary installs (Linux, macOS, Windows x64/arm64). `sharp` is optional; without
-it images are stored without resized variants.
+Requirements: **Node.js 22 or 24** (`engines` allows 20.17+, CI tests 22 and
+24), npm 10, and a platform where the `sqlite3` prebuilt binary installs (Linux,
+macOS, Windows x64/arm64). `sharp` is optional; without it images are stored
+without renditions.
 
 ```bash
 git clone https://github.com/Gubbitkeytoday/discord.git
 cd discord
 npm ci
 cp .env.example .env        # development defaults work as-is
-npm run seed                # optional: 5 demo accounts, 3 servers
+npm run seed                # optional: 5 demo accounts (one bot), 3 servers
 ```
 
 Then, in two terminals:
@@ -145,7 +179,9 @@ npm run dev                 # Vite on :5173, proxies /api and /uploads to :3001
 
 Open <http://localhost:5173>. Seeded accounts are `AlexPro`, `CyberNinja`,
 `ChillBot` (a bot user), `GamerGirl99` and `CodeMaster`, all with password
-`antigravity123`. You can also register a new account from the login screen.
+`antigravity123`. A development server also seeds itself on first boot;
+`npm run seed` does it explicitly, is a no-op on a database that already has
+users, and refuses `NODE_ENV=production` unless `SEED_DATABASE=1`.
 
 On Windows, `start-discord.bat` launches both processes and opens the browser.
 
@@ -157,10 +193,8 @@ npm run verify              # jsx:check + parse:check + a11y + i18n:audit + buil
 ```
 
 Tests pick a port in 3900-3989 per test file; set `TEST_PORT` to force one, or
-`TEST_PORT_BASE` to move the whole range.
-
-The same suite runs against PostgreSQL; each test file creates (and drops) its
-own database on the given server:
+`TEST_PORT_BASE` to move the whole range. The same suite runs against
+PostgreSQL; each test file creates (and drops) its own database:
 
 ```bash
 TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres npm run test:pg
@@ -168,90 +202,83 @@ TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres npm run t
 
 ## Configuration
 
-All settings are environment variables, read from `.env` if present. See
-`.env.example` for comments. With `NODE_ENV=production`, `lib/config.js`
-**refuses to start** on an unsafe combination (marked "required" below).
+All settings are environment variables, read from `.env` if present.
+`.env.example` lists **every** variable the code reads, with comments; the
+generated table in [DEPLOYMENT.md §16](DEPLOYMENT.md#16-environment-reference)
+is the full reference (CI keeps the two in sync). `npm run secrets` prints fresh
+values for every secret (`-- --write` fills the gaps in `.env`).
+
+With `NODE_ENV=production`, `lib/config.js` **refuses to start** on an unsafe
+combination and warns about risky ones. The ones people trip over:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `NODE_ENV` | `development` | `production` enables the safety checks |
-| `PORT` / `HOST` | `3001` / `0.0.0.0` | |
-| `PUBLIC_URL` | `http://localhost:5173` | Your external https origin; used in links and CSP |
-| `TRUST_PROXY` | `loopback` | Number of proxies in front (`1` behind Caddy/nginx) |
-| `CORS_ORIGIN` | `http://localhost:5173` | Leave empty when the app serves the SPA itself; `*` is rejected in production |
-| `SERVE_STATIC` / `STATIC_DIR` | `0` / `dist` | Set `1` in production to serve the built client |
-| `DATABASE_URL` | unset | `postgres://user:pass@host:5432/db` selects **PostgreSQL** (13+, needs `pg_trgm`); unset = SQLite at `DB_PATH`. Schema is created/migrated on boot. See [DEPLOYMENT.md §11](DEPLOYMENT.md#11-postgresql) |
-| `DB_PATH` | `./discord.db` | SQLite file (WAL mode), used when `DATABASE_URL` is unset |
-| `DATABASE_SSL` / `PGSSLMODE`, `DATABASE_SSL_CA` | unset | Postgres TLS: `disable`, `require`, `verify-full`; CA bundle path for a private CA |
-| `DB_POOL_MAX` / `DB_POOL_IDLE_MS` / `DB_CONNECT_TIMEOUT_MS` | `10` / `30000` / `10000` | Postgres connection pool per process |
-| `DB_STATEMENT_TIMEOUT_MS` / `DB_LOCK_TIMEOUT_MS` / `DB_IDLE_IN_TX_TIMEOUT_MS` | `30000` / `10000` / `60000` | Postgres per-connection limits |
-| `DB_TX_ISOLATION` / `DB_TX_RETRIES` | `serializable` / `8` | Postgres transaction isolation and automatic retries on serialization failure/deadlock |
-| `STORAGE_ROOT` / `STORAGE_PUBLIC_BASE` | `./public/uploads` / `/uploads` | Local file storage |
-| `STORAGE_URL_SECRET` | dev value | **Required** in production: new random value, 24+ chars (`openssl rand -base64 32`) |
-| `ADMIN_TOKEN` | unset | Enables file maintenance and report triage endpoints |
-| `ALLOW_DEV_IDENTITY` | `1` | Lets any request impersonate a user via `x-user-id`. **Must be `0`** in production |
-| `SECURE_COOKIES` | `0` | Set `1` once TLS is in front |
-| `MAIL_TRANSPORT` | `console` | `console`, `file` (`MAIL_FILE`) or `smtp` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`); `MAIL_FROM`. In production without a real transport, password reset and e-mail verification answer 503 `MAIL_NOT_CONFIGURED` |
-| `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE` | unset | Optional S3-compatible object storage (AWS, R2, B2, MinIO) |
-| `VOICE_MESH_LIMIT` | `8` | Max people per voice room |
-| `DEFAULT_LOCALE` | `en` | `en` or `th`; browser language wins |
-| `LOG_FORMAT` / `LOG_LEVEL` | `pretty` / `debug` | Use `json` / `info` in production |
-| `ENABLE_METRICS` / `METRICS_TOKEN` | `1` / unset | Prometheus at `/metrics` behind `Bearer <token>`; in production it is only served when a token is set |
-| `SESSION_TTL_DAYS` / `SESSION_IDLE_DAYS` | `30` / `14` | Absolute session lifetime and idle limit |
-| `CSP_IMG_SOURCES` | unset | Extra image origins for the CSP (remote images otherwise go through `/api/media/proxy`) |
-| `MEDIA_PROXY_MAX_BYTES` / `MEDIA_PROXY_CACHE_BYTES` | 8 MiB / 64 MiB | Image proxy limits |
-| `SHUTDOWN_TIMEOUT_MS` | `15000` | Drain time on SIGTERM |
-| `DOMAIN` | `localhost` | Docker Compose only: hostname Caddy gets a certificate for |
-| `POSTGRES_PASSWORD` | example value | Docker Compose only: password of the bundled PostgreSQL (URL-safe characters) |
-
-Rate limits, presence, typing indicators and Socket.IO rooms are kept in
-process memory on both database engines, so run a single app instance.
+| `PUBLIC_URL` | `http://localhost:<PORT>` | Your external `https://` origin; links, CSP, passkeys, push |
+| `STORAGE_URL_SECRET` | dev value | **Required** in production: 24+ random characters |
+| `ALLOW_DEV_IDENTITY` | `1` in dev | Lets any request impersonate a user via `x-user-id`. **Must be `0`** in production |
+| `SECURE_COOKIES` | on in production | Needs HTTPS. On a plain-http LAN test set `0`, or sign-ins are silently dropped (a red boot alert says so) |
+| `CORS_ORIGIN` | dev: `http://localhost:5173` | Leave empty when this process serves the SPA; `*` is refused in production |
+| `TRUST_PROXY` | `1` in production | Number of proxies in front (Caddy/nginx: `1`; NAS proxy + `no-proxy` forwarder: `2`) |
+| `DATABASE_URL` | unset (SQLite) | `postgres://…` selects PostgreSQL 13+ (`pg_trgm`); compose sets it |
+| `REDIS_URL` | unset | Several instances; see DEPLOYMENT.md §8 |
+| `TURN_URLS` / `TURN_SECRET` / `STUN_URLS` | unset | Voice relay; see DEPLOYMENT.md §4 |
+| `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | unset | SFU instead of the mesh |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | unset | Web Push |
+| `POSTGRES_PASSWORD` | empty (compose refuses) | Docker Compose's bundled PostgreSQL; URL-safe |
 
 ## Deployment
 
-Full guide: **[DEPLOYMENT.md](DEPLOYMENT.md)** (Docker Compose with PostgreSQL
-and Caddy, bare Node behind nginx, backups, updates, scaling, security
-checklist, and moving an existing SQLite database to PostgreSQL with
-`npm run db:migrate-to-pg`).
+Full guide: **[DEPLOYMENT.md](DEPLOYMENT.md)**: Docker Compose with PostgreSQL
+and Caddy, a 5-minute LAN quickstart, Synology/QNAP, bare Node behind nginx,
+TURN, LiveKit, backups (with a restore drill), updates, scaling, observability,
+and moving an existing SQLite database to PostgreSQL
+(`npm run db:migrate-to-pg`).
 
 Minimal bare-metal run:
 
 ```bash
 npm ci && npm run build
 # in .env: NODE_ENV=production, SERVE_STATIC=1, ALLOW_DEV_IDENTITY=0,
-#          STORAGE_URL_SECRET=<random>, SECURE_COOKIES=1, CORS_ORIGIN=,
+#          STORAGE_URL_SECRET=<npm run secrets>, CORS_ORIGIN=,
 #          PUBLIC_URL=https://chat.example.com, TRUST_PROXY=1,
 #          DATABASE_URL=postgres://… (recommended; omit to use SQLite)
 npm start
 ```
 
-Put TLS in front (Caddy or `nginx.conf.example`) — browsers only allow
-microphone/camera on HTTPS origins. With Docker, edit `.env` the same way
-(the compose file sets `NODE_ENV=production` but reads the rest from `.env`, so
-the development defaults will make it refuse to start), set `DOMAIN` and
-`POSTGRES_PASSWORD`, then `docker compose up -d --build`.
+Put TLS in front (Caddy or `nginx.conf.example`): browsers only allow the
+microphone and camera on HTTPS origins. **Testing on a LAN without TLS?** Also
+set `SECURE_COOKIES=0` and `PUBLIC_URL=http://<lan-ip>:3001`, and never expose
+that setup to the internet.
 
-Before inviting users: set up a TURN server (see limitations), schedule
-`npm run backup` + `npm run backup:prune`, and set `ADMIN_TOKEN`.
+With Docker: `cp .env.example .env`, `npm run secrets -- --write` (or paste the
+printed values), set `NODE_ENV=production`, `PUBLIC_URL`, `DOMAIN`,
+`ALLOW_DEV_IDENTITY=0`, then `docker compose up -d --build`. Ports 80/443
+taken (a NAS)? Use `HTTP_PORT`/`HTTPS_PORT` or the `no-proxy` profile.
+
+Before inviting users: set up TURN, schedule backups
+(`scripts/ops/docker-backup.sh backup` in Docker, `npm run backup` without) and
+run a restore drill once, and set `ADMIN_TOKEN`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
-| Server exits with "Refusing to start — configuration is unsafe for production" | One of the required production settings above; the message lists which |
-| `npm ci` fails building `sqlite3` | No prebuilt binary for your platform/Node; install Python 3 and a C++ toolchain, or use Node 22 LTS |
+| Server exits with "Refusing to start — configuration is unsafe for production" | One of the required production settings; the message lists which |
+| Sign-up works, but a reload goes back to the login screen | `SECURE_COOKIES` is on and the page is plain `http://` (not localhost); the boot log shows a red CONFIGURATION PROBLEM box. Use HTTPS, or `SECURE_COOKIES=0` for a LAN test |
+| `docker compose up`: "set POSTGRES_PASSWORD in .env" | Intended; `.env.example` leaves it empty. `npm run secrets -- --write` |
+| Caddy: "address already in use" | Something (a NAS) owns 80/443: `HTTP_PORT`/`HTTPS_PORT` or the `no-proxy` profile |
+| `npm ci` fails building `sqlite3` | No prebuilt binary for your platform/Node; install Python 3 and a C++ toolchain, or use Node 22/24 |
 | Uploaded images are blank in dev | Open the app via Vite on :5173 (it proxies `/uploads`), not the API port |
-| Voice connects for some users but not others | No TURN server; users behind strict NAT cannot reach each other |
-| "Voice room is full" (`VOICE_FULL`) | Mesh cap reached; raise `VOICE_MESH_LIMIT` only if everyone has the upstream bandwidth |
+| Voice connects for some users but not others | No TURN relay; users behind strict NAT cannot reach each other |
+| "Voice room is full" (`VOICE_FULL`) | Mesh cap reached; enable LiveKit, or raise `VOICE_MESH_LIMIT` only if everyone has the upstream bandwidth |
 | Mic/camera prompt never appears | Page is not served over HTTPS (localhost is exempt) |
-| Thai search finds nothing on an old database | SQLite: FTS index predates migration v2; run `npm run search:reindex`. Postgres: check `pg_trgm` is installed |
+| Thai search finds nothing on an old database | SQLite: run `npm run search:reindex`. Postgres: check `pg_trgm` is installed |
 | `/api/health` returns 503 | The database is unreachable; `database.error` in the response says why |
-| `permission denied to create extension "pg_trgm"` | The `DATABASE_URL` role must own the database, or run `CREATE EXTENSION pg_trgm` once as an admin |
-| Tests fail with `EADDRINUSE` | Another process holds a 39xx port; set `TEST_PORT` |
+| Tests fail with `EADDRINUSE` | Another process holds a 39xx port; set `TEST_PORT_BASE` |
 | Blank page after an update | Rebuild the client (`npm run build`) so `dist/` matches the server |
 
-`GET /api/health` returns the live and expected schema versions (currently 17)
-and socket count; check it first.
+`GET /api/health` returns the live and expected schema versions (currently
+**38**, the highest migration in `db.js`) and the socket count; check it first.
 
 ## Project layout
 
@@ -259,16 +286,23 @@ and socket count; check it first.
 server.js           Express app, REST routes, static serving
 realtime.js         Socket.IO gateway: presence, typing, voice signalling
 db.js, db/          database layer: SQLite + PostgreSQL drivers, dialect helpers,
-                    migrations (v1-v17), schema.sql / schema.pg.sql, seed.js
-lib/                auth, permissions, snowflake IDs, TOTP, rate limits, config, mailer, S3
-routes/             auth, files, account security
-services/           domain logic: messages, guilds, automod, threads, forum, polls, apps ...
+                    migrations (v1-v38), schema.sql / schema.pg.sql, seed.js
+lib/                auth, permissions, snowflake IDs, TOTP, rate limits, Redis,
+                    presence, config, mailer, S3, telemetry, static assets
+routes/             auth, files, passkeys, account security
+services/           domain logic: messages, guilds, automod, threads, forum, polls,
+                    apps, push, livekit, translation, media pipeline, observability ...
 storageService.js   content-addressed file storage
-src/                React 19 client (components, hooks, i18n, utils)
-scripts/            tests, audits, backup, storage tools, example bot
+src/                React 19 client (components, hooks, i18n, voice, PWA)
+public/             manifest, service worker, offline page, icons
+ops/                Grafana dashboards, alert rules, runbooks
+scripts/            tests, e2e, audits, backup, storage tools, load tests,
+                    ops/ (secrets, docker-backup, env-check), example bot
 ```
 
 Deeper design notes (mostly in Thai): [ARCHITECTURE.md](ARCHITECTURE.md).
+Performance and load tests: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Plan: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
