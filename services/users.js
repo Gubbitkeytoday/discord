@@ -14,6 +14,10 @@ import {
   getCategory, getAgeGroup, checkBirthdate, applyMinorDefaults, ageGroupOf
 } from './userSettings.js';
 import { publicStatus } from '../lib/presence.js';
+import {
+  LIMITS as PROFILE_LIMITS, cleanBio, cleanStatusEmoji, checkIdentityText, assertNotReservedName,
+  maskExpiredStatus
+} from './profiles.js';
 
 /**
  * The one refusal for "you cannot reach this person": blocked, DMs limited to
@@ -28,7 +32,7 @@ export function unreachable() {
 
 const PUBLIC_COLUMNS = `
   id, username, discriminator, display_name, avatar_url, banner_url, accent_color,
-  bio, pronouns, status, custom_status, custom_status_emoji, is_bot, created_at,
+  bio, pronouns, status, custom_status, custom_status_emoji, custom_status_expires_at, is_bot, created_at,
   profile_visibility
 `;
 
@@ -87,7 +91,8 @@ export async function getUser(userId, viewerId = null) {
 
   // SQLite has no boolean type; normalise on the way out so the wire shape is
   // the same here as it is on a message.
-  const shaped = { ...user, is_bot: Boolean(user.is_bot), mutual_servers: mutualServers };
+  // An expired custom status is hidden even before the sweeper clears it.
+  const shaped = { ...maskExpiredStatus(user), is_bot: Boolean(user.is_bot), mutual_servers: mutualServers };
   // "Invisible" is only ever revealed to its owner, and a payload built
   // without a viewer (a broadcast) is for everyone else.
   shaped.status = publicStatus(shaped.status, viewerId, userId);
@@ -175,7 +180,7 @@ export async function updateProfile({ userId, patch }) {
   const writable = [
     'display_name', 'bio', 'pronouns', 'status', 'custom_status', 'custom_status_emoji',
     'avatar_url', 'banner_url', 'accent_color', 'theme', 'locale',
-    'avatar_file_id', 'banner_file_id', 'profile_visibility'
+    'avatar_file_id', 'banner_file_id', 'profile_visibility', 'custom_status_expires_at'
   ];
   if (patch.profile_visibility !== undefined
       && !['everyone', 'mutual', 'friends'].includes(patch.profile_visibility)) {
@@ -187,7 +192,10 @@ export async function updateProfile({ userId, patch }) {
   // it so the file gets a reference and survives garbage collection.
   // Discord's limits; unbounded text here ends up in every member list,
   // message header and broadcast.
-  const LIMITS = { display_name: 32, bio: 190, pronouns: 40, custom_status: 128, locale: 16, theme: 32 };
+  const LIMITS = {
+    display_name: PROFILE_LIMITS.display_name, bio: PROFILE_LIMITS.bio, pronouns: PROFILE_LIMITS.pronouns,
+    custom_status: PROFILE_LIMITS.custom_status, locale: 16, theme: 32
+  };
   for (const [field, max] of Object.entries(LIMITS)) {
     if (patch[field] === undefined || patch[field] === null) continue;
     if (typeof patch[field] !== 'string' || patch[field].length > max) {
@@ -208,6 +216,20 @@ export async function updateProfile({ userId, patch }) {
   }
 
   const resolved = { ...patch };
+  // Bio markdown is rendered from a safe subset; the stored text is cleaned
+  // (no bidi overrides or control characters, http(s)-only masked links).
+  if (typeof patch.bio === 'string') resolved.bio = cleanBio(patch.bio) || null;
+  if (patch.custom_status_emoji !== undefined) resolved.custom_status_emoji = cleanStatusEmoji(patch.custom_status_emoji);
+  // A status typed here has no "clear after"; the status menu sets one.
+  delete resolved.custom_status_expires_at;
+  if (patch.custom_status !== undefined) resolved.custom_status_expires_at = null;
+  // What others see is checked with AutoMod's normalisation before it is saved.
+  await checkIdentityText({
+    display_name: patch.display_name, bio: resolved.bio, pronouns: patch.pronouns, custom_status: patch.custom_status
+  });
+  if (typeof patch.display_name === 'string' && patch.display_name !== current.display_name) {
+    await assertNotReservedName('display_name', patch.display_name, userId);
+  }
   if (patch.accent_color !== undefined) resolved.accent_color = normaliseColor(patch.accent_color, 'accent_color');
   // A remote avatar/banner is stored as its same-origin proxy URL, so viewers'
   // browsers never contact the third-party host (see services/mediaProxy.js).
@@ -254,7 +276,17 @@ export async function setPresence({ userId, status, customStatus = undefined }) 
   }
   const sets = [`status = ?`, `presence_updated_at = ${sql.now}`];
   const params = [status];
-  if (customStatus !== undefined) { sets.push('custom_status = ?'); params.push(customStatus); }
+  if (typeof customStatus === 'string') {
+    if (customStatus.length > PROFILE_LIMITS.custom_status) {
+      throw new ApiError(`custom_status must be at most ${PROFILE_LIMITS.custom_status} characters`, { code: 'INVALID_FIELD' });
+    }
+    await checkIdentityText({ custom_status: customStatus });
+  }
+  if (customStatus !== undefined) {
+    // A status set this way (socket, /status) never expires by itself.
+    sets.push('custom_status = ?', 'custom_status_expires_at = NULL');
+    params.push(customStatus);
+  }
   params.push(userId);
   await runQuery(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params);
   return getQuery(`SELECT ${PUBLIC_COLUMNS} FROM users WHERE id = ?`, [userId]);
