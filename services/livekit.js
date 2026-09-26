@@ -136,17 +136,20 @@ const list = (value) => String(value ?? '').split(',').map((v) => v.trim()).filt
 
 /**
  * STUN/TURN for the mesh. Same scheme as GET /api/voice/ice-servers: TURN REST
- * credentials (coturn use-auth-secret), short-lived and per user.
+ * credentials (coturn use-auth-secret), short-lived and minted per request.
  */
-export function buildIceServers(userId, env = process.env) {
+export function buildIceServers(env = process.env) {
   const stun = list(env.STUN_URLS ?? 'stun:stun.l.google.com:19302');
   const iceServers = stun.length ? [{ urls: stun }] : [];
   const turn = list(env.TURN_URLS);
   if (turn.length && env.TURN_SECRET) {
     const ttl = Math.max(60, Number.parseInt(env.TURN_TTL_SECONDS, 10) || 86400);
-    const username = `${Math.floor(Date.now() / 1000) + ttl}:${userId}`;
-    const credential = crypto.createHmac('sha1', env.TURN_SECRET).update(username).digest('base64');
-    iceServers.push({ urls: turn, username, credential });
+    // coturn's REST API (use-auth-secret) mandates HMAC-SHA1. The username is
+    // expiry + a random nonce, so no account identifier goes into the MAC
+    // (same scheme as GET /api/voice/ice-servers).
+    const turnLabel = `${Math.floor(Date.now() / 1000) + ttl}:${crypto.randomUUID()}`;
+    const credential = crypto.createHmac('sha1', env.TURN_SECRET).update(turnLabel).digest('base64');
+    iceServers.push({ urls: turn, username: turnLabel, credential });
   }
   return { iceServers, iceTransportPolicy: env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all' };
 }
@@ -161,7 +164,7 @@ export function clientVoiceConfig(userId) {
       ? { url: cfg.url, e2ee: Boolean(cfg.e2eeSecret), videoCodec: cfg.videoCodec }
       : null,
     meshLimit,
-    ...buildIceServers(userId)
+    ...buildIceServers()
   };
 }
 

@@ -69,6 +69,7 @@
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "import-in-the-middle": "^3.5.1",
+    "express-rate-limit": "^8.7.0",
     "livekit-client": "^2.22.3",
     "livekit-server-sdk": "^2.19.1",
     "lucide-react": "^0.469.0",
@@ -84,8 +85,8 @@
     "socket.io-client": "^4.8.1",
     "sqlite3": "^6.0.1",
     "tailwindcss": "^4.3.3",
-    "web-push": "^3.6.7",
-    "thumbhash": "^0.1.1"
+    "thumbhash": "^0.1.1",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@sentry/browser": "^10.75.3",

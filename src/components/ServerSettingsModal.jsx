@@ -20,7 +20,7 @@ import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../
 import {
   permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
 } from '../utils/permissionCatalog';
-import { proxiedImageUrl } from '../utils/media';
+import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -592,9 +592,9 @@ function useFilePreview(file) {
   const [url, setUrl] = useState(null);
   useEffect(() => {
     if (!file) { setUrl(null); return undefined; }
-    const objectUrl = URL.createObjectURL(file);
+    const objectUrl = filePreviewUrl(file);
     setUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [file]);
   return url;
 }

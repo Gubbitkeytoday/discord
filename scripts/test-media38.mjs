@@ -469,3 +469,16 @@ describe('S3 client signing (against the verifying fake)', () => {
     assert.ok(audit.postOk >= 2);
   });
 });
+
+describe('direct upload mode detection', () => {
+  test('R2 is recognised by the endpoint host, not by a substring anywhere in the URL', async () => {
+    const { isR2Endpoint } = await import('../services/mediaPipeline.js');
+    assert.equal(isR2Endpoint('https://abc123.r2.cloudflarestorage.com'), true);
+    assert.equal(isR2Endpoint('https://R2.CloudflareStorage.com/'), true);
+    assert.equal(isR2Endpoint('https://r2.cloudflarestorage.com.evil.example'), false);
+    assert.equal(isR2Endpoint('https://evil.example/r2.cloudflarestorage.com'), false);
+    assert.equal(isR2Endpoint('https://notr2.cloudflarestorage.com'), false);
+    assert.equal(isR2Endpoint('not a url'), false);
+    assert.equal(isR2Endpoint(undefined), false);
+  });
+});

@@ -375,7 +375,14 @@ export function directUploadMode() {
   const configured = String(process.env.S3_DIRECT_UPLOAD ?? '').toLowerCase();
   if (['0', 'off', 'false', 'no'].includes(configured)) return null;
   if (configured === 'post' || configured === 'put') return configured;
-  return /r2\.cloudflarestorage\.com/i.test(String(s3.endpoint)) ? 'put' : 'post';
+  return isR2Endpoint(s3.endpoint) ? 'put' : 'post';
+}
+
+/** Cloudflare R2: the endpoint's host is r2.cloudflarestorage.com or a subdomain of it. */
+export function isR2Endpoint(endpoint) {
+  let host;
+  try { host = new URL(String(endpoint)).hostname.toLowerCase(); } catch { return false; }
+  return host === 'r2.cloudflarestorage.com' || host.endsWith('.r2.cloudflarestorage.com');
 }
 
 const DIRECT_CATEGORIES = new Set(['attachments', 'avatars', 'banners', 'icons', 'emojis', 'stickers', 'audio', 'video']);

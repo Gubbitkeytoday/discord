@@ -34,9 +34,16 @@ function pwaServiceWorker() {
     },
     closeBundle() {
       const file = path.join(outDir, 'sw.js');
-      if (!fs.existsSync(file)) return;
+      // Read, then write the same path: no existsSync() check-then-use race.
+      let raw;
+      try {
+        raw = fs.readFileSync(file, 'utf8');
+      } catch (err) {
+        if (err.code === 'ENOENT') return;
+        throw err;
+      }
       const buildId = crypto.createHash('sha256').update(allFiles.join('\n')).digest('hex').slice(0, 12);
-      const source = fs.readFileSync(file, 'utf8')
+      const source = raw
         .replace("/*__BUILD_ID__*/'dev'", JSON.stringify(buildId))
         .replace('/*__PRECACHE__*/[]', JSON.stringify(files.map((f) => `/${f}`)));
       fs.writeFileSync(file, source);

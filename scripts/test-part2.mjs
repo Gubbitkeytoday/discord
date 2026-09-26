@@ -125,6 +125,43 @@ describe('rate limiting', () => {
     }
     assert.ok(throttled, 'login was never rate limited');
   });
+
+  test('express-rate-limit on the token-bucket store: headers, 429 RATE_LIMITED, methods, reset', async () => {
+    const { default: express } = await import('express');
+    const { rateLimit, TokenBucketStore } = await import('../lib/rateLimit.js');
+    const limiter = rateLimit({ name: `unit-${Date.now()}`, limit: 2, windowMs: 60_000, methods: ['GET'] });
+    const app = express();
+    app.use((req, _res, next) => { req.userId = req.get('x-user') || undefined; next(); });
+    app.all('/x', limiter, (_req, res) => res.json({ ok: true }));
+    app.use((err, _req, res, _next) => res.status(err.status).json({ code: err.code, details: err.details }));
+    const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/x`;
+      const hit = (method = 'GET', user = 'u1') => fetch(url, { method, headers: { 'x-user': user } });
+      const first = await hit();
+      assert.equal(first.status, 200);
+      assert.equal(first.headers.get('x-ratelimit-limit'), '2');
+      assert.equal(first.headers.get('x-ratelimit-remaining'), '1');
+      assert.equal((await hit()).status, 200);
+      const blocked = await hit();
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.headers.get('x-ratelimit-remaining'), '0');
+      const seconds = Number(blocked.headers.get('retry-after'));
+      assert.ok(seconds >= 1 && seconds <= 30, String(seconds));
+      assert.deepEqual(await blocked.json(), { code: 'RATE_LIMITED', details: { retry_after_seconds: seconds } });
+      assert.equal((await hit('POST')).status, 200, 'methods outside the list are not counted');
+      assert.equal((await hit('GET', 'u2')).status, 200, 'budgets are per user');
+      await limiter.resetKey('u1');
+      assert.equal((await hit()).status, 200, 'resetKey refills the bucket');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+    const store = new TokenBucketStore({ name: `unit-store-${Date.now()}`, limit: 3, windowMs: 60_000 });
+    assert.equal((await store.increment('k')).totalHits, 1);
+    assert.equal((await store.increment('k')).totalHits, 2);
+    await store.decrement('k');
+    assert.equal((await store.increment('k')).totalHits, 2, 'decrement returns a token');
+  });
 });
 
 describe('automod', () => {

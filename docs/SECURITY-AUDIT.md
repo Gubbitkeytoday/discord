@@ -238,6 +238,14 @@ none, same `paths-ignore` as `.github/workflows/codeql.yml`). Fixed in code:
 | `js/user-controlled-bypass` | `services/passkeys.js` `verifyAssertion` | Whether the WebAuthn user handle may be absent is decided by the stored challenge purpose (required for discoverable sign-in per WebAuthn §7.2), not by the request omitting it (tests in `test-passkeys.mjs`). |
 | (hardening) | `routes/auth.js` change-password | Per-user limiter (10 / 15 min) instead of only the global 600/min read budget for current-password guesses (test in `test-part2.mjs`). |
 | (hardening) | `lib/mailer.js` `sendMail` | Recipients containing control characters are refused (SMTP command / header / log injection). |
+| `js/missing-rate-limiting` (15 routes) | `lib/rateLimit.js` `rateLimit()` | Every limiter is now an `express-rate-limit` instance on `TokenBucketStore`, a Store adapter over the existing token buckets (in memory, or the shared Redis bucket with fail-open to local). Budgets, env knobs, keys, 429 `RATE_LIMITED`, `Retry-After` and `X-RateLimit-Limit/Remaining` are unchanged (plus `X-RateLimit-Reset`). The global `/api` budget is `[readOnly, mutating]`, each skipping the other's methods (test in `test-part2.mjs`). |
+| `js/xss-through-dom` | `ForumView.jsx`, `ServerSettingsModal.jsx` file previews | Previews come from `filePreviewUrl()` (`src/utils/media.js`): only a `blob:` URL, URI-encoded, else no preview. |
+| `js/insecure-randomness` | `src/App.jsx` send nonce | `crypto.getRandomValues` instead of `Math.random`. |
+| `js/weak-cryptographic-algorithm` | `services/livekit.js` `buildIceServers` | The TURN username is expiry + random UUID, as in `server.js`, not the user id. HMAC-SHA1 stays because coturn's REST API (`use-auth-secret`) requires it (test in `test-livekit.mjs`). |
+| `js/regex/missing-regexp-anchor` | `services/mediaPipeline.js` `directUploadMode` | `isR2Endpoint()` parses the URL and matches the host exactly (`r2.cloudflarestorage.com` or a subdomain) (test in `test-media38.mjs`). |
+| `js/missing-origin-check` | `public/sw.js` message handler | Messages whose `event.origin` is not the worker's own origin are ignored. |
+| `js/file-system-race` | `vite.config.js` SW build step | `readFileSync` in try/catch (ENOENT = skip) replaces `existsSync` + read. |
+| (config) | `.github/workflows/codeql.yml` | `scripts/ux/**` (persona/UX harnesses) added to `paths-ignore`. |
 
 The remaining alerts are false positives; dismiss them in the GitHub UI with
 the reason given.
@@ -250,19 +258,6 @@ the reason given.
   ranges), and the socket connects through `guardedLookup`, which re-checks
   the address actually dialled (DNS rebinding). CodeQL does not model either
   function as a sanitizer. Do not weaken them to silence this.
-- **`js/missing-rate-limiting`** — `routes/passkeys.js` (login/options,
-  login/verify, reauth/password, reauth/options, reauth/verify,
-  register/options), `routes/auth.js` (login, change-password),
-  `routes/accountSecurity.js` (verify-email), `routes/files.js`
-  (`GET /files/:fileId`, admin integrity check), `server.js`
-  (`DELETE /api/users/@me`, SPA fallback `app.get('*')`). False positive. The
-  query only recognises npm limiter packages (express-rate-limit,
-  express-brute, rate-limiter-flexible, …); this app uses its own token-bucket
-  middleware in `lib/rateLimit.js`, which is in each route chain
-  (`loginLimit`, `reauthLimit`, `manageLimit`, `loginRateLimit`,
-  `passwordChangeRateLimit`, `writeRateLimit`) and globally on `/api`
-  (`readRateLimit`, 600/min). verify-email takes a 256-bit token. The SPA
-  fallback serves the static `index.html` and is not an API route.
 - **`js/insufficient-password-hash` — `lib/totp.js` `hashRecoveryCode`.**
   False positive: the input is a server-generated random recovery code, not a
   user-chosen password, so a salted slow hash is not required (same as the
@@ -274,15 +269,6 @@ the reason given.
   `regex` automod rules are server-admin-authored patterns (MANAGE_GUILD). They
   are length-capped (200), rejected when they contain lookbehind or nested
   quantifiers, compiled with the `u` flag, and invalid patterns are refused.
-- **`js/xss-through-dom`** — `ForumView.jsx` attachment preview,
-  `ServerSettingsModal.jsx` emoji/sticker preview. False positive: the value is
-  a `blob:` URL from `URL.createObjectURL(file)` used as an `<img src>`
-  (rendered by React, never as HTML). A blob URL cannot run script from an
-  image element.
-- **`js/insecure-randomness` — `src/App.jsx` `handleSendMessage` nonce.**
-  False positive: the nonce only matches the optimistic pending message to the
-  server echo. It is not a secret and grants nothing; the server assigns the
-  message id.
 - **`js/cors-permissive-configuration` — `server.js` CORS setup.** False
   positive: the origin comes from the operator's `CORS_ORIGIN`. Production
   defaults to same-origin, and `lib/config.js` warns about `CORS_ORIGIN=*` in
@@ -296,8 +282,13 @@ the reason given.
   `sendMail` now refuses any recipient containing a control character before
   logging, and registration already rejects whitespace in addresses. CodeQL
   does not model a reject-guard as a sanitizer.
-- **TURN credentials (`js/weak-cryptographic-algorithm`, if reported) —
-  `server.js` ICE endpoint.** HMAC-SHA1 is required by coturn's REST API
-  (`use-auth-secret`). HMAC-SHA1 is not affected by SHA-1 collision attacks.
-  The MAC input (`turnLabel`) is expiry:random-nonce with no account data. The
-  local run did not report this alert.
+- **`js/file-access-to-http` — `lib/s3Client.js` `request`.** False
+  positive: sending stored upload bytes to the operator's configured S3/R2
+  bucket (SigV4-signed, endpoint from `S3_ENDPOINT`) is the storage backend's
+  purpose. No user input chooses the destination.
+
+After these changes the local run reports eight alerts, all listed above as
+false positives: `js/request-forgery` (linkEmbeds), `js/insufficient-password-hash`
+(totp), `js/regex-injection` (automod), `js/cors-permissive-configuration`
+(server.js), `js/http-to-file-access` ×2 (storageService, mailer),
+`js/log-injection` (mailer) and `js/file-access-to-http` (s3Client).

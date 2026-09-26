@@ -42,3 +42,21 @@ export function cssImageUrl(url) {
   if (!src) return undefined;
   return `url("${String(src).replace(/["\\\n\r]/g, (c) => encodeURIComponent(c))}")`;
 }
+
+/**
+ * A local preview URL for a file the user picked: a `blob:` URL from
+ * URL.createObjectURL, returned only in that shape and URI-encoded (a no-op
+ * for a real blob URL), so nothing derived from the file itself can end up in
+ * an `src` as another scheme or as markup. The caller revokes it with
+ * URL.revokeObjectURL when done. Null when the browser gave anything else.
+ */
+export function filePreviewUrl(file) {
+  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function' || !file) return null;
+  const objectUrl = URL.createObjectURL(file);
+  const safe = encodeURI(objectUrl);
+  if (!/^blob:/.test(safe) || safe !== objectUrl) {
+    URL.revokeObjectURL(objectUrl);
+    return null;
+  }
+  return safe;
+}
