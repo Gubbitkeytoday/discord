@@ -2134,11 +2134,11 @@ describe('search operators', () => {
   });
 
   test('an unusable operator value is left in the text rather than silently dropped', () => {
-    const { term, filters, unknown } = parseSearchQuery('before:yesterday has:vibes hello');
+    const { term, filters, unknown } = parseSearchQuery('before:someday has:vibes hello');
     assert.equal(filters.before, null);
     assert.deepEqual(filters.has, []);
-    assert.deepEqual(unknown, ['before:yesterday', 'has:vibes']);
-    assert.equal(term, 'before:yesterday has:vibes hello');
+    assert.deepEqual(unknown, ['before:someday', 'has:vibes']);
+    assert.equal(term, 'before:someday has:vibes hello');
   });
 
   test('during: accepts a day, a month or a year', () => {

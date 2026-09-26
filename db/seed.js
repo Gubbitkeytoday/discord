@@ -3,13 +3,20 @@
 // Seed IDs are intentionally human-readable ('user-me', 'chan-102') rather than
 // snowflakes — the frontend boots with currentUserId = 'user-me'. Everything
 // created at runtime uses generateId().
+//
+// Also the `npm run seed` entry point — see main() at the bottom.
 
+// First: .env must be in process.env before db.js (imported via lib/auth.js)
+// picks SQLite or PostgreSQL from DATABASE_URL.
+import '../lib/dotenv.js';
 import { generateId, snowflakeForDate } from '../lib/snowflake.js';
 import { hashPassword } from '../lib/auth.js';
 import { DEFAULT_PERMISSIONS, ALL_PERMISSIONS, fromNames } from '../lib/permissions.js';
 import { isPostgres } from './dialect.js';
 // Remote images are stored as same-origin proxy URLs, as the services do.
 import { proxiedImageUrl } from '../lib/mediaUrls.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const now = () => new Date().toISOString();
 
@@ -286,3 +293,61 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
 }
 
 export { ALL_PERMISSIONS };
+
+// --- `npm run seed` / `node db/seed.js` ---------------------------------------
+//
+// Creates (or migrates) the database named by DATABASE_URL / DB_PATH and fills
+// an empty one with the demo data above. It used to be a module with no entry
+// point, so the documented command opened the database file and did nothing.
+//
+// Refused where the server itself would refuse to seed (db.js shouldSeed):
+// NODE_ENV=production without SEED_DATABASE=1, or SEED_DATABASE=0 anywhere —
+// the demo accounts share a password published in this file.
+//
+// Deliberately not top-level await: db.js imports this module, and awaiting
+// the dynamic import of db.js during this module's own evaluation would wait
+// on itself.
+async function main() {
+  // .env was loaded by the first import (lib/dotenv.js), before db.js chose
+  // its engine. db.js is already evaluated here (lib/auth.js imports it).
+  const { shouldSeed, initDB, closeDB, getQuery: get, DB_PATH } = await import('../db.js');
+  if (!shouldSeed()) {
+    console.error(
+      process.env.NODE_ENV === 'production'
+        ? '❌ Refusing to seed: NODE_ENV=production. The demo accounts share the published password '
+          + `"${SEED_PASSWORD}" and would own the seeded servers. If this really is a throwaway `
+          + 'demo instance, run again with SEED_DATABASE=1.'
+        : '❌ Refusing to seed: SEED_DATABASE is set to a false value. Unset it or set SEED_DATABASE=1.'
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const target = isPostgres ? 'PostgreSQL (DATABASE_URL)' : DB_PATH;
+  const before = await (async () => {
+    await initDB({ seed: false });
+    return (await get(`SELECT count(*) AS count FROM users`)).count;
+  })();
+  if (Number(before) > 0) {
+    console.log(`ℹ️  ${target} already has ${before} user(s); nothing seeded (seeding only fills an empty database).`);
+  } else {
+    await initDB({ seed: true });
+    console.log(`   Target: ${target}`);
+    console.log(`   Sign in as any of ${SEED_USERS.map((u) => u.username).join(', ')} — password "${SEED_PASSWORD}".`);
+  }
+  await closeDB();
+}
+
+const invokedDirectly = (() => {
+  try {
+    return Boolean(process.argv[1])
+      && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('❌ Seeding failed:', err.message);
+    process.exitCode = 1;
+  });
+}
