@@ -3,6 +3,7 @@ import { LogIn, UserPlus, AlertTriangle, Loader2, ArrowLeft, ShieldCheck } from 
 import { post, setApiIdentity } from '../api';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
+import { LanguageMenu } from '../i18n/LanguagePicker.jsx';
 
 /**
  * Real login / registration against /api/auth. Shown when there is no session.
@@ -72,6 +73,7 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
 
   return (
     <div className="fixed inset-0 bg-d-base flex items-center justify-center overlay-center p-4">
+      <LanguageMenu className="absolute top-3 right-3" />
       {/* Discord's auth card is a narrow ~480px column; the old 896px card
           stretched two inputs across the whole screen whenever the dev-account
           column was not there to fill it. */}

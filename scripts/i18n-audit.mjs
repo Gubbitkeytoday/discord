@@ -1,27 +1,78 @@
 // ============================================================================
 //  Translation audit.
 //
-//  Three things can silently break an internationalised UI, and none of them is
-//  a build error:
-//    1. a key present in one dictionary but missing from the other
-//    2. a placeholder ({name}) that exists in one translation but not the other
-//    3. a t('key') call in a component that no dictionary defines
-//  This script fails the process on 1 and 3, warns on 2, and reports the amount
-//  of Thai text still hardcoded in components so the remaining work is visible.
+//  Things that silently break an internationalised UI without a build error:
+//    1. a dictionary that does not parse, or holds non-string values
+//    2. a placeholder ({name}) present in one language but not in English —
+//       the translated string would render "{name}" or drop the value
+//    3. a t('key') call in a component that English does not define
+//    4. keys missing from / extra to a locale
+//  1–3 fail the process. For 4, English and Thai are maintained in-tree and
+//  must match exactly (error); the other locales are community translations
+//  that may lag, so missing/extra keys and strings still identical to English
+//  are warnings — the English fallback covers them at runtime.
 //
-//  Usage: node scripts/i18n-audit.mjs
+//  Usage: node scripts/i18n-audit.mjs [--verbose]
+//  Per-locale table: npm run i18n:report
 // ============================================================================
 import fs from 'fs';
 import path from 'path';
+import {
+  ROOT, SRC, META_FILE, LOCALE_REGISTRY, loadDictionaries, analyse
+} from './i18n-lib.mjs';
 
-const ROOT = path.resolve(import.meta.dirname, '..');
-const SRC = path.join(ROOT, 'src');
+const VERBOSE = process.argv.includes('--verbose');
+const STRICT = new Set(['en', 'th']); // locales whose key set must equal English exactly
 
-const th = (await import(`file://${path.join(SRC, 'i18n/th.js')}`)).default;
-const en = (await import(`file://${path.join(SRC, 'i18n/en.js')}`)).default;
+const loaded = await loadDictionaries();
+const en = loaded.find((d) => d.name === 'en')?.dict;
+const errors = [];
+const warnings = [];
+if (!en) {
+  console.error(`❌ en.js failed to load: ${loaded.find((d) => d.name === 'en')?.error}`);
+  process.exit(1);
+}
 
-const DICTIONARIES = { th, en };
+const DICTIONARIES = {};
+for (const { name, dict, error } of loaded) {
+  if (error) { errors.push(`${name}: failed to load (${error})`); continue; }
+  DICTIONARIES[name] = dict;
+}
 const BASE = 'en'; // English is the reference: every other locale is measured against it.
+
+const sample = (list, n = 8) => `${list.slice(0, n).join(', ')}${list.length > n ? ` … +${list.length - n}` : ''}`;
+const results = {};
+const registryDictionaries = new Set(LOCALE_REGISTRY.map((e) => e.dictionary));
+
+for (const [locale, dict] of Object.entries(DICTIONARIES)) {
+  if (locale === BASE) continue;
+  const r = analyse(dict, en);
+  results[locale] = r;
+  const bucket = STRICT.has(locale) ? errors : warnings;
+  if (!registryDictionaries.has(locale)) warnings.push(`${locale}: no entry in src/i18n/locales/_registry.js — it will never be offered`);
+  if (r.nonString.length) errors.push(`${locale}: ${r.nonString.length} non-string value(s) → ${sample(r.nonString)}`);
+  if (r.missing.length) bucket.push(`${locale}: ${r.missing.length} key(s) missing → ${sample(r.missing)}`);
+  if (r.extra.length) bucket.push(`${locale}: ${r.extra.length} key(s) not in ${BASE} → ${sample(r.extra)}`);
+  for (const { key, diff } of r.placeholderMismatches) {
+    errors.push(`${locale} "${key}": placeholder mismatch (${diff.join(', ')})`);
+  }
+  if (!STRICT.has(locale) && r.identical.length > Object.keys(en).length * 0.2) {
+    warnings.push(`${locale}: ${r.identical.length} string(s) identical to English — possibly untranslated${VERBOSE ? ` → ${sample(r.identical, 30)}` : ''}`);
+  }
+}
+
+// Precomputed completeness shown in the language picker.
+if (fs.existsSync(META_FILE)) {
+  try {
+    const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+    const stale = Object.entries(results).filter(([name, r]) => meta[name] !== r.completeness).map(([name]) => name);
+    if (stale.length) warnings.push(`_meta.json is stale for ${stale.join(', ')} — run: npm run i18n:report -- --write`);
+  } catch (error) {
+    errors.push(`_meta.json does not parse (${error.message})`);
+  }
+} else if (Object.keys(results).length > 1) {
+  warnings.push('src/i18n/locales/_meta.json missing — picker shows no completeness until: npm run i18n:report -- --write');
+}
 
 // --- collect source files ---------------------------------------------------
 function walk(dir, out = []) {
@@ -36,34 +87,6 @@ function walk(dir, out = []) {
   return out;
 }
 const files = walk(SRC);
-
-// --- 1. key parity ----------------------------------------------------------
-const baseKeys = Object.keys(DICTIONARIES[BASE]);
-const errors = [];
-const warnings = [];
-
-for (const [locale, dict] of Object.entries(DICTIONARIES)) {
-  if (locale === BASE) continue;
-  const keys = new Set(Object.keys(dict));
-  const missing = baseKeys.filter((key) => !keys.has(key));
-  const extra = [...keys].filter((key) => !baseKeys.includes(key));
-  if (missing.length) errors.push(`${locale}: ${missing.length} key(s) missing → ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ' …' : ''}`);
-  if (extra.length) errors.push(`${locale}: ${extra.length} key(s) not in ${BASE} → ${extra.slice(0, 8).join(', ')}${extra.length > 8 ? ' …' : ''}`);
-}
-
-// --- 2. placeholder parity --------------------------------------------------
-const placeholders = (text) => new Set(String(text).match(/\{(\w+)\}/g) ?? []);
-
-for (const key of baseKeys) {
-  const reference = placeholders(DICTIONARIES[BASE][key]);
-  for (const [locale, dict] of Object.entries(DICTIONARIES)) {
-    if (locale === BASE || !(key in dict)) continue;
-    const found = placeholders(dict[key]);
-    const diff = [...reference].filter((p) => !found.has(p))
-      .concat([...found].filter((p) => !reference.has(p)));
-    if (diff.length) warnings.push(`${locale} "${key}": placeholder mismatch (${diff.join(', ')})`);
-  }
-}
 
 // --- 3. keys used in source but never defined -------------------------------
 const used = new Map(); // key -> first file that uses it
@@ -81,11 +104,12 @@ for (const file of files) {
   dynamicCallCount += [...source.matchAll(DYNAMIC)].length;
 }
 
-const undefinedKeys = [...used].filter(([key]) => !(key in DICTIONARIES[BASE]));
+const undefinedKeys = [...used].filter(([key]) => !(key in en) && !(`${key}_other` in en));
 for (const [key, file] of undefinedKeys) {
   errors.push(`undefined key t('${key}') used in ${file}`);
 }
 
+const baseKeys = Object.keys(en);
 const unusedKeys = baseKeys.filter((key) => !used.has(key));
 
 // --- 4. hardcoded Thai text still in components -----------------------------
