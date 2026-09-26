@@ -1955,6 +1955,9 @@ export default {
   'voice.inRoom_one': '1 คนในห้องนี้',
   'files.previousImage': 'รูปก่อนหน้า',
   'files.nextImage': 'รูปถัดไป',
+  'chat.forwardedLabel': 'ส่งต่อมา',
+  'chat.forwardedFrom': 'ส่งต่อจาก {channel}',
+  'chat.forwardedSource': 'ข้อความต้นฉบับ',
   // --- voice (polish round) ---
   'voice.callControls': 'ปุ่มควบคุมการโทร',
   'voice.ctlMute': 'ปิดไมค์',

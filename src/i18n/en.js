@@ -1955,6 +1955,9 @@ export default {
   'voice.inRoom_one': '1 in this room',
   'files.previousImage': 'Previous image',
   'files.nextImage': 'Next image',
+  'chat.forwardedLabel': 'Forwarded',
+  'chat.forwardedFrom': 'Forwarded from {channel}',
+  'chat.forwardedSource': 'the original message',
   // --- voice (polish round) ---
   'voice.callControls': 'Call controls',
   'voice.ctlMute': 'Mute',

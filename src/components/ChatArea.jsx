@@ -212,6 +212,7 @@ export default function ChatArea(props) {
       createThread: (msg) => h().onCreateThread?.(msg),
       publish: (msg) => h().onPublish?.(msg),
       forward: (msg) => h().onForward?.(msg),
+      openForwardSource: (source) => h().onJumpToMessage?.({ id: source.message_id, channel_id: source.channel_id }),
       markUnread: (msg) => h().onMarkUnread?.(msg),
       report: (msg) => h().onReport?.(msg),
       get canForward() { return Boolean(h().onForward); },

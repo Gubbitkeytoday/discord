@@ -1,5 +1,5 @@
 import React, { memo, useState } from 'react';
-import { Reply, AlertTriangle, RotateCcw, Check, Clock, X, Pin } from 'lucide-react';
+import { Reply, AlertTriangle, RotateCcw, Check, Clock, X, Pin, CornerUpRight } from 'lucide-react';
 import { t } from '../../i18n/index.jsx';
 import { formatDateDivider, formatTime, formatFullTimestamp } from '../../utils/messageGrouping';
 import { mentionsUser } from '../../utils/mentions';
@@ -191,6 +191,17 @@ function MessageRow({
           firstUnread && !mentionsMe ? 'bg-d-danger/[0.04]' : ''
         } ${mentionsMe ? 'mention-row' : ''} ${isActive || touchOpen ? 'bg-d-rowhover' : ''}`}
       >
+        {/* First in the row, so it is the next Tab stop after the message. */}
+        {showActions && (
+          <MessageActions
+            msg={msg}
+            isOwn={isOwn}
+            canReply={ctx.canSend && !ctx.isArchived}
+            canDelete={canDelete}
+            canThread={ctx.canThread}
+            actions={actions}
+          />
+        )}
         {grouped ? (
           <div className="w-10 shrink-0 text-[11px] text-d-text3 text-right pr-1 pt-0.5 select-none">
             <span className="sr-only" id={ids.author}>{authorName}</span>
@@ -306,6 +317,18 @@ function MessageRow({
             </div>
           )}
 
+          {Boolean(msg.forwarded_from) && !isEditing && (
+            // A forwarded copy says so — it is not the forwarder's own words.
+            <p className="flex items-center gap-1 text-xs italic text-d-text3 mb-0.5">
+              <CornerUpRight className="w-3.5 h-3.5" aria-hidden="true" />
+              {msg.forwarded_from.channel_id ? (
+                <button type="button" tabIndex={innerTab} className="hover:underline"
+                  onClick={() => actions.openForwardSource(msg.forwarded_from)}>
+                  {t('chat.forwardedFrom', { channel: msg.forwarded_from.channel_name ? `#${msg.forwarded_from.channel_name}` : t('chat.forwardedSource') })}
+                </button>
+              ) : t('chat.forwardedLabel')}
+            </p>
+          )}
           {isEditing ? (
             <EditForm msg={msg} actions={actions} />
           ) : msg.content ? (
@@ -434,16 +457,6 @@ function MessageRow({
 
         {burst && <SuperReaction emoji={burst} onDone={() => actions.burstDone(msg.id)} />}
 
-        {showActions && (
-          <MessageActions
-            msg={msg}
-            isOwn={isOwn}
-            canReply={ctx.canSend && !ctx.isArchived}
-            canDelete={canDelete}
-            canThread={ctx.canThread}
-            actions={actions}
-          />
-        )}
       </div>
     </>
   );

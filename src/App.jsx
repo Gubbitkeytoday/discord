@@ -3037,7 +3037,15 @@ export default function App() {
               channel_id: targetChannelId,
               content: body,
               attachments: forwardMessage.attachments ?? [],
-              sticker_id: forwardMessage.sticker?.id ?? null
+              sticker_id: forwardMessage.sticker?.id ?? null,
+              // Forwarding v2: where it came from, so the copy can say
+              // "Forwarded" and link back (needs server support to persist).
+              forwarded_from: {
+                message_id: forwardMessage.id,
+                channel_id: forwardMessage.channel_id,
+                guild_id: forwardMessage.server_id ?? null,
+                created_at: forwardMessage.created_at
+              }
             });
             pushToast(t('chat.forwarded'), { type: 'success', ttl: 3000 });
           }}

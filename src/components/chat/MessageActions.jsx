@@ -1,5 +1,5 @@
-import React, { useLayoutEffect, useRef } from 'react';
-import { SmilePlus, Reply, Pencil, Trash2, MoreHorizontal, MessagesSquare } from 'lucide-react';
+import React, { useRef } from 'react';
+import { SmilePlus, Reply, Pencil, Trash2, MoreHorizontal, MessagesSquare, Forward } from 'lucide-react';
 import { TranslateButton } from '../../translation';
 import { t } from '../../i18n/index.jsx';
 
@@ -14,20 +14,15 @@ const ICON_BUTTON = `${BUTTON} hover:bg-d-hover focus-visible:bg-d-hover text-d-
  * The hover / focus / tap action bar of one message (Discord's order: quick
  * reactions, add reaction, reply, edit, delete, more).
  *
- * It is mounted only for the active row, so a 5,000-message channel does not
- * carry 5,000 hidden toolbars. It is a WAI-ARIA toolbar: one Tab stop, with
- * ←/→/Home/End between its buttons (roving tabindex), so reaching "More" is
- * not ten Tab presses.
+ * It is mounted only for the active row (hovered, focused or tapped), so a
+ * 5,000-message channel does not carry 5,000 hidden toolbars — and every
+ * other row's actions stay out of the Tab order. While mounted it is first
+ * in the row, so Tab from the message (or Shift+Tab from the composer)
+ * reaches it at once; ←/→/Home/End move between its buttons as in a
+ * WAI-ARIA toolbar, ↑/↓ go back to the message list.
  */
 export default function MessageActions({ msg, isOwn, canReply, canDelete, canThread, actions }) {
   const ref = useRef(null);
-
-  // Roving tabindex. Buttons come from several components (TranslateButton),
-  // so it is applied to the DOM rather than threaded through as props.
-  useLayoutEffect(() => {
-    const buttons = [...(ref.current?.querySelectorAll('button') ?? [])];
-    buttons.forEach((button, index) => button.setAttribute('tabindex', index === 0 ? '0' : '-1'));
-  });
 
   const onKeyDown = (event) => {
     const buttons = [...(ref.current?.querySelectorAll('button') ?? [])];
@@ -47,7 +42,6 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
     if (next === null) return;
     event.preventDefault();
     event.stopPropagation();
-    buttons.forEach((button, i) => button.setAttribute('tabindex', i === next ? '0' : '-1'));
     buttons[next].focus();
   };
 
@@ -87,6 +81,12 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
         <button type="button" onClick={() => actions.createThread(msg)} className={`${ICON_BUTTON} max-sm:hidden`}
           title={t('chat.createThread')} aria-label={t('chat.createThread')} aria-keyshortcuts="T">
           <MessagesSquare className="w-4 h-4" aria-hidden="true" />
+        </button>
+      )}
+      {actions.canForward && (
+        <button type="button" onClick={() => actions.forward(msg)} className={`${ICON_BUTTON} max-sm:hidden`}
+          title={t('chat.forward')} aria-label={t('chat.forward')}>
+          <Forward className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
       {msg.content && <TranslateButton message={msg} className={ICON_BUTTON} onDone={actions.closeTouchActions} />}
