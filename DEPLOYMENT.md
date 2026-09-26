@@ -341,6 +341,8 @@ npm run storage:stats     # usage, orphans, per-user quotas
 npm run storage:gc        # delete files nothing references any more
 npm run storage:verify    # re-hash stored files and compare
 npm run search:reindex    # SQLite: rebuild the FTS5 index. Postgres: nothing to rebuild (ANALYZE only)
+node scripts/storage.js reprocess [--all]   # renditions/posters for uploads made before the media pipeline
+node scripts/storage.js jobs                # media job queue: queued / running / failed
 ```
 
 The server also runs hourly housekeeping on its own: expired sessions and account
@@ -381,7 +383,81 @@ S3_SECRET_ACCESS_KEY=...
 S3_FORCE_PATH_STYLE=1     # MinIO and some others need path-style URLs
 ```
 
-Existing local files are not migrated automatically.
+Existing local files are not migrated automatically. Every `files` row records
+the backend its bytes are on, so files written before S3 was configured keep
+being served from disk; new uploads go to the bucket.
+
+**Serving.** With `STORAGE_PUBLIC_BASE=https://cdn.example.com` (a CDN or public
+bucket URL in front of the bucket) public URLs point straight at it. Left at
+`/uploads`, a request for `/uploads/<key>` is answered with a 302 to a one-hour
+presigned URL, and so are `/api/files/:id` and `/api/media/:id` for any
+visibility (after the access check). The bucket answers `Range` itself, so video
+seeking works through the redirect. Add the bucket (or CDN) origin to
+`CSP_IMG_SOURCES`; `media-src` already allows `https:`.
+
+**Direct uploads** (browser → bucket, bytes never touch the app):
+
+1. `POST /api/media/uploads {category, filename, contentType, size}` →
+   `{upload_id, method, url, fields | headers, complete_url}`. `method: "POST"`
+   is an S3 POST policy that pins the key (`incoming/<user>/<id>`), the
+   `Content-Type` and `content-length-range` = the declared size, valid 10
+   minutes. Cloudflare R2 does not implement POST Object, so for R2 (or
+   `S3_DIRECT_UPLOAD=put`) it is a presigned PUT whose signature covers
+   `Content-Type` and `Content-Length`.
+2. The browser sends the form fields + file (or the PUT) to `url`.
+3. `POST complete_url` → the server HEADs the object (size must match), sniffs
+   its first 4 KB with a ranged GET (type must be allowed; image header
+   dimensions checked against the bomb limits), charges the quota, creates the
+   file and queues an `ingest` job that strips metadata, moves it to its
+   content-addressed key and makes renditions. The answer waits for that up to
+   a few seconds, otherwise it comes back `media_status: "processing"`.
+
+Bucket setup for direct uploads:
+
+- CORS: allow `POST, PUT` from your site's origin with headers `Content-Type`,
+  and expose `ETag`.
+- CSP: the page's `connect-src` must include the bucket origin (the upload is a
+  `fetch` to it) — see `lib/middleware.js`.
+- A lifecycle rule expiring `incoming/` after 1 day catches uploads that were
+  never completed (the app also deletes them after 10 minutes).
+- Direct uploads are not deduplicated against existing files.
+
+---
+
+## 7a. Media pipeline
+
+Every image upload is sanitised and given responsive renditions; everything is
+optional and degrades cleanly (no sharp → originals only; no ffmpeg → no video
+posters).
+
+| Step | What happens |
+| --- | --- |
+| Limits | header dimensions checked *before* decoding (`MEDIA_MAX_PIXELS`, default 100 MP; `MEDIA_MAX_DIMENSION`, 16384 px) and sharp's `limitInputPixels` as a backstop — a decompression bomb is a cheap 413 `IMAGE_TOO_LARGE` |
+| Metadata | EXIF, XMP, IPTC, GPS, comments and iPhone multi-picture trailers are removed from the stored original. Lossless (segments/chunks dropped) for JPEG, PNG and WebP; metadata items zero-filled for AVIF/HEIC; a re-encode (JPEG q92) only when an EXIF orientation has to be baked into the pixels |
+| Placeholders | `width`/`height` (orientation applied) and a ThumbHash are in the upload response, so clients reserve the box before anything loads |
+| Renditions | WebP at `MEDIA_WIDTHS` (160/480/960/1920, never enlarged); avatars and server icons square-cropped to 64/128/256/512; emoji 48/96/160 and stickers 160/320 fitted, never cropped; animated GIF/WebP → animated WebP up to 640 px plus a still |
+| AVIF | same widths, in the background at effort 2 (`MEDIA_AVIF=0` turns it off). Measured per 1920 px rendition on one core: WebP ~0.65 s, AVIF effort 2 ~1.35 s, effort 4 (sharp's default) ~9 s |
+| HEIC | recognised and metadata-stripped; prebuilt sharp cannot decode HEVC, so HEIC stays a downloadable file (and is refused for avatars/emoji) unless sharp is built against a libheif with HEVC |
+| Video | dimensions (also from the MP4/WebM header without ffmpeg), duration, and a poster frame via system ffmpeg/ffprobe. The Docker image installs ffmpeg only with `--build-arg WITH_FFMPEG=1` (it adds a few hundred MB to the image) |
+
+Serving: `GET /api/media/:id?w=<px>` picks the smallest rendition at least
+`w` wide, in AVIF → WebP → original order by the request's `Accept` (wildcards
+don't count), with `Vary: Accept`, an ETag, and
+`Cache-Control: public, max-age=31536000, immutable` for public files once
+processing is complete. Rendition files themselves are content-addressed
+(`<sha256>.w480.webp`) and served immutable from `/uploads`. The original stays
+downloadable at `/api/files/:id?download=1`.
+
+Processing runs on a persisted queue (`media_jobs`): `MEDIA_JOB_CONCURRENCY`
+jobs per process, leases so a job whose process died is picked up again, three
+attempts with back-off. A multipart upload answers as soon as the bytes are stored
+(`media_status: "processing"`, with dimensions and ThumbHash already set);
+set `MEDIA_SYNC_BUDGET_MS` to make it wait for the WebP renditions instead. `GET /api/media/config` reports what this instance can
+do and the queue depth. GC removes a file's renditions with it and sweeps
+rendition files on disk that no row points at.
+
+Renditions are not counted against the uploader's quota (they are the server's
+choice); originals are. `STORAGE_QUOTA_BYTES` sets one quota for everybody.
 
 ---
 

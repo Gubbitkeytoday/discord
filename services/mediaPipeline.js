@@ -505,8 +505,9 @@ export async function completeDirectUpload({ userId, uploadId, waitMs = null }) 
   await runQuery(`UPDATE direct_uploads SET status = 'completed', file_id = ? WHERE id = ?`, [fileId, upload.id]);
 
   await enqueueJob(fileId, 'ingest');
-  // Ingest downloads the object first, so it gets a longer budget than a multipart upload.
-  const budget = waitMs ?? Math.max(syncBudgetMs(), syncBudgetMs() > 0 ? 8000 : 0);
+  // Until ingest has moved and stripped it the file cannot be served, so
+  // completion waits for that (8 s unless MEDIA_SYNC_BUDGET_MS is larger).
+  const budget = waitMs ?? Math.max(syncBudgetMs(), 8000);
   if (budget > 0) await waitForJob(fileId, 'ingest', budget);
   const file = await getFile(fileId, { includeDeleted: true });
   if (file?.deleted_at) {

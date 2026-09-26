@@ -197,9 +197,6 @@ process.env.S3_SECRET_ACCESS_KEY = SECRET_KEY;
 process.env.S3_FORCE_PATH_STYLE = '1';
 delete process.env.STORAGE_PUBLIC_BASE;
 delete process.env.S3_DIRECT_UPLOAD;
-// Uploads answer once renditions exist (the default budget is 2 s, which a
-// loaded CI machine can miss for the larger fixtures).
-process.env.MEDIA_SYNC_BUDGET_MS = '20000';
 
 const { startServer, stopServer, api, get, uploadFile, BASE } = await import('./testHarness.mjs');
 const { default: sharp } = await import('sharp');
@@ -233,6 +230,16 @@ async function waitFor(check, timeoutMs = 20_000) {
 
 const keyFromUrl = (url) => url.replace(/^\/uploads\//, '');
 
+/** Poll a file until its processing (ingest, renditions) has finished. */
+async function ready(id) {
+  const body = await waitFor(async () => {
+    const res = await get(`/api/files/${id}/meta`);
+    return res.body?.media_status && res.body.media_status !== 'processing' ? res.body : null;
+  }, 120_000);
+  assert.ok(body, `file ${id} did not finish processing`);
+  return body;
+}
+
 /** Do what a browser does with a presigned POST: the fields, then the file. */
 async function postToBucket(presigned, bytes, type) {
   const form = new FormData();
@@ -253,7 +260,7 @@ describe('S3 backend: storage and serving', () => {
   test('a multipart upload lands in the bucket, not on local disk, with its renditions', async () => {
     const upload = await uploadFile(await photo(), 'bucket.jpg', 'image/jpeg');
     assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    const d = upload.body.attachments[0];
+    const d = await ready(upload.body.attachments[0].id);
     assert.equal(d.width, 800);
     assert.equal(d.height, 1200);
     const key = keyFromUrl(d.url);
@@ -284,7 +291,7 @@ describe('S3 backend: storage and serving', () => {
 
   test('the negotiated display URL redirects to the chosen rendition', async () => {
     const upload = await uploadFile(await photo(1000, 700, 1), 'nego.jpg', 'image/jpeg');
-    const d = upload.body.attachments[0];
+    const d = await ready(upload.body.attachments[0].id);
     const manual = await fetch(`${BASE}${d.display_url}?w=400`, { redirect: 'manual', headers: { accept: 'image/webp' } });
     assert.equal(manual.status, 302);
     assert.equal(manual.headers.get('vary'), 'Accept');
@@ -329,7 +336,7 @@ describe('direct uploads (presigned POST)', () => {
 
     const done = await api('POST', p.complete_url);
     assert.equal(done.status, 200, JSON.stringify(done.body));
-    const d = done.body;
+    const d = await ready(done.body.id);
     assert.equal(d.media_status, 'ready');
     assert.equal(d.width, 1000, 'orientation applied');
     assert.equal(d.height, 1500);
@@ -421,11 +428,12 @@ describe('direct uploads (presigned POST)', () => {
     assert.equal((await postToBucket(p, VIDEO, 'video/mp4')).status, 204);
     const done = await api('POST', p.complete_url);
     assert.equal(done.status, 200, JSON.stringify(done.body));
-    assert.equal(done.body.file_type, 'video');
-    assert.equal(done.body.duration_secs, 2);
-    assert.equal(done.body.width, 320);
+    const d = await ready(done.body.id);
+    assert.equal(d.file_type, 'video');
+    assert.equal(d.duration_secs, 2);
+    assert.equal(d.width, 320);
     const caps = (await get('/api/media/config')).body;
-    if (caps.video_posters) assert.ok(done.body.poster_url);
+    if (caps.video_posters) assert.ok(d.poster_url);
   });
 });
 

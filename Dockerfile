@@ -36,6 +36,10 @@ FROM node:22-bookworm-slim AS runtime
 # sharp ships its own libvips (@img/sharp-libvips-*), so no system libvips is
 # needed. Without sharp at all the app still runs and stores originals as-is.
 
+# media pipeline: optional ffmpeg for video posters/probing (docker build --build-arg WITH_FFMPEG=1).
+ARG WITH_FFMPEG=0
+RUN if [ "$WITH_FFMPEG" = "1" ]; then apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*; fi
+
 ENV NODE_ENV=production \
     PORT=3001 \
     HOST=0.0.0.0 \

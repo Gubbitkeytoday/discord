@@ -102,16 +102,18 @@ export const STORAGE_CATEGORIES = Object.keys(CATEGORY_RULES).reduce((acc, key) 
 export const UPLOADS_BASE_DIR = STORAGE_ROOT;
 
 /**
- * How long an upload request waits for its renditions before answering with
- * `media_status: 'processing'` (dimensions and placeholders are always in the
- * answer). Small images finish well inside it; the WebP set for a 12 MP photo
- * takes ~1–2 s, so a big photo may come back 'processing' and gain its
- * renditions moments later. AVIF is always finished in the background.
+ * How long a multipart upload waits for its renditions before answering with
+ * `media_status: 'processing'`. Default 0: answer as soon as the bytes are
+ * stored — dimensions and placeholders are always in the answer, renditions
+ * follow within a second or two (WebP set for a 12 MP photo ≈ 1–2 s) and every
+ * later read (message history, /api/files/:id/meta) includes them. Waiting
+ * makes the attachment chip appear later and, on a loaded host, lets a user
+ * press Enter before the upload has answered.
  */
 export const syncBudgetMs = () => {
   const raw = process.env.MEDIA_SYNC_BUDGET_MS;
   const n = Number(raw);
-  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 2000;
+  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 0;
 };
 
 // --- errors ------------------------------------------------------------------
@@ -142,6 +144,15 @@ export async function initStorage({ workers = true } = {}) {
   }
   await fsp.mkdir(path.join(STORAGE_ROOT, '.tmp'), { recursive: true });
   const sharp = await loadSharp();
+  if (sharp) {
+    // libvips initialises each codec lazily (~100–300 ms the first time);
+    // pay that at boot rather than on the first user's upload.
+    sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } })
+      .webp().toBuffer()
+      .then((b) => sharp(b).metadata())
+      .then(() => sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).avif({ effort: 0 }).toBuffer())
+      .catch(() => {});
+  }
   console.log(sharp
     ? '🖼️  sharp detected — image renditions enabled.'
     : 'ℹ️  sharp not installed — storing originals only (no renditions).');
@@ -945,7 +956,11 @@ export async function collectGarbage({
 
   if (!dryRun) {
     try {
-      result.orphanObjectsRemoved = await sweepOrphanDerivedObjects({ olderThanMs: orphanGraceMs });
+      // At least an hour: a job may have written a rendition and not yet
+      // recorded it, and "collect everything now" must not race it.
+      result.orphanObjectsRemoved = await sweepOrphanDerivedObjects({
+        olderThanMs: Math.max(orphanGraceMs, 60 * 60 * 1000)
+      });
     } catch (err) {
       result.errors.push({ fileId: null, message: `orphan sweep: ${err.message}` });
     }

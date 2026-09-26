@@ -17,9 +17,6 @@ import { fileURLToPath } from 'url';
 
 // A small quota for every user, so enforcement can be exercised with a few MB.
 process.env.STORAGE_QUOTA_BYTES = String(6 * 1024 * 1024);
-// Uploads answer once renditions exist (the default budget is 2 s, which a
-// loaded CI machine can miss for the larger fixtures).
-process.env.MEDIA_SYNC_BUDGET_MS = '20000';
 
 const {
   startServer, stopServer, api, get, uploadFile, BASE, ADMIN
@@ -60,6 +57,20 @@ const fetchBytes = async (url, headers = {}) => {
 
 const meta = (id) => get(`/api/files/${id}/meta`);
 
+/**
+ * Uploads answer as soon as the bytes are stored; renditions follow from the
+ * job queue. Poll the file until processing has finished (generous timeout:
+ * CI machines can be heavily loaded).
+ */
+async function ready(id) {
+  const body = await waitFor(async () => {
+    const res = await meta(id);
+    return res.body?.media_status && res.body.media_status !== 'processing' ? res.body : null;
+  }, { timeoutMs: 120_000, intervalMs: 200 });
+  assert.ok(body, `file ${id} did not finish processing`);
+  return body;
+}
+
 async function waitFor(check, { timeoutMs = 20_000, intervalMs = 150 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -73,25 +84,29 @@ async function waitFor(check, { timeoutMs = 20_000, intervalMs = 150 } = {}) {
 // ---------------------------------------------------------------------------
 
 describe('image uploads: sanitising and renditions', () => {
-  let photoDescriptor;
+  let uploaded;          // the upload response itself
+  let photoDescriptor;   // the same file once processing has finished
 
   before(async () => {
     const upload = await uploadFile(await photo(), 'IMG_0001.jpg', 'image/jpeg');
     assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    photoDescriptor = upload.body.attachments[0];
+    uploaded = upload.body.attachments[0];
+    photoDescriptor = await ready(uploaded.id);
   });
 
   test('display dimensions have the EXIF orientation applied, so clients can reserve space', () => {
-    assert.equal(photoDescriptor.width, 1600);
-    assert.equal(photoDescriptor.height, 2400);
-    assert.equal(photoDescriptor.file_type, 'image');
+    // In the upload response itself, before any rendition exists.
+    assert.equal(uploaded.width, 1600);
+    assert.equal(uploaded.height, 2400);
+    assert.equal(uploaded.file_type, 'image');
+    assert.ok(['processing', 'ready'].includes(uploaded.media_status));
     assert.equal(photoDescriptor.media_status, 'ready');
   });
 
   test('a thumbhash and an inline placeholder come back with the upload', () => {
-    assert.match(photoDescriptor.thumbhash, /^[A-Za-z0-9+/]+=*$/);
-    assert.ok(Buffer.from(photoDescriptor.thumbhash, 'base64').length <= 40);
-    assert.match(photoDescriptor.placeholder, /^data:image\/webp;base64,/);
+    assert.match(uploaded.thumbhash, /^[A-Za-z0-9+/]+=*$/);
+    assert.ok(Buffer.from(uploaded.thumbhash, 'base64').length <= 40);
+    assert.match(uploaded.placeholder, /^data:image\/webp;base64,/);
   });
 
   test('the stored original has no EXIF, GPS or camera data left', async () => {
@@ -132,7 +147,7 @@ describe('image uploads: sanitising and renditions', () => {
     const withAvif = await waitFor(async () => {
       const { body } = await meta(photoDescriptor.id);
       return body.renditions.filter((r) => r.format === 'avif').length === 4 ? body : null;
-    }, { timeoutMs: 60_000 });
+    }, { timeoutMs: 180_000 });
     assert.ok(withAvif, 'AVIF renditions did not appear');
     const avif960 = withAvif.renditions.find((r) => r.format === 'avif' && r.width === 960);
     const { res, body } = await fetchBytes(avif960.url);
@@ -205,7 +220,7 @@ describe('image uploads: sanitising and renditions', () => {
     assert.equal(sniffMime(avif).mime, 'image/avif');
     const upload = await uploadFile(avif, 'photo.avif', 'image/avif');
     assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    const d = upload.body.attachments[0];
+    const d = await ready(upload.body.attachments[0].id);
     assert.equal(d.mimetype, 'image/avif');
     assert.equal(d.width, 320);
     const { body } = await fetchBytes(d.url);
@@ -222,7 +237,7 @@ describe('animated images, avatars, emoji', () => {
     const gif = await sharp(frames, { join: { animated: true } }).gif({ delay: [100, 100, 100], loop: 0 }).toBuffer();
     const upload = await uploadFile(gif, 'party.gif', 'image/gif');
     assert.equal(upload.status, 200);
-    const d = upload.body.attachments[0];
+    const d = await ready(upload.body.attachments[0].id);
     assert.equal(d.is_animated, true);
     assert.equal(d.width, 800);
     assert.equal(d.height, 400);
@@ -241,20 +256,21 @@ describe('animated images, avatars, emoji', () => {
     const src = await photo({ width: 600, height: 300, orientation: 1 });
     const upload = await uploadFile(src, 'me.jpg', 'image/jpeg', 'avatar', '/api/upload/avatar');
     assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    const webp = upload.body.renditions.filter((r) => r.format === 'webp');
+    const avatar = await ready(upload.body.id);
+    const webp = avatar.renditions.filter((r) => r.format === 'webp');
     assert.deepEqual(webp.map((r) => [r.width, r.height]), [[64, 64], [128, 128], [256, 256]]);
     const { body } = await fetchBytes(webp[2].url);
     const m = await sharp(body).metadata();
     assert.deepEqual([m.width, m.height], [256, 256]);
-    assert.equal(upload.body.variants.thumb.width, 64);
-    assert.equal(upload.body.variants.small.width, 128);
+    assert.equal(avatar.variants.thumb.width, 64);
+    assert.equal(avatar.variants.small.width, 128);
   });
 
   test('emoji are fitted, never cropped', async () => {
     const src = await sharp({ create: { width: 256, height: 128, channels: 4, background: '#ff00ff80' } }).png().toBuffer();
     const upload = await uploadFile(src, 'wide.png', 'image/png', 'emoji', '/api/upload/emoji');
     assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    const webp = upload.body.renditions.filter((r) => r.format === 'webp');
+    const webp = (await ready(upload.body.id)).renditions.filter((r) => r.format === 'webp');
     assert.deepEqual(webp.map((r) => [r.width, r.height]), [[48, 24], [96, 48], [160, 80]]);
   });
 });
@@ -340,10 +356,7 @@ describe('video', () => {
   });
 
   test('a poster frame exists when ffmpeg is installed, and its absence is graceful otherwise', async () => {
-    const d = (await waitFor(async () => {
-      const { body } = await meta(video.id);
-      return body.media_status === 'ready' ? body : null;
-    })) ?? (await meta(video.id)).body;
+    const d = await ready(video.id);
     assert.equal(d.media_status, 'ready');
     if (caps.video_posters) {
       assert.ok(d.poster_url, 'ffmpeg is available, so a poster is expected');
@@ -460,7 +473,7 @@ describe('job queue persistence', () => {
     const done = await waitFor(async () => {
       const { body } = await meta(id);
       return body.media_status === 'ready' && body.renditions.length ? body : null;
-    }, { timeoutMs: 40_000, intervalMs: 500 });
+    }, { timeoutMs: 120_000, intervalMs: 500 });
     assert.ok(done, 'the orphaned job was not resumed');
     assert.deepEqual(done.renditions.filter((r) => r.format === 'webp').map((r) => r.width), [160, 480, 700]);
   });
@@ -470,7 +483,7 @@ describe('garbage collection of derived objects', () => {
   test('collecting a file removes its renditions; stray rendition files are swept', async () => {
     const { STORAGE_ROOT } = await import('../storageService.js');
     const upload = await uploadFile(await photo({ width: 500, height: 500, orientation: 1 }), 'gc.jpg', 'image/jpeg');
-    const d = upload.body.attachments[0];
+    const d = await ready(upload.body.attachments[0].id);
     const renditionPath = path.join(STORAGE_ROOT, d.renditions[0].url.replace(/^\/uploads\//, ''));
     assert.ok(fs.existsSync(renditionPath));
 
@@ -478,7 +491,7 @@ describe('garbage collection of derived objects', () => {
     const stray = path.join(STORAGE_ROOT, 'attachments', 'ab', 'cd', `${'ab'.padEnd(64, 'c')}.w480.webp`);
     fs.mkdirSync(path.dirname(stray), { recursive: true });
     fs.writeFileSync(stray, 'stray');
-    const old = new Date(Date.now() - 3600_000);
+    const old = new Date(Date.now() - 3 * 3600_000);
     fs.utimesSync(stray, old, old);
 
     const swept = await api('POST', '/api/files/maintenance/gc', { apply: true, graceHours: 0 }, ADMIN);
