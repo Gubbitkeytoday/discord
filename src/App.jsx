@@ -22,7 +22,7 @@ import {
 } from './hooks/useUserSettings';
 import { useKeybinds } from './hooks/useKeybinds';
 import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
-import { t } from './i18n/index.jsx';
+import { t, adoptAccountLocale } from './i18n/index.jsx';
 import { lazyComponent, preloadWhenIdle } from './utils/lazyComponent';
 
 // Code-split: each of these is a separate chunk, fetched on first use (and
@@ -50,6 +50,13 @@ const NotificationsInbox = lazyComponent(() => import('./components/Notification
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
 const socket = io({ withCredentials: true, autoConnect: true });
+
+// The session outlives App: I18nProvider remounts the tree on a language
+// switch, and App's state starts over. Without this the remounted App
+// identified the gateway with a null token (the socket was opened before the
+// session cookie existed), the gateway refused, and the user was signed out
+// the moment they picked a language.
+const session = { user: null, token: null };
 
 const PAGE_SIZE = 50;
 
@@ -79,11 +86,11 @@ function parseLocation() {
 }
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(null);
-  const [currentUserId, setCurrentUserId] = useState(null);
+  const [currentUser, setCurrentUser] = useState(() => session.user);
+  const [currentUserId, setCurrentUserId] = useState(() => session.user?.id ?? null);
   // null = still checking, false = not signed in, true = signed in
-  const [authState, setAuthState] = useState(null);
-  const [authToken, setAuthToken] = useState(null);
+  const [authState, setAuthState] = useState(() => (session.user ? true : null));
+  const [authToken, setAuthToken] = useState(() => session.token);
   const [devAccounts, setDevAccounts] = useState([]);
 
   const [servers, setServers] = useState([]);
@@ -206,6 +213,7 @@ export default function App() {
   activeServerIdRef.current = activeServerId;
   const currentUserRef = useRef(null);
   currentUserRef.current = currentUser;
+  if (currentUser) session.user = currentUser;
   const channelSettingsRef = useRef({});
   channelSettingsRef.current = channelSettings;
   const serverSettingsRef = useRef({});
@@ -226,7 +234,9 @@ export default function App() {
     get('/api/auth/me')
       .then((data) => {
         if (data?.user) {
-          setApiIdentity({ userId: data.user.id });
+          setApiIdentity({ userId: data.user.id, token: session.token });
+          session.user = data.user;
+          adoptAccountLocale(data.user.locale);
           setCurrentUser(data.user);
           setCurrentUserId(data.user.id);
           setAuthState(true);
@@ -253,13 +263,19 @@ export default function App() {
   }, []);
 
   const handleAuthenticated = useCallback((user, token) => {
+    session.user = user;
+    session.token = token ?? null;
     setApiIdentity({ userId: user.id, token });
     setCurrentUser(user);
     setCurrentUserId(user.id);
     setAuthToken(token);
     setAuthState(true);
-    if (!socket.connected) socket.connect();
+    // Re-open the gateway so its handshake carries the new session cookie;
+    // the `connect` handler identifies again once it is up.
+    socket.disconnect();
+    socket.connect();
     socket.emit('identify', { userId: user.id, token });
+    adoptAccountLocale(user.locale);
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -268,6 +284,8 @@ export default function App() {
     // signed-out tab stops receiving their DMs and channel traffic.
     identifiedRef.current = false;
     socket.disconnect();
+    session.user = null;
+    session.token = null;
     setApiIdentity({});
     setAuthState(false);
     setCurrentUser(null);
