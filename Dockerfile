@@ -123,7 +123,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 # -s: tini also works when compose's `init: true` already put docker-init at
-# PID 1. The OpenTelemetry preload is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT
-# is set (lib/otel-preload.mjs).
-ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/nodejs/bin/node"]
-CMD ["--import", "./lib/otel-preload.mjs", "server.js"]
+# PID 1. The command starts with `node` (resolved via PATH) so that
+# `docker compose run --rm app node scripts/backup.mjs …` keeps working. The
+# OpenTelemetry preload is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+CMD ["node", "--import", "./lib/otel-preload.mjs", "server.js"]

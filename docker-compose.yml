@@ -178,12 +178,60 @@ services:
         --total-quota=300 --stale-nonce=600
     logging: *logging
 
+  # --- observability profile ---------------------------------------------------
+  # Grafana + Tempo (traces) + Loki (logs) + Prometheus (metrics) + an
+  # OpenTelemetry Collector in one container, with the Antigravity dashboard
+  # and alert rules pre-provisioned from ops/. Enable with:
+  #
+  #   docker compose --profile observability up -d
+  #   # and in .env: OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318
+  #   #              GRAFANA_ADMIN_PASSWORD=<something long>
+  #
+  # Grafana listens on 127.0.0.1:3000 only; reach it over an SSH tunnel
+  # (ssh -L 3000:127.0.0.1:3000 host) rather than publishing it. OTLP ports are
+  # not published: only the app, on the internal network, sends to them.
+  # Sized for one small node (it keeps ~15 days by default); for anything
+  # bigger, point OTEL_EXPORTER_OTLP_ENDPOINT at a managed backend instead.
+  # See DEPLOYMENT.md, "Observability".
+  lgtm:
+    image: grafana/otel-lgtm:0.34.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      # `:-` rather than `:?` so compose still parses without this profile;
+      # the entrypoint below refuses to start Grafana with no password.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >-
+        test -n "$$GF_SECURITY_ADMIN_PASSWORD" || { echo "lgtm: GRAFANA_ADMIN_PASSWORD is not set" >&2; exit 1; };
+        exec /otel-lgtm/run-all.sh
+    ports:
+      - "127.0.0.1:3000:3000"
+    expose:
+      - "4317"
+      - "4318"
+    volumes:
+      - lgtm-data:/data
+      - ./ops/grafana/provisioning/dashboards.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/antigravity.yml:ro
+      - ./ops/grafana/dashboards:/otel-lgtm/antigravity-dashboards:ro
+      - ./ops/alerts/grafana-alerting.yml:/otel-lgtm/grafana/conf/provisioning/alerting/antigravity.yml:ro
+    networks:
+      - edge
+    logging: *logging
+  # --- end observability profile -----------------------------------------------
+
 volumes:
   app-data:
   app-backups:
   pg-data:
   caddy-data:
   caddy-config:
+  lgtm-data:        # observability profile
 
 networks:
   edge:

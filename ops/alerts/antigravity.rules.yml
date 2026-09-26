@@ -1,0 +1,151 @@
+# ============================================================================
+#  Prometheus alerting rules for Antigravity Discord.
+#
+#  Standard Prometheus rule-file format: load it with `rule_files:` in any
+#  Prometheus / Mimir / VictoriaMetrics that receives the app's metrics (OTLP
+#  push or a scrape of /metrics — the series names are the same). Validate with
+#    promtool check rules ops/alerts/antigravity.rules.yml
+#  The compose `observability` profile loads the Grafana-managed equivalent
+#  (ops/alerts/grafana-alerting.yml) instead, because the bundled Prometheus in
+#  grafana/otel-lgtm has no rule_files hook.
+#
+#  Every alert links its runbook (ops/runbooks/). Severity: page = wake someone,
+#  ticket = next working day.
+# ============================================================================
+
+groups:
+  - name: antigravity-availability
+    rules:
+      - alert: AntigravityDown
+        # Gauges are exported every interval while the process lives; silence
+        # for 5 minutes means the process (or its telemetry path) is gone.
+        expr: absent_over_time(app_socket_connections[5m])
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: No telemetry from Antigravity Discord for 5 minutes
+          description: The app is down, crash-looping, or cannot reach the collector. Check `docker compose ps` and /api/live.
+          runbook: ops/runbooks/db-down.md
+
+      - alert: AntigravityHighErrorRate
+        expr: |
+          sum by (job) (rate(app_http_request_duration_seconds_count{status_code=~"5.."}[5m]))
+            / clamp_min(sum by (job) (rate(app_http_request_duration_seconds_count[5m])), 1e-9) > 0.05
+          and sum by (job) (rate(app_http_request_duration_seconds_count[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "More than 5% of requests fail with 5xx ({{ $value | humanizePercentage }})"
+          description: Look up request ids of failing requests in the logs (level=error, component=http) and the error tracker.
+          runbook: ops/runbooks/high-latency.md
+
+      - alert: AntigravityDatabaseErrors
+        expr: sum by (job) (rate(app_db_query_errors_total[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Database calls are failing ({{ $value | humanize }}/s)"
+          description: Usually the database is down, out of connections or out of disk. /api/ready shows the database check.
+          runbook: ops/runbooks/db-down.md
+
+  - name: antigravity-latency
+    rules:
+      - alert: AntigravityHighLatency
+        expr: |
+          histogram_quantile(0.95, sum by (job, le) (rate(app_http_request_duration_seconds_bucket[5m]))) > 1
+          and sum by (job) (rate(app_http_request_duration_seconds_count[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "p95 HTTP latency above 1 s ({{ $value | humanizeDuration }})"
+          runbook: ops/runbooks/high-latency.md
+
+      - alert: AntigravityEventLoopLag
+        expr: max by (job) (nodejs_eventloop_lag_seconds) > 0.2
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Node.js event loop lagging ({{ $value | humanizeDuration }})"
+          description: Something synchronous is hogging the loop (large JSON, image work without sharp, a hot regex) or the CPU is starved.
+          runbook: ops/runbooks/high-latency.md
+
+      - alert: AntigravitySlowQueries
+        expr: histogram_quantile(0.95, sum by (job, le) (rate(app_db_query_duration_seconds_bucket[5m]))) > 0.25
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "p95 database call above 250 ms ({{ $value | humanizeDuration }})"
+          runbook: ops/runbooks/high-latency.md
+
+      - alert: AntigravityDbPoolSaturated
+        expr: max by (job) (app_db_pool_connections{state="waiting"}) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Requests are queueing for a PostgreSQL connection
+          description: Raise DB_POOL_MAX (and Postgres max_connections) or find the slow queries holding connections.
+          runbook: ops/runbooks/high-latency.md
+
+  - name: antigravity-capacity
+    rules:
+      - alert: AntigravityDiskLow
+        expr: min by (job, volume) (app_disk_free_bytes / app_disk_total_bytes) < 0.10
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Less than 10% disk free on the {{ $labels.volume }} volume"
+          runbook: ops/runbooks/disk-full.md
+
+      - alert: AntigravityDiskCritical
+        expr: min by (job, volume) (app_disk_free_bytes / app_disk_total_bytes) < 0.03
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Disk almost full on the {{ $labels.volume }} volume — uploads and SQLite writes will fail"
+          runbook: ops/runbooks/disk-full.md
+
+  - name: antigravity-realtime
+    rules:
+      - alert: AntigravitySocketsDropped
+        # Half of the connected clients gone within 10 minutes, from a base
+        # large enough to matter: a crash, a proxy dropping WebSockets, or TLS.
+        expr: |
+          sum by (job) (app_socket_connections) < 0.5 * sum by (job) (app_socket_connections offset 10m)
+          and sum by (job) (app_socket_connections offset 10m) > 20
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Connected sockets halved in 10 minutes
+          runbook: ops/runbooks/turn-livekit.md
+
+      - alert: AntigravityNotificationFailures
+        expr: |
+          sum by (job) (rate(app_push_sends_total{result!="ok"}[15m]))
+            / clamp_min(sum by (job) (rate(app_push_sends_total[15m])), 1e-9) > 0.2
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "More than 20% of notification deliveries fail"
+          runbook: ops/runbooks/high-latency.md
+
+  - name: antigravity-experience
+    rules:
+      - alert: AntigravityPoorLcp
+        expr: histogram_quantile(0.75, sum by (job, le) (rate(app_web_vitals_lcp_seconds_bucket[1h]))) > 4
+        for: 2h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Browser LCP p75 above 4 s ({{ $value | humanizeDuration }}) — the app feels slow to load"
+          runbook: ops/runbooks/high-latency.md
