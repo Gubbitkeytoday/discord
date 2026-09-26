@@ -2082,7 +2082,8 @@ if (config.serveStatic) {
   app.use(express.static(staticRoot, {
     index: false,
     setHeaders(res, filePath) {
-      if (/\.[0-9a-zA-Z_-]{8,}\.(js|css|woff2?|png|jpe?g|svg|webp)$/.test(filePath)) {
+      // Everything Vite emits under assets/ has a content hash in its name.
+      if (path.basename(path.dirname(filePath)) === 'assets') {
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       } else {
         res.setHeader('Cache-Control', 'no-cache');
