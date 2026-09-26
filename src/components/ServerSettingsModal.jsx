@@ -15,7 +15,7 @@ import OnboardingTab from './settings/OnboardingTab';
 import InsightsTab from './settings/InsightsTab';
 import { t, localeTag } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
-import { DEFAULT_AVATAR, serverIconOf, serverInitials } from '../utils/avatar';
+import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
   permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
 } from '../utils/permissionCatalog';
@@ -1151,7 +1151,7 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
         {filtered.map((member) => (
           <div key={member.id} className="bg-d-surface rounded-lg p-3">
             <div className="flex items-center gap-3">
-              <img src={member.avatar_url || FALLBACK_AVATAR} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+              <img src={member.avatar_url || defaultAvatar(member.id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-d-strong truncate flex items-center gap-1.5">
                   {member.nickname || member.display_name}
@@ -1519,7 +1519,7 @@ function BansTab({ bans, api, reload, onToast }) {
       <div className="space-y-1">
         {bans.map((ban) => (
           <div key={ban.user_id} className="bg-d-surface rounded-lg p-3 flex items-center gap-3">
-            <img src={ban.avatar_url || FALLBACK_AVATAR} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+            <img src={ban.avatar_url || defaultAvatar(ban.user_id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-d-strong truncate">{ban.display_name}</p>
               <p className="text-[11px] text-d-text3 truncate">
@@ -1567,7 +1567,7 @@ function AuditTab({ entries }) {
       <div className="space-y-1">
         {entries.map((entry) => (
           <div key={entry.id} className="bg-d-surface rounded-lg p-3 flex gap-3">
-            <img src={entry.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+            <img src={entry.avatar_url || defaultAvatar(entry.id)} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
             <div className="min-w-0">
               <p className="text-sm text-d-strong">
                 <strong>{entry.display_name ?? t('audit.system')}</strong>{' '}

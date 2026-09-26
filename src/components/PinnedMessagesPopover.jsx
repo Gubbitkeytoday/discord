@@ -3,7 +3,7 @@ import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Pin, X } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -43,7 +43,7 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
             >
               <div className="flex gap-2">
                 <img
-                  src={msg.avatar_url || FALLBACK_AVATAR}
+                  src={msg.avatar_url || defaultAvatar(msg.user_id)}
                   alt=""
                   className="w-8 h-8 rounded-full object-cover shrink-0"
                 />

@@ -8,9 +8,28 @@ const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
 
 export const DEFAULT_AVATAR = `data:image/svg+xml;utf8,${encodeURIComponent(SVG)}`;
 
-/** Avatar for a user-ish object, falling back to the inline default. */
+// Discord gives avatar-less users one of a handful of colours, derived from
+// the account, so two people without a picture are still told apart.
+const PALETTE = ['#5865f2', '#757e8a', '#3ba55c', '#faa61a', '#ed4245', '#eb459f'];
+const coloured = new Map();
+
+/** The default avatar in this user's colour (stable per id). */
+export function defaultAvatar(seed) {
+  if (seed === undefined || seed === null || seed === '') return DEFAULT_AVATAR;
+  const key = String(seed);
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  const colour = PALETTE[hash % PALETTE.length];
+  if (!coloured.has(colour)) {
+    coloured.set(colour, `data:image/svg+xml;utf8,${encodeURIComponent(SVG.replace('#5865f2', colour))}`);
+  }
+  return coloured.get(colour);
+}
+
+/** Avatar for a user-ish object, falling back to its coloured default. */
 export function avatarOf(entity) {
-  return entity?.avatar_url || entity?.member_avatar_url || DEFAULT_AVATAR;
+  return entity?.avatar_url || entity?.member_avatar_url
+    || defaultAvatar(entity?.user_id ?? entity?.userId ?? entity?.id);
 }
 
 // Placeholder icons the backend used to generate on a third-party service.

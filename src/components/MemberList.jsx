@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { t } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -88,7 +88,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                 >
                   <div className="relative shrink-0">
                     <img
-                      src={member.avatar_url || FALLBACK_AVATAR}
+                      src={member.avatar_url || defaultAvatar(member.id)}
                       alt=""
                       className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale' : ''}`}
                     />

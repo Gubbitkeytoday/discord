@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { playMessageIncomingSound } from '../utils/soundEffects';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import {
   decorateMessages, formatDateDivider, formatTime, formatFullTimestamp, formatTypingText
 } from '../utils/messageGrouping';
@@ -803,7 +803,7 @@ export default function ChatArea({
             </button>
           )}
           {isDM ? (
-            <img src={channel.avatar_url || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+            <img src={channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
           ) : (
             <HeaderIcon className="w-6 h-6 text-d-text4 shrink-0" />
           )}
@@ -1075,7 +1075,7 @@ export default function ChatArea({
           <div className="my-6">
             {isDM ? (
               // A conversation opens on the person, not on a channel glyph.
-              <img src={channel.avatar_url || FALLBACK_AVATAR} alt="" className="w-20 h-20 rounded-full object-cover mb-3" />
+              <img src={channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id)} alt="" className="w-20 h-20 rounded-full object-cover mb-3" />
             ) : (
               <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3">
                 <HeaderIcon className="w-10 h-10 text-d-strong" />
@@ -1207,7 +1207,7 @@ export default function ChatArea({
                   </div>
                 ) : (
                   <img
-                    src={msg.avatar_url || FALLBACK_AVATAR}
+                    src={msg.avatar_url || defaultAvatar(msg.user_id)}
                     alt=""
                     onClick={() => onSelectUser?.(msg.user_id)}
                     onContextMenu={(e) => {

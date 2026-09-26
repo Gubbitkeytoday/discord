@@ -13,7 +13,7 @@ import { useVoiceMedia, useStreamVideo } from '../hooks/useVoiceMedia';
 import { useVoicePeers } from '../hooks/useVoicePeers';
 import { useVoiceSettings } from '../hooks/useVoiceSettings';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const VOLUME_KEY = 'antigravity.userVolumes';
@@ -371,7 +371,7 @@ export default function VoiceRoom({
                 ) : (
                   <div className="relative mb-3 flex flex-col items-center">
                     <img
-                      src={p.avatar_url || FALLBACK_AVATAR}
+                      src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
                       alt=""
                       className={`w-24 h-24 rounded-full object-cover transition-transform ${
                         speaking ? 'scale-105 ring-4 ring-d-online' : ''
@@ -526,7 +526,7 @@ export default function VoiceRoom({
             <ul className="flex flex-wrap gap-2">
               {[...audience].sort((a, b) => (a.requestedToSpeakAt ? 0 : 1) - (b.requestedToSpeakAt ? 0 : 1)).map((p) => (
                 <li key={p.userId} className={`flex items-center gap-2 rounded-full pl-1 pr-2 py-1 border ${p.requestedToSpeakAt ? 'border-d-brand bg-d-brand/10' : 'border-d-edge bg-d-surface'}`}>
-                  <img src={p.avatar_url || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover" />
+                  <img src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)} alt="" className="w-6 h-6 rounded-full object-cover" />
                   <span className="text-xs text-d-strong max-w-[8rem] truncate">{p.username}{p.userId === selfId && t('voice.you')}</span>
                   {Boolean(p.requestedToSpeakAt) && <Hand className="w-3.5 h-3.5 text-d-brand" aria-label={t('stage.wantsToSpeak')} />}
                   {canModerateStage && (

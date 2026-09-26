@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { useDialog } from './settings/primitives';
 import { localeTag, t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -55,7 +55,7 @@ export default function UserProfileModal({
           <div className="relative -top-10 mb-[-2rem] flex justify-between items-end">
             <div className="relative">
               <img
-                src={user.avatar_url || FALLBACK_AVATAR}
+                src={user.avatar_url || defaultAvatar(user.id)}
                 alt=""
                 className="w-20 h-20 rounded-full border-4 border-d-panel object-cover"
               />

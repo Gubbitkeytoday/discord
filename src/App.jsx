@@ -148,7 +148,11 @@ export default function App() {
   // rather than two columns, so they need an explicit open state; on desktop
   // they are always shown and this value is ignored. A phone opens onto the
   // navigation, as Discord's app does, since there is nothing to read yet.
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(() => isNarrowViewport('(max-width: 767px)'));
+  // A link or reload that names a channel opens on that conversation instead
+  // (the drawer used to cover it on every load).
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(
+    () => isNarrowViewport('(max-width: 767px)') && !parseLocation().channelId
+  );
   // True while the open channel's first page is in flight, so the chat can
   // show a skeleton instead of the previous channel's history.
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);

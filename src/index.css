@@ -450,3 +450,19 @@ input[type="range"] { height: 1.25rem; }
 /* Loading skeleton for a channel's first page. */
 @keyframes skeletonPulse { 50% { opacity: 0.45; } }
 .skeleton { animation: skeletonPulse 1.4s ease-in-out infinite; }
+
+/* Thai has no letter case, and letter-spacing pulls apart clusters with
+   stacked vowels and tone marks. Small uppercase labels keep their size but
+   lose the tracking, and get room for the marks above and below. */
+:lang(th) .tracking-wide,
+:lang(th) .tracking-wider,
+:lang(th) .tracking-widest,
+:lang(th) [class*="tracking-["] {
+  letter-spacing: 0;
+}
+:lang(th) .uppercase.text-xs,
+:lang(th) .uppercase.text-\[11px\],
+:lang(th) .uppercase.text-\[10px\] {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
