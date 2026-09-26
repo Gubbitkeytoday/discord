@@ -18,6 +18,7 @@ import { assertChannelAccess, canInChannel, readableChannelIds } from './access.
 import { validatePollInput, writePollRows, attachPolls } from './polls.js';
 import { parseSearchQuery, hasFilters, periodBounds } from '../lib/searchQuery.js';
 import { fanOutMessageNotifications, visibleChannelIds } from './notifications.js';
+import { consumeShared } from '../lib/rateLimit.js';
 
 const MENTION_USER    = /<@!?(\d+|user-[\w-]+)>/g;
 const MENTION_ROLE    = /<@&([\w-]+)>/g;
@@ -281,6 +282,9 @@ async function hydrate(rows, viewerId = null) {
         ? { id: row.sticker_id, name: row.sticker_name, url: row.sticker_url, format: row.sticker_format }
         : null,
       pinned: Boolean(row.pinned),
+      // Forwarding v2: where a forwarded copy came from (snapshot metadata
+      // taken at send time, after the sender's read access was checked).
+      forwarded_from: safeParse(row.forwarded_from, null),
       crossposted: Boolean(Number(row.flags ?? 0) & 1),
       edited_at: row.edited_at,
       created_at: row.created_at
@@ -397,7 +401,8 @@ async function assertExternalEmojiAllowed({ content, userId, channel, senderPerm
 export async function createMessage({
   channelId, userId, content = '', attachments = [], replyToId = null,
   nonce = null, type = 'default', tts = false, skipModeration = false, stickerId = null,
-  poll = null, embeds = null, components = null, applicationId = null, ephemeralUserId = null
+  poll = null, embeds = null, components = null, applicationId = null, ephemeralUserId = null,
+  forwardedFrom = null, allowedMentions = null
 }) {
   const channel = await getQuery(
     `SELECT id, server_id, rate_limit_per_user, locked, archived, type AS channel_type
@@ -415,6 +420,18 @@ export async function createMessage({
   }
   if (channel.archived) {
     throw new ApiError('This thread is archived', { status: 403, code: 'THREAD_ARCHIVED' });
+  }
+
+  // Forwarding: the copy is built from the *source* message on the server,
+  // never from what the client says it contained, and only once the sender
+  // has shown they can read the source. See loadForwardSource.
+  let forward = null;
+  if (forwardedFrom) {
+    forward = await loadForwardSource({ forwardedFrom, userId });
+    content = forward.content;
+    attachments = forward.attachments;
+    stickerId = forward.stickerId;
+    poll = null;
   }
 
   // Webhooks and system messages skip moderation and carry no user; every real
@@ -537,16 +554,30 @@ export async function createMessage({
     }
   }
 
+  let repliedUserId = null;
   if (replyToId) {
     const target = await getQuery(
-      `SELECT id FROM messages WHERE id = ? AND channel_id = ? AND deleted_at IS NULL`, [replyToId, channelId]
+      `SELECT id, user_id FROM messages WHERE id = ? AND channel_id = ? AND deleted_at IS NULL`, [replyToId, channelId]
     );
     // Replying to a message that is gone is allowed on Discord too — the reply
     // just renders without its quote — but a reply must stay inside its channel.
     if (!target) replyToId = null;
+    else repliedUserId = target.user_id ?? null;
   }
 
-  const mentions = parseMentions(trimmed);
+  // A forwarded copy pings nobody: the words are someone else's, quoted.
+  const mentions = forward
+    ? { users: [], roles: [], channels: [], everyone: false, here: false }
+    : parseMentions(trimmed);
+  // allowed_mentions.replied_user: a reply pings the author of the message it
+  // answers unless the sender turned the "@ mention" toggle off. Without an
+  // allowed_mentions object at all it pings, as Discord's client does.
+  const pingReplied = allowedMentions && typeof allowedMentions === 'object'
+    ? Boolean(allowedMentions.replied_user)
+    : true;
+  if (repliedUserId && pingReplied && repliedUserId !== userId && !mentions.users.includes(repliedUserId)) {
+    mentions.users.push(repliedUserId);
+  }
   const messageId = generateId();
   let notifications = [];
 
@@ -556,12 +587,12 @@ export async function createMessage({
     const inserted = await runQuery(
       `INSERT INTO messages (id, channel_id, server_id, user_id, content, type,
                              reply_to_id, mention_everyone, tts, nonce, sticker_id,
-                             embeds, components, application_id, ephemeral_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${nonce ? ' ON CONFLICT DO NOTHING' : ''}`,
+                             embeds, components, application_id, ephemeral_user_id, forwarded_from)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${nonce ? ' ON CONFLICT DO NOTHING' : ''}`,
       [messageId, channelId, channel.server_id, userId, trimmed,
        replyToId ? 'reply' : type, replyToId, mentions.everyone ? 1 : 0, tts ? 1 : 0, nonce,
        sticker?.id ?? null, JSON.stringify(richEmbeds), JSON.stringify(messageComponents),
-       applicationId, ephemeralUserId]
+       applicationId, ephemeralUserId, forward ? JSON.stringify(forward.snapshot) : null]
     );
     // Same (channel, author, nonce) already stored: this is a retry. Write
     // nothing else; the original is returned below.
@@ -585,7 +616,10 @@ export async function createMessage({
       if (!file) continue; // silently drop unknown ids rather than 500
       // Someone else's private upload cannot be re-posted by id: that would
       // publish its name, size and dimensions and pin it against GC.
-      if (file.visibility === 'private' && file.uploader_id !== userId) continue;
+      // A forward may carry the source's files: the sender was just shown to
+      // be able to read the message they are attached to.
+      if (file.visibility === 'private' && file.uploader_id !== userId
+          && !forward?.fileIds.has(file.id)) continue;
 
       // The waveform is the one field the client is the authority on — it is a
       // visual summary of audio the browser already decoded, and re-deriving it
@@ -702,6 +736,76 @@ export async function createMessage({
   // reaches a client: `audience` is the id list of everyone who can see the
   // channel, and `notifications` carries other people's ids and the preview.
   return withDelivery(message, { notifications, audience: notifications.reached ?? [] });
+}
+
+/** Destinations one message may be forwarded to per minute (per sender). */
+export const FORWARD_DESTINATIONS_MAX = 5;
+
+/**
+ * Resolve `forwarded_from` ({ message_id } or an id) into what the copy is
+ * made of. The sender must be able to read the source (READ_MESSAGE_HISTORY
+ * in a guild, recipient in a DM, and not refused by age); anything else looks
+ * like a missing message, so a forward cannot probe for ids. Forwarding one
+ * message is capped at FORWARD_DESTINATIONS_MAX destinations a minute.
+ */
+async function loadForwardSource({ forwardedFrom, userId }) {
+  if (!userId) throw ApiError.unauthorized();
+  const sourceId = typeof forwardedFrom === 'object' ? forwardedFrom?.message_id : forwardedFrom;
+  if (!sourceId || typeof sourceId !== 'string' || sourceId.length > 64) {
+    throw new ApiError('forwarded_from.message_id is required', { code: 'INVALID_FORWARD' });
+  }
+  const source = await getQuery(
+    `SELECT m.id, m.channel_id, m.server_id, m.content, m.created_at, m.sticker_id,
+            m.ephemeral_user_id, m.forwarded_from, m.type,
+            c.name AS channel_name, c.type AS channel_type,
+            u.username, u.display_name, sm.nickname
+       FROM messages m
+       JOIN channels c ON c.id = m.channel_id
+       LEFT JOIN users u ON u.id = m.user_id
+       LEFT JOIN server_members sm ON sm.user_id = m.user_id AND sm.server_id = m.server_id
+      WHERE m.id = ? AND m.deleted_at IS NULL`,
+    [sourceId]
+  );
+  if (!source || (source.ephemeral_user_id && source.ephemeral_user_id !== userId)) {
+    throw ApiError.notFound('Message');
+  }
+  try {
+    await assertChannelAccess({ channelId: source.channel_id, userId, permission: 'READ_MESSAGE_HISTORY' });
+  } catch {
+    throw ApiError.notFound('Message');
+  }
+  if (source.type === 'poll') {
+    throw new ApiError('Polls cannot be forwarded', { code: 'FORWARD_UNSUPPORTED' });
+  }
+  const budget = await consumeShared(`forward:${userId}:${source.id}`, {
+    limit: FORWARD_DESTINATIONS_MAX, windowMs: 60_000
+  });
+  if (!budget.allowed) {
+    throw new ApiError(`A message can be forwarded to at most ${FORWARD_DESTINATIONS_MAX} places at a time`, {
+      status: 429, code: 'FORWARD_LIMIT', details: { retry_after_ms: budget.retryAfterMs }
+    });
+  }
+  const files = await allQuery(
+    `SELECT file_id, description, is_spoiler FROM attachments WHERE message_id = ? ORDER BY position ASC`,
+    [source.id]
+  );
+  // A forward of a forward still points at where the words first appeared.
+  const origin = safeParse(source.forwarded_from, null);
+  const snapshot = origin?.message_id ? origin : {
+    message_id: source.id,
+    channel_id: source.channel_id,
+    channel_name: source.server_id ? source.channel_name ?? null : null,
+    guild_id: source.server_id ?? null,
+    author_name: source.nickname || source.display_name || source.username || null,
+    created_at: source.created_at
+  };
+  return {
+    content: source.content ?? '',
+    stickerId: source.sticker_id ?? null,
+    attachments: files.map((f) => ({ file_id: f.file_id, description: f.description, is_spoiler: Boolean(f.is_spoiler) })),
+    fileIds: new Set(files.map((f) => f.file_id)),
+    snapshot
+  };
 }
 
 export async function editMessage({ messageId, userId, content, embeds = undefined, components = undefined }) {

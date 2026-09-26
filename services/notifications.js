@@ -46,6 +46,7 @@ import {
   computeBasePermissions, computeChannelPermissions, has, ALL_PERMISSIONS
 } from '../lib/permissions.js';
 import * as push from './push.js';
+import { pendingRequestRecipients } from './users.js';
 
 export const LEVELS = ['all_messages', 'only_mentions', 'nothing'];
 export const CHANNEL_LEVELS = ['inherit', ...LEVELS];
@@ -406,6 +407,12 @@ export async function fanOutMessageNotifications({
   const guildDefault = guild?.server?.default_notifications ?? 'all_messages';
   const now = Date.now();
 
+  // A 1:1 DM from a stranger waits in Message requests: it still counts as
+  // unread, but must not ping, push or land in the inbox until accepted.
+  const pendingRequest = channel.type === 'dm' && authorId
+    ? await pendingRequestRecipients(channel.id, reached.filter((uid) => !blockedBy.has(uid))).catch(() => new Set())
+    : new Set();
+
   const mentionBumps = [];
   const decisions = [];
   for (const uid of reached) {
@@ -441,7 +448,7 @@ export async function fanOutMessageNotifications({
       mentioned: isDm ? mentionedUsers.has(uid) : mentioned,
       keyword
     });
-    if (kind) decisions.push({ uid, kind });
+    if (kind && !pendingRequest.has(uid)) decisions.push({ uid, kind });
   }
 
   const inbox = decisions.filter((d) => d.kind !== 'message');

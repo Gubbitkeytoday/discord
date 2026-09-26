@@ -17,6 +17,53 @@ import {
 import {
   guildState, memberState, allMembers, knownChannelGuild, rememberChannelGuild
 } from './permCache.js';
+import { ageGroupOf } from './userSettings.js';
+
+// ----------------------------------------------------------------------------
+//  Age-restricted (NSFW) channels.
+//
+//  A member under 18 may not read or post in an age-restricted channel (or a
+//  thread under one), whatever the permissions say. The client gate is a
+//  courtesy; this is the rule. Only 'minor' is refused: an account with no
+//  date of birth (a bot, or one made before the age gate) is asked for it by
+//  the client before entering.
+//
+//  The age group is cached per user so the hot path stays one lookup: an
+//  adult stays an adult (the date of birth cannot be changed once set), so
+//  'adult' is kept for good; anything else for a minute, because a birthday
+//  or a first-time date of birth can change it.
+// ----------------------------------------------------------------------------
+
+const AGE_TTL_MS = 60_000;
+const ageCache = new Map();   // userId -> { group, at }
+
+async function cachedAgeGroup(userId) {
+  const hit = ageCache.get(userId);
+  if (hit && (hit.group === 'adult' || Date.now() - hit.at < AGE_TTL_MS)) return hit.group;
+  const row = await getQuery(`SELECT birth_year, birth_month FROM users WHERE id = ?`, [userId]);
+  const group = ageGroupOf(row);
+  if (ageCache.size > 50_000) ageCache.clear();
+  ageCache.set(userId, { group, at: Date.now() });
+  return group;
+}
+
+/** Drop the cached age group (after a date of birth is recorded). */
+export function forgetAgeGroup(userId) { ageCache.delete(userId); }
+
+/** Is `userId` refused from channel `channelId` (the permission channel) by age? */
+export async function isAgeRestrictedFor(userId, channelId) {
+  if ((await cachedAgeGroup(userId)) !== 'minor') return false;
+  const row = await getQuery(
+    `SELECT c.nsfw, p.nsfw AS parent_nsfw
+       FROM channels c LEFT JOIN channels p ON p.id = c.parent_id AND c.type = 'thread'
+      WHERE c.id = ?`, [channelId]);
+  return Boolean(Number(row?.nsfw) || Number(row?.parent_nsfw));
+}
+
+export const AGE_RESTRICTED_ERROR = () => new ApiError(
+  'This channel is age-restricted. You must be 18 or older to view it.',
+  { status: 403, code: 'AGE_RESTRICTED' }
+);
 
 /**
  * Permissions of `member` (a permCache member entry) in `state`'s guild,
@@ -141,6 +188,7 @@ export async function assertChannelAccess({ channelId, userId, permission = null
   if (!has(resolved.permissions, 'VIEW_CHANNEL')) {
     throw ApiError.forbidden('Missing permission: VIEW_CHANNEL');
   }
+  if (await isAgeRestrictedFor(userId, permissionChannelId)) throw AGE_RESTRICTED_ERROR();
   if (permission && !has(resolved.permissions, permission)) {
     // A timeout is the most common reason a member suddenly cannot act, and
     // "missing SEND_MESSAGES" would be a confusing way to say so.
@@ -306,7 +354,13 @@ export async function channelAudience(channelId, permission = 'VIEW_CHANNEL') {
 export async function readableChannelIds(userId, { serverId = null, permission = 'READ_MESSAGE_HISTORY' } = {}) {
   if (!userId) return [];
   const { guildChannels, dmChannelIds, can } = await userChannelContext(userId, { serverId });
-  const ids = guildChannels.filter((c) => can(c.id, permission)).map((c) => c.id);
+  let ids = guildChannels.filter((c) => can(c.id, permission)).map((c) => c.id);
+  // Search must not surface an age-restricted channel to a member under 18.
+  if (ids.length && (await cachedAgeGroup(userId)) === 'minor') {
+    const byId = new Map(guildChannels.map((c) => [c.id, c]));
+    const restricted = (c) => Boolean(Number(c?.nsfw)) || (c?.type === 'thread' && Boolean(Number(byId.get(c.parent_id)?.nsfw)));
+    ids = ids.filter((id) => !restricted(byId.get(id)));
+  }
   return [...ids, ...dmChannelIds];
 }
 

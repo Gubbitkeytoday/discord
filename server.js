@@ -62,6 +62,7 @@ import * as linkEmbeds from './services/linkEmbeds.js';
 import * as automod from './services/automod.js';
 import * as webhookService from './services/webhooks.js';
 import * as reportService from './services/reports.js';
+import { isInstanceAdmin } from './services/instanceAdmin.js';
 import * as channelPerms from './services/channelPerms.js';
 import * as userSettings from './services/userSettings.js';
 import * as pollService from './services/polls.js';
@@ -724,6 +725,8 @@ app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, re
     nonce: req.body.nonce ?? null,
     stickerId: req.body.sticker_id ?? null,
     poll: req.body.poll ?? null,
+    forwardedFrom: req.body.forwarded_from ?? null,
+    allowedMentions: req.body.allowed_mentions ?? null,
     // Embeds and components are a bot's vocabulary; a person's client never
     // sends them, and the validators reject anything malformed either way.
     embeds: req.botApplicationId ? req.body.embeds ?? null : null,
@@ -1080,7 +1083,8 @@ app.get('/api/servers/:serverId/members', requireUser, asyncRoute(async (req, re
   await requireMembership(req);
   res.json(await guildAdmin.listMembers(req.params.serverId, {
     limit: parseLimit(req.query.limit, { fallback: 200, max: 1000 }),
-    search: req.query.search ?? null
+    search: req.query.search ?? null,
+    viewerId: req.userId
   }));
 }));
 
@@ -1245,7 +1249,9 @@ app.get('/api/servers/:serverId/lockdowns', requireUser, asyncRoute(async (req, 
 
 app.get('/api/servers/:serverId/profile/:userId', requireUser, asyncRoute(async (req, res) => {
   await requireMembership(req);
-  res.json(await guildAdmin.getGuildProfile({ serverId: req.params.serverId, userId: req.params.userId }));
+  res.json(await guildAdmin.getGuildProfile({
+    serverId: req.params.serverId, userId: req.params.userId, viewerId: req.userId
+  }));
 }));
 
 app.patch('/api/servers/:serverId/profile/@me', requireUser, asyncRoute(async (req, res) => {
@@ -1892,12 +1898,20 @@ app.patch('/api/reports/:reportId', requireUser, asyncRoute(async (req, res) => 
   const isAdmin = process.env.ADMIN_TOKEN && req.get('x-admin-token') === process.env.ADMIN_TOKEN;
   if (!isAdmin) {
     // A guild moderator may only close reports raised inside their own guild.
-    const report = await getQuery(`SELECT server_id FROM reports WHERE id = ?`, [req.params.reportId]);
+    const report = await getQuery(`SELECT server_id, escalated FROM reports WHERE id = ?`, [req.params.reportId]);
     if (!report) throw ApiError.notFound('Report');
-    if (!report.server_id) throw new ApiError('ADMIN_TOKEN is required', { status: 403, code: 'FORBIDDEN' });
-    await guildService.assertPermission({
-      userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
-    });
+    // Reports with no guild (DMs, users) and escalated ones are the instance
+    // administrators' queue; they may close them from the admin console.
+    const instanceQueue = !report.server_id || Number(report.escalated) === 1;
+    if (instanceQueue && await isInstanceAdmin(req.userId)) {
+      // allowed
+    } else if (!report.server_id) {
+      throw new ApiError('Only an administrator of this instance can do that', { status: 403, code: 'NOT_INSTANCE_ADMIN' });
+    } else {
+      await guildService.assertPermission({
+        userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
+      });
+    }
   }
   res.json(await reportService.resolveReport({
     reportId: req.params.reportId,
