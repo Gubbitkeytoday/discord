@@ -3,7 +3,7 @@ import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import {
   Users, MessageSquare, X, UserPlus, Check, ShieldOff, ShieldAlert, UserMinus,
-  Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox
+  Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox, Menu
 } from 'lucide-react';
 import UserStatusMenu from './UserStatusMenu';
 
@@ -62,6 +62,9 @@ export default function HomeDirectMessages({
   onToggleDeafen,
   currentVoiceChannel,
   onLeaveVoice,
+  mobileOpen = false,
+  onOpenMobile,
+  onCloseMobile,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -114,8 +117,20 @@ export default function HomeDirectMessages({
 
   return (
     <div className="flex-1 bg-d-canvas flex shrink-0 min-w-0 h-full">
+      {/* On a phone the DM list is a drawer beside the server rail, exactly
+          like a server's channel list, so a conversation gets the full width. */}
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label={t('common.close')}
+          onClick={onCloseMobile}
+          className="md:hidden fixed inset-0 bg-black/60 z-30"
+        />
+      )}
       {/* DM sidebar */}
-      <div className="w-60 max-md:w-48 bg-d-surface flex flex-col shrink-0 border-r border-d-edge/40">
+      <div className={`w-60 bg-d-surface flex flex-col shrink-0 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:z-40 max-md:w-[min(20rem,calc(100vw-72px-3rem))] max-md:shadow-2xl max-md:transition-transform ${
+        mobileOpen ? '' : 'max-md:-translate-x-[calc(100%+72px)] max-md:invisible'
+      }`}>
         <div className="h-12 px-3 border-b border-d-edge flex items-center">
           <input
             value={filter}
@@ -309,19 +324,29 @@ export default function HomeDirectMessages({
         children
       ) : (
         <div className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
-          <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 bg-d-canvas shrink-0">
-            <div className="flex items-center gap-2 pr-4 border-r border-d-divider">
+          <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 max-md:gap-2 bg-d-canvas shrink-0 min-w-0">
+            {onOpenMobile && (
+              <button
+                type="button"
+                onClick={onOpenMobile}
+                className="md:hidden text-d-text2 hover:text-d-strong shrink-0"
+                aria-label={t('sidebar.openChannels')}
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
+            <div className="flex items-center gap-2 pr-4 border-r border-d-divider shrink-0 max-sm:hidden">
               <Users className="w-5 h-5 text-d-text4" />
               <span className="font-bold text-d-strong">{t('dm.friends')}</span>
             </div>
 
-            <div className="flex items-center gap-2 text-sm font-semibold">
+            <div className="flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
               {tabs().map((tab) => (
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
                   aria-pressed={activeTab === tab.key}
-                  className={`px-2 py-1 rounded transition-colors ${
+                  className={`px-2 py-1 rounded transition-colors shrink-0 whitespace-nowrap ${
                     activeTab === tab.key ? 'bg-d-active text-d-strong' : 'text-d-text2 hover:bg-d-hover/60'
                   }`}
                 >
@@ -335,7 +360,7 @@ export default function HomeDirectMessages({
               ))}
               <button
                 onClick={() => setActiveTab('add')}
-                className={`px-2 py-1 rounded transition-colors ${
+                className={`px-2 py-1 rounded transition-colors shrink-0 whitespace-nowrap ${
                   activeTab === 'add' ? 'bg-d-successhover text-white' : 'bg-d-success text-white hover:bg-d-successhover'
                 }`}
               >

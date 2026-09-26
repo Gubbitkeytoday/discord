@@ -191,10 +191,10 @@ export default function ChannelSidebar({
           type="button"
           aria-label={t('common.close')}
           onClick={onCloseMobile}
-          className="md:hidden fixed inset-0 bg-black/50 z-10"
+          className="md:hidden fixed inset-0 bg-black/60 z-30"
         />
       )}
-      <div className={`w-60 bg-d-surface flex flex-col shrink-0 select-none z-20 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:shadow-2xl max-md:transition-transform ${mobileOpen ? '' : 'max-md:-translate-x-[120%]'}`}>
+      <div className={`w-60 bg-d-surface flex flex-col shrink-0 select-none z-20 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:z-40 max-md:w-[min(20rem,calc(100vw-72px-3rem))] max-md:shadow-2xl max-md:transition-transform ${mobileOpen ? '' : 'max-md:-translate-x-[calc(100%+72px)] max-md:invisible'}`}>
       {/* Server header */}
       <div className="relative shrink-0">
         <button
@@ -205,7 +205,8 @@ export default function ChannelSidebar({
         >
           <span className="truncate text-[15px] flex items-center gap-1.5">
             {currentServer.name}
-            {serverSettings?.muted && <BellOff className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
+            {/* `muted` is a 0/1 column; a bare `0 &&` would print "0". */}
+            {Boolean(serverSettings?.muted) && <BellOff className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
           </span>
           {showServerMenu ? <X className="w-4 h-4 text-d-text3" /> : <ChevronDown className="w-5 h-5 text-d-text3" />}
         </button>

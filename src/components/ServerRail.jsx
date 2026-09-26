@@ -47,7 +47,8 @@ export default function ServerRail({
   onSelectHome,
   onJoinWithInvite,
   onServerContextMenu,
-  pendingFriendCount = 0
+  pendingFriendCount = 0,
+  mobileOpen = false
 }) {
   const { prefs, update } = useUserSettings();
   const layout = prefs.layout ?? { serverFolders: [], serverOrder: [] };
@@ -141,7 +142,14 @@ export default function ServerRail({
   }, [readStates, channels]);
 
   return (
-    <nav aria-label={t('sidebar.servers')} className="w-[72px] bg-d-base flex flex-col items-center py-3 gap-2 shrink-0 select-none z-20">
+    // Below `md` the rail slides in together with the channel list as one
+    // navigation drawer, so the conversation gets the whole width of a phone.
+    <nav
+      aria-label={t('sidebar.servers')}
+      className={`w-[72px] bg-d-base flex flex-col items-center py-3 gap-2 shrink-0 select-none z-20 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:transition-transform ${
+        mobileOpen ? '' : 'max-md:-translate-x-full max-md:invisible'
+      }`}
+    >
       <RailButton
         active={activeServerId === 'home'}
         onClick={onSelectHome}
@@ -270,13 +278,23 @@ export default function ServerRail({
   );
 }
 
+/** Discord's acronym for an icon-less guild: first letter of each word. */
+function serverInitials(name = '') {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const letters = words.map((w) => Array.from(w)[0]).filter((c) => /[\p{L}\p{N}]/u.test(c));
+  return (letters.slice(0, 3).join("") || "?").toUpperCase();
+}
+
 function ServerIcon({ server, active, unread, badge, dim, onSelect, onContextMenu }) {
+  // A dead icon URL must not leave a broken-image glyph in the rail; the
+  // acronym is what Discord shows for a guild without an icon anyway.
+  const [iconFailed, setIconFailed] = useState(false);
   return (
     <RailButton active={active} unread={unread} badge={badge} onClick={onSelect} onContextMenu={onContextMenu} title={server.name} dim={dim}>
-      {server.icon_url ? (
-        <img src={server.icon_url} alt="" className="w-full h-full object-cover pointer-events-none" />
+      {server.icon_url && !iconFailed ? (
+        <img src={server.icon_url} alt="" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
       ) : (
-        <span className="font-semibold text-sm text-d-strong">{server.name.substring(0, 2).toUpperCase()}</span>
+        <span className="font-semibold text-sm">{serverInitials(server.name)}</span>
       )}
     </RailButton>
   );

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { LogIn, UserPlus, AlertTriangle, Loader2, ArrowLeft } from 'lucide-react';
+import { LogIn, UserPlus, AlertTriangle, Loader2, ArrowLeft, ShieldCheck } from 'lucide-react';
 import { post, setApiIdentity } from '../api';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
@@ -10,8 +10,8 @@ import { t } from '../i18n/index.jsx';
  * identity shortcut is on, which it never is in production.
  */
 export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteCode }) {
-  const [mode, setMode] = useState('login');   // login | register | forgot
-  const [form, setForm] = useState({ username: '', password: '', display_name: '', email: '' });
+  const [mode, setMode] = useState('login');   // login | register | forgot | mfa
+  const [form, setForm] = useState({ username: '', password: '', display_name: '', email: '', mfa_code: '' });
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -27,14 +27,22 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
         setNotice(t('auth.resetSent'));
         return;
       }
-      const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const body = mode === 'login'
-        ? { username: form.username, password: form.password }
+      const isLogin = mode === 'login' || mode === 'mfa';
+      const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
+      const body = isLogin
+        ? { username: form.username, password: form.password, ...(mode === 'mfa' ? { mfa_code: form.mfa_code.replace(/\s+/g, '') } : {}) }
         : { username: form.username, password: form.password, display_name: form.display_name, email: form.email || undefined };
       const data = await post(endpoint, body);
       setApiIdentity({ userId: data.user.id, token: data.token });
       onAuthenticated(data.user, data.token);
     } catch (err) {
+      // A 2FA account: the password was right, now ask for the second factor
+      // and resend the same credentials with it.
+      if (err.code === 'MFA_REQUIRED') {
+        setMode('mfa');
+        setForm((f) => ({ ...f, mfa_code: '' }));
+        return;
+      }
       setError(err.message);
     } finally {
       setBusy(false);
@@ -51,6 +59,11 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
       setApiIdentity({ userId: data.user.id, token: data.token });
       onAuthenticated(data.user, data.token);
     } catch (err) {
+      if (err.code === 'MFA_REQUIRED') {
+        setForm((f) => ({ ...f, username: account.username, password: account.dev_password, mfa_code: '' }));
+        setMode('mfa');
+        return;
+      }
       setError(err.message);
     } finally {
       setBusy(false);
@@ -59,9 +72,12 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
 
   return (
     <div className="fixed inset-0 bg-d-base flex items-center justify-center overlay-center p-4">
-      <div className="w-full max-w-4xl bg-d-canvas rounded-xl shadow-2xl flex overflow-hidden">
-        <form onSubmit={submit} className="flex-1 p-8 min-w-0">
-          {mode === 'forgot' && (
+      {/* Discord's auth card is a narrow ~480px column; the old 896px card
+          stretched two inputs across the whole screen whenever the dev-account
+          column was not there to fill it. */}
+      <div className={`w-full ${devAccounts.length > 0 ? 'max-w-3xl' : 'max-w-[30rem]'} bg-d-canvas rounded-xl shadow-2xl flex overflow-hidden`}>
+        <form onSubmit={submit} className="flex-1 p-8 max-sm:p-6 min-w-0">
+          {(mode === 'forgot' || mode === 'mfa') && (
             <button
               type="button"
               onClick={() => { setMode('login'); setError(null); setNotice(null); }}
@@ -71,14 +87,16 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
             </button>
           )}
 
-          <h1 className="text-2xl font-bold text-d-strong mb-1">
+          <h1 className="text-2xl font-bold text-d-strong mb-1 text-center">
             {mode === 'login' ? t('auth.welcomeBack')
               : mode === 'register' ? t('auth.createAccount')
+              : mode === 'mfa' ? t('auth.mfaTitle')
               : t('auth.forgotTitle')}
           </h1>
-          <p className="text-sm text-d-text3 mb-6">
+          <p className="text-sm text-d-text3 mb-6 text-center">
             {mode === 'login' ? t('auth.gladToSeeYou')
               : mode === 'register' ? t('auth.takesAMinute')
+              : mode === 'mfa' ? t('auth.mfaHint')
               : t('auth.forgotHint')}
           </p>
 
@@ -100,7 +118,27 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
             </div>
           )}
 
-          {mode === 'forgot' ? (
+          {mode === 'mfa' ? (
+            <label className="block mb-6">
+              <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">
+                {t('auth.mfaCode')} <span className="text-d-danger">*</span>
+              </span>
+              <input
+                value={form.mfa_code}
+                onChange={(e) => setForm({ ...form, mfa_code: e.target.value })}
+                autoComplete="one-time-code"
+                inputMode="text"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                maxLength={32}
+                autoFocus
+                required
+                placeholder="123456"
+                className="w-full bg-d-base text-lg tracking-[0.3em] text-center font-mono text-d-strong px-3 py-2.5 rounded border border-d-edge focus:outline-none focus:border-d-brand placeholder-d-text4"
+              />
+            </label>
+          ) : mode === 'forgot' ? (
             <label className="block mb-6">
               <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">
                 {t('security.email')} <span className="text-d-danger">*</span>
@@ -124,6 +162,10 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  autoFocus
                   required
                   className="w-full bg-d-base text-sm text-d-strong px-3 py-2.5 rounded border border-d-edge focus:outline-none focus:border-d-brand"
                 />
@@ -194,11 +236,15 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
           >
             {busy ? <Loader2 className="w-4 h-4 animate-spin" />
               : mode === 'login' ? <LogIn className="w-4 h-4" />
-              : mode === 'register' ? <UserPlus className="w-4 h-4" /> : null}
-            {mode === 'login' ? t('auth.login') : mode === 'register' ? t('auth.register') : t('auth.sendResetLink')}
+              : mode === 'register' ? <UserPlus className="w-4 h-4" />
+              : mode === 'mfa' ? <ShieldCheck className="w-4 h-4" /> : null}
+            {mode === 'login' ? t('auth.login')
+              : mode === 'register' ? t('auth.register')
+              : mode === 'mfa' ? t('auth.mfaVerify')
+              : t('auth.sendResetLink')}
           </button>
 
-          {mode !== 'forgot' && (
+          {(mode === 'login' || mode === 'register') && (
             <p className="text-xs text-d-text3 mt-3">
               {mode === 'login' ? t('auth.noAccount') : t('auth.haveAccount')}{' '}
               <button
