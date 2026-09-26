@@ -15,7 +15,7 @@ import OnboardingTab from './settings/OnboardingTab';
 import InsightsTab from './settings/InsightsTab';
 import { t, localeTag } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, serverIconOf, serverInitials } from '../utils/avatar';
 import {
   permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
 } from '../utils/permissionCatalog';
@@ -393,14 +393,21 @@ function OverviewTab({
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-6">{t('settings.serverOverview')}</h1>
 
-      <div className="flex gap-6 mb-8">
+      <div className="flex max-sm:flex-col gap-6 mb-8">
         <label className={`shrink-0 group ${uploadingIcon ? 'cursor-wait' : 'cursor-pointer'}`}>
           <span className="relative block w-24 h-24">
-            <img
-              src={form.icon_url || FALLBACK_AVATAR}
-              alt=""
-              className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
-            />
+            {serverIconOf(form) ? (
+              <img
+                src={serverIconOf(form)}
+                alt=""
+                className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
+              />
+            ) : (
+              // Same initials tile as the server rail, not a person silhouette.
+              <span className="w-24 h-24 rounded-full border-4 border-d-surface bg-d-brand text-white text-2xl font-semibold flex items-center justify-center group-hover:opacity-70 transition-opacity">
+                {serverInitials(form.name || server.name)}
+              </span>
+            )}
             {uploadingIcon && (
               <span className="absolute inset-0 flex items-center justify-center rounded-full bg-black/55">
                 <Loader2 className="w-5 h-5 animate-spin text-white" aria-label={t('common.uploading')} />
@@ -439,7 +446,7 @@ function OverviewTab({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
         <Field label={t('settings.systemChannel')}>
           <ChannelSelect
             value={form.system_channel_id}
