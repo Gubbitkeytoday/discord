@@ -9,7 +9,7 @@
 
 import express from 'express';
 
-import { getQuery, runQuery } from '../db.js';
+import { allQuery, getQuery, runQuery } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError, asyncRoute, requireUser } from '../lib/httpUtils.js';
 import { rateLimit } from '../lib/rateLimit.js';
@@ -18,7 +18,7 @@ import { assertChannelAccess } from '../services/access.js';
 import { resolvePermissions, writeAuditLog } from '../services/guilds.js';
 import * as livekit from '../services/livekit.js';
 import {
-  broadcastVoice, moveVoiceMember, disconnectVoiceMember, setServerVoiceState
+  broadcastVoice, moveVoiceMember, disconnectVoiceMember, setServerVoiceState, setServerMuteMany
 } from '../realtime.js';
 
 const VOICE_CHANNEL_TYPES = new Set(['voice', 'stage']);
@@ -196,6 +196,55 @@ export default function createLivekitRouter({ io }) {
       targetType: 'user', targetId: userId, changes: [{ key: 'mute', new: mute }]
     });
     res.json({ ok: true, userId, channelId, serverMute: mute });
+  }));
+
+  /**
+   * "Mute everyone" / "Unmute everyone" (the teacher's button). Server-mutes
+   * every member in the channel except the moderator pressing it, the server
+   * owner, and anyone who could moderate them back (MUTE_MEMBERS) — a co-host
+   * should not be silenced by a stray click. Unmute lifts the server mute from
+   * everyone in the channel who has one. One audit entry per member, like the
+   * single action, so the log still answers "who muted me?".
+   */
+  router.post('/voice/channels/:channelId/mute-all', requireUser, moderationLimit, asyncRoute(async (req, res) => {
+    const mute = bool(req.body?.mute, 'mute');
+    const { channelId } = req.params;
+    const { channel, permissions, isDm } = await assertChannelAccess({ channelId, userId: req.userId });
+    if (isDm || !channel.server_id || !VOICE_CHANNEL_TYPES.has(channel.type)) {
+      throw new ApiError('Not a server voice channel', { status: 400, code: 'NOT_VOICE_CHANNEL' });
+    }
+    if (!has(permissions, 'MUTE_MEMBERS')) throw ApiError.forbidden('Missing permission: MUTE_MEMBERS');
+
+    const server = await getQuery(`SELECT owner_id FROM servers WHERE id = ?`, [channel.server_id]);
+    const present = await allQuery(
+      `SELECT user_id, server_mute FROM voice_states WHERE channel_id = ? ORDER BY joined_at ASC`, [channelId]
+    );
+    const targets = [];
+    const skipped = [];
+    for (const row of present) {
+      const userId = row.user_id;
+      if (mute) {
+        if (userId === req.userId || userId === server?.owner_id) { skipped.push(userId); continue; }
+        if (row.server_mute) continue;   // already muted: nothing to change or log
+        const theirs = await resolvePermissions({ userId, serverId: channel.server_id, channelId });
+        if (has(theirs.permissions, 'MUTE_MEMBERS')) { skipped.push(userId); continue; }
+        targets.push(userId);
+      } else if (row.server_mute) {
+        targets.push(userId);
+      }
+    }
+
+    if (targets.length) {
+      await setServerMuteMany(io, { serverId: channel.server_id, channelId, userIds: targets, mute, by: req.userId });
+      for (const userId of targets) {
+        await writeAuditLog({
+          serverId: channel.server_id, userId: req.userId, actionType: 'MEMBER_UPDATE',
+          targetType: 'user', targetId: userId, changes: [{ key: 'mute', new: mute }],
+          reason: mute ? 'Mute everyone' : 'Unmute everyone'
+        });
+      }
+    }
+    res.json({ ok: true, channelId, serverMute: mute, affected: targets, skipped });
   }));
 
   router.post(`${base}/deafen`, requireUser, moderationLimit, asyncRoute(async (req, res) => {

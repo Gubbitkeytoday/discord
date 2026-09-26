@@ -82,14 +82,14 @@ export function IncomingCall({ call, channel, onAccept, onDecline }) {
         <button
           type="button"
           onClick={() => { stopRef.current?.(); onDecline?.(); }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-sm font-semibold py-2"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-sm font-semibold min-h-11"
         >
           <PhoneOff className="w-4 h-4" aria-hidden="true" />{t('call.decline')}
         </button>
         <button
           type="button"
           onClick={() => { stopRef.current?.(); onAccept?.(); }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-success/90 hover:bg-d-success text-white text-sm font-semibold py-2"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-success/90 hover:bg-d-success text-white text-sm font-semibold min-h-11"
         >
           <Phone className="w-4 h-4" aria-hidden="true" />{t('call.accept')}
         </button>
@@ -139,28 +139,34 @@ export function CallBar({ call, currentUserId, isMuted, onToggleMute, isVideo, o
               type="button"
               onClick={onToggleMute}
               aria-pressed={isMuted}
-              className="p-1.5 rounded-md hover:bg-d-surface text-d-text2 hover:text-d-strong"
+              className={`inline-flex items-center gap-1.5 min-h-8 pointer-coarse:min-h-11 px-2.5 rounded-md text-xs font-semibold ${
+                isMuted ? 'bg-d-danger text-white' : 'bg-d-control2 hover:bg-d-control text-d-strong'
+              }`}
               title={isMuted ? t('voice.unmute') : t('voice.mute')}
             >
-              {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              {isMuted ? <MicOff className="w-4 h-4" aria-hidden="true" /> : <Mic className="w-4 h-4" aria-hidden="true" />}
+              {t('voice.ctlMute')}
             </button>
             <button
               type="button"
               onClick={onToggleVideo}
               aria-pressed={isVideo}
-              className="p-1.5 rounded-md hover:bg-d-surface text-d-text2 hover:text-d-strong"
+              className={`inline-flex items-center gap-1.5 min-h-8 pointer-coarse:min-h-11 px-2.5 rounded-md text-xs font-semibold ${
+                isVideo ? 'bg-d-brand text-white' : 'bg-d-control2 hover:bg-d-control text-d-strong'
+              }`}
               title={isVideo ? t('call.stopVideo') : t('call.startVideo')}
             >
-              {isVideo ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+              {isVideo ? <Video className="w-4 h-4" aria-hidden="true" /> : <VideoOff className="w-4 h-4" aria-hidden="true" />}
+              {t('voice.ctlCamera')}
             </button>
           </>
         )}
         <button
           type="button"
           onClick={onHangUp}
-          className="inline-flex items-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-xs font-semibold px-2.5 py-1.5"
+          className="inline-flex items-center gap-1.5 rounded-md bg-d-danger hover:bg-d-dangerhover text-white text-xs font-semibold px-3 min-h-8 pointer-coarse:min-h-11"
         >
-          <PhoneOff className="w-3.5 h-3.5" aria-hidden="true" />
+          <PhoneOff className="w-4 h-4" aria-hidden="true" />
           {joined ? t('call.hangUp') : t('call.join')}
         </button>
       </div>
