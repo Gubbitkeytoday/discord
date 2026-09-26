@@ -28,6 +28,7 @@ import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { consume } from '../lib/rateLimit.js';
 import { sessionEvents } from '../lib/sessionEvents.js';
+import { config as appConfig } from '../lib/config.js';
 
 const env = process.env;
 const DEFAULT_HOSTS = [
@@ -302,7 +303,7 @@ export function buildPayload({
 }
 
 function appUrl(path) {
-  const base = String(env.PUBLIC_URL || `http://localhost:${env.PORT || 3001}`).replace(/\/+$/, '');
+  const base = String(appConfig.publicUrl).replace(/\/+$/, '');
   return `${base}${path}`;
 }
 

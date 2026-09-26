@@ -66,12 +66,10 @@ Object.assign(process.env, {
   VAPID_PRIVATE_KEY: vapid.privateKey,
   VAPID_SUBJECT: 'mailto:test@example.test',
   PUSH_ENDPOINT_HOSTS: 'localhost',
-  PUSH_USER_LIMIT_PER_MIN: '6',
-  PUBLIC_URL: 'https://chat.example.test'
+  PUSH_USER_LIMIT_PER_MIN: '6'
 });
 if (tlsReady) process.env.PUSH_EXTRA_CA_FILE = path.join(TMP, 'cert.pem');
 
-before(startServer);
 after(async () => {
   await stopServer();
   pushServer?.close();
@@ -141,7 +139,9 @@ let labCategory;  // its category
 let labThread;
 let listener;     // user-5's socket
 
+// One root hook: node:test runs sibling root-level hooks concurrently.
 before(async () => {
+  await startServer();
   const cat = await api('POST', '/api/channels', { server_id: 'server-1', name: 'NOTIF LAB', type: 'category' });
   assert.equal(cat.status, 200, JSON.stringify(cat.body));
   labCategory = cat.body.id;
@@ -306,9 +306,11 @@ describe('mentions and suppressions', () => {
 
   test('a non-mentionable role is not a ping from someone without MENTION_EVERYONE', async () => {
     // role-1-bot (user-3) is not mentionable; user-4 lacks MENTION_EVERYONE.
+    const before = await mentionCount('user-3', lab);
     const id = await send('<@&role-1-bot> hello bots', { channel: lab, author: 'user-4' });
     await sleep(150);
     assert.equal(await inboxRow('user-3', id), undefined);
+    assert.equal(await mentionCount('user-3', lab), before);
   });
 
   test('keyword highlights notify like a mention, on word boundaries, without a badge', async () => {
@@ -556,13 +558,27 @@ describe('push subscriptions', () => {
 
 // --- push: delivery -----------------------------------------------------------------
 
+// DMs need a shared server: push users join server-3 through an invite.
+let inviteCode = null;
+async function registerMember(prefix) {
+  const user = await register(prefix);
+  if (!inviteCode) {
+    const invite = await api('POST', '/api/servers/server-3/invites', { max_age: 0 }, as('user-me'));
+    assert.equal(invite.status, 200, JSON.stringify(invite.body));
+    inviteCode = invite.body.code;
+  }
+  const joined = await asSession(user.token, 'POST', `/api/invites/${inviteCode}/accept`, {});
+  assert.equal(joined.status, 200, JSON.stringify(joined.body));
+  return user;
+}
+
 describe('push delivery', { skip: !tlsReady && 'openssl not available for the local push service' }, () => {
   let carol;
   let dmId;
   let device;
 
   before(async () => {
-    carol = await register('pushc');
+    carol = await registerMember('pushc');
     const dm = await asSession(carol.token, 'POST', '/api/dms', { recipientId: 'user-me' });
     assert.equal(dm.status, 200, JSON.stringify(dm.body));
     dmId = dm.body.id;
@@ -586,7 +602,7 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
     assert.equal(payload.web_push, 8030);
     assert.match(payload.notification.title, /Alex/);
     assert.equal(payload.notification.body, 'hello @Alex (You) over push');
-    assert.equal(payload.notification.navigate, `https://chat.example.test/channels/@me/${dmId}/${id}`);
+    assert.equal(payload.notification.navigate, `${BASE}/channels/@me/${dmId}/${id}`);
     assert.equal(payload.notification.tag, `channel-${dmId}`);
     assert.equal(typeof payload.notification.app_badge, 'string');
     assert.ok(Number(payload.notification.app_badge) >= 1);
@@ -632,7 +648,7 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
   });
 
   test('a 410 from the push service deletes the subscription', async () => {
-    const dave = await register('pushd');
+    const dave = await registerMember('pushd');
     const dm = await asSession(dave.token, 'POST', '/api/dms', { recipientId: 'user-me' });
     const dead = makeSubscription('gone').subscription;
     await asSession(dave.token, 'POST', '/api/push/subscriptions', dead);
@@ -643,7 +659,7 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
   });
 
   test('pushes are rate-limited per user', async () => {
-    const erin = await register('pushe');
+    const erin = await registerMember('pushe');
     const dm = await asSession(erin.token, 'POST', '/api/dms', { recipientId: 'user-me' });
     const sub = makeSubscription('erin');
     await asSession(erin.token, 'POST', '/api/push/subscriptions', sub.subscription);
