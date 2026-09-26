@@ -397,6 +397,22 @@ const MIGRATIONS = [
       // ALTER TABLE cannot add a CHECK, so the constraint lives in the service.
       await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
     }
+  },
+  // realtime-scale: GET /api/sync counts edits and deletions since a cursor
+  // per channel; these partial indexes keep that off a table scan. Both
+  // baselines (schema.sql / schema.pg.sql) create them too, so a fresh
+  // database already has them and IF NOT EXISTS makes this a no-op there.
+  {
+    version: 34,
+    name: 'sync indexes on messages.edited_at / deleted_at',
+    up: async () => {
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_edited ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL`);
+    },
+    postgres: async () => {
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_edited ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL`);
+    }
   }
 ];
 
