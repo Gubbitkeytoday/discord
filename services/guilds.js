@@ -13,6 +13,8 @@ import crypto from 'crypto';
 import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
@@ -323,7 +325,9 @@ export async function createServer({ name, iconUrl = null, iconFileId = null, ow
   if (!trimmed) throw new ApiError('Server name is required', { code: 'INVALID_NAME' });
 
   const serverId = generateId();
-  const icon = iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`;
+  // Remote icons (including the generated default) are served through the
+  // same-origin image proxy.
+  const icon = proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`);
 
   await transaction(async () => {
     await runQuery(
@@ -692,6 +696,7 @@ export async function createRole({ serverId, name, color = null, permissions = '
   }
   await assertCanManageRole({ serverId, actorId: userId, permissions });
   name = trimmed;
+  color = normaliseColor(color, 'color') ?? null;
   const { maxPos } = await getQuery(
     `SELECT COALESCE(MAX(position), 0) AS "maxPos" FROM roles WHERE server_id = ?`, [serverId]
   );
@@ -791,7 +796,7 @@ export async function openDirectMessage({ userId, recipientId }) {
 export async function createGroupDM({ userId, recipientIds = [], name = null }) {
   const unique = [...new Set(recipientIds.filter((id) => id && id !== userId))];
   if (unique.length === 0) throw new ApiError('A group needs at least one other person', { code: 'INVALID_RECIPIENTS' });
-  if (unique.length > 9) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  if (unique.length > 9) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
 
   // A block works both ways here too — you cannot pull someone who blocked you
   // into a group, and you cannot be pulled into one with someone you blocked.
@@ -987,7 +992,7 @@ export async function addGroupRecipients({ channelId, userId, recipientIds = [] 
     `SELECT count(*) AS n FROM channel_recipients WHERE channel_id = ?`, [channelId]
   );
   recipientIds = [...new Set(recipientIds.filter((id) => id && id !== userId))];
-  if (n + recipientIds.length > 10) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  if (n + recipientIds.length > 10) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
   // The same consent rules as starting a group: nobody can be pulled into a
   // conversation with someone they blocked (or who blocked them), or against
   // their DM privacy setting.

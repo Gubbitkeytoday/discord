@@ -191,12 +191,15 @@ All settings are environment variables, read from `.env` if present. See
 | `ADMIN_TOKEN` | unset | Enables file maintenance and report triage endpoints |
 | `ALLOW_DEV_IDENTITY` | `1` | Lets any request impersonate a user via `x-user-id`. **Must be `0`** in production |
 | `SECURE_COOKIES` | `0` | Set `1` once TLS is in front |
-| `MAIL_TRANSPORT` | `console` | `console`, `file` (`MAIL_FILE`) or `smtp` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`); `MAIL_FROM` |
+| `MAIL_TRANSPORT` | `console` | `console`, `file` (`MAIL_FILE`) or `smtp` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`); `MAIL_FROM`. In production without a real transport, password reset and e-mail verification answer 503 `MAIL_NOT_CONFIGURED` |
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE` | unset | Optional S3-compatible object storage (AWS, R2, B2, MinIO) |
 | `VOICE_MESH_LIMIT` | `8` | Max people per voice room |
 | `DEFAULT_LOCALE` | `en` | `en` or `th`; browser language wins |
 | `LOG_FORMAT` / `LOG_LEVEL` | `pretty` / `debug` | Use `json` / `info` in production |
-| `ENABLE_METRICS` / `METRICS_TOKEN` | `1` / unset | Prometheus at `/metrics`; set a token if it is reachable publicly |
+| `ENABLE_METRICS` / `METRICS_TOKEN` | `1` / unset | Prometheus at `/metrics` behind `Bearer <token>`; in production it is only served when a token is set |
+| `SESSION_TTL_DAYS` / `SESSION_IDLE_DAYS` | `30` / `14` | Absolute session lifetime and idle limit |
+| `CSP_IMG_SOURCES` | unset | Extra image origins for the CSP (remote images otherwise go through `/api/media/proxy`) |
+| `MEDIA_PROXY_MAX_BYTES` / `MEDIA_PROXY_CACHE_BYTES` | 8 MiB / 64 MiB | Image proxy limits |
 | `SHUTDOWN_TIMEOUT_MS` | `15000` | Drain time on SIGTERM |
 | `DOMAIN` | `localhost` | Docker Compose only: hostname Caddy gets a certificate for |
 | `POSTGRES_PASSWORD` | example value | Docker Compose only: password of the bundled PostgreSQL (URL-safe characters) |

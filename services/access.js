@@ -73,7 +73,7 @@ export async function assertChannelAccess({ channelId, userId, permission = null
     // A timeout is the most common reason a member suddenly cannot act, and
     // "missing SEND_MESSAGES" would be a confusing way to say so.
     if (resolved.timedOut) {
-      throw new ApiError('คุณถูกพักการใช้งานชั่วคราว ยังส่งข้อความไม่ได้', {
+      throw new ApiError('You are timed out and cannot send messages yet', {
         status: 403, code: 'TIMED_OUT',
         details: { until: resolved.member?.timeout_until ?? null }
       });

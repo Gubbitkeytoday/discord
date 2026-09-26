@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import crypto from 'crypto';
@@ -160,7 +161,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       `INSERT INTO servers (id, name, icon_url, owner_id, member_count, description, verification_level,
                             default_notifications, explicit_content_filter, afk_timeout)
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-      [serverId, serverName, iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`, userId,
+      [serverId, serverName, proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`), userId,
        data.server?.description ?? null, Math.min(4, Math.max(0, Number(data.server?.verification_level) || 0)),
        ['all_messages', 'only_mentions'].includes(data.server?.default_notifications) ? data.server.default_notifications : 'all_messages',
        Number(data.server?.explicit_content_filter) || 0,

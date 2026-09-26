@@ -28,11 +28,12 @@ import { config } from './lib/config.js';
 import {
   securityHeaders, requestLogger, metricsMiddleware, renderMetrics, metricsSnapshot
 } from './lib/middleware.js';
-import { pruneAccountTokens } from './services/accountSecurity.js';
+import { pruneAccountTokens, assertReauthenticated } from './services/accountSecurity.js';
 import { sweepStaleThreads } from './services/threads.js';
 import {
-  writeRateLimit, uploadRateLimit, readRateLimit
+  writeRateLimit, uploadRateLimit, readRateLimit, rateLimit
 } from './lib/rateLimit.js';
+import { proxyHandler as mediaProxyHandler } from './services/mediaProxy.js';
 import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
@@ -104,7 +105,19 @@ const io = new Server(httpServer, {
 app.set('trust proxy', config.trustProxy);
 app.disable('x-powered-by');
 
-app.use(securityHeaders({ isProduction: config.isProduction, publicUrl: config.publicUrl }));
+app.use(securityHeaders({
+  isProduction: config.isProduction,
+  publicUrl: config.publicUrl,
+  // Uploads served from a CDN / bucket origin (STORAGE_PUBLIC_BASE=https://…),
+  // plus any origins an operator explicitly allows (CSP_IMG_SOURCES).
+  imageSources: [
+    ...(() => {
+      try { return /^https?:\/\//i.test(process.env.STORAGE_PUBLIC_BASE ?? '') ? [new URL(process.env.STORAGE_PUBLIC_BASE).origin] : []; }
+      catch { return []; }
+    })(),
+    ...String(process.env.CSP_IMG_SOURCES ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  ]
+}));
 app.use(requestLogger({ format: config.logFormat, level: config.logLevel }));
 app.use(metricsMiddleware());
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
@@ -158,11 +171,19 @@ app.get('/api/ready', asyncRoute(async (req, res) => {
   res.json({ status: 'ready', database, ...metricsSnapshot() });
 }));
 
-if (config.enableMetrics) {
+/** Constant-time bearer check: hashing first gives equal-length buffers. */
+function bearerMatches(header, secret) {
+  const digest = (v) => crypto.createHash('sha256').update(String(v ?? '')).digest();
+  return crypto.timingSafeEqual(digest(header), digest(`Bearer ${secret}`));
+}
+
+// Metrics are operational data (routes, volumes, latency, memory). In
+// production they are served only behind METRICS_TOKEN; without a token the
+// endpoint does not exist (lib/config.js warns at boot). Development keeps the
+// old convenience of an open endpoint.
+if (config.enableMetrics && (config.metricsToken || !config.isProduction)) {
   app.get('/metrics', (req, res) => {
-    // With METRICS_TOKEN set the endpoint is private; without it, open — which
-    // is normal when the metrics port is only reachable inside the network.
-    if (config.metricsToken && req.get('authorization') !== `Bearer ${config.metricsToken}`) {
+    if (config.metricsToken && !bearerMatches(req.get('authorization'), config.metricsToken)) {
       res.status(401).type('text/plain').send('unauthorized\n');
       return;
     }
@@ -211,10 +232,18 @@ app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
 
+// Same-origin image proxy: every remote image (avatars, icons, link previews)
+// is fetched by the server, so viewers' browsers never contact third-party
+// hosts. Signed-in users only (an <img> sends the session cookie), with its
+// own rate bucket. See services/mediaProxy.js.
+const mediaProxyLimit = rateLimit({ name: 'media-proxy', limit: 600, windowMs: 60_000 });
+app.get('/api/media/proxy', requireUser, mediaProxyLimit, asyncRoute(mediaProxyHandler));
+
 // --- users -------------------------------------------------------------------
 
-app.get('/api/users', requireUser, asyncRoute(async (_req, res) => {
-  res.json((await userService.listUsers()).map(publicUserEvent));
+app.get('/api/users', requireUser, asyncRoute(async (req, res) => {
+  // Scoped to people the caller shares a server, a DM or a friendship with.
+  res.json((await userService.listUsers(req.userId)).map(publicUserEvent));
 }));
 
 // Every custom emoji the viewer may use, grouped by server — the picker's
@@ -1443,7 +1472,12 @@ app.get('/api/users/@me/export', requireUser, asyncRoute(async (req, res) => {
   res.type('application/json').send(JSON.stringify(data, null, 2));
 }));
 
-app.delete('/api/users/@me', requireUser, asyncRoute(async (req, res) => {
+app.delete('/api/users/@me', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // Irreversible, so a session alone is not enough: the password again, and
+  // the second factor when the account has one.
+  await assertReauthenticated({
+    userId: req.userId, password: req.body?.password, code: req.body?.mfa_code ?? req.body?.code
+  });
   const result = await dataRights.deleteAccount({ userId: req.userId });
   io.to(`user-${req.userId}`).emit('identify_error', { error: 'ACCOUNT_DELETED' });
   // A deleted account must stop receiving anything at all.
@@ -1845,7 +1879,7 @@ app.get('/api/reports', asyncRoute(async (req, res) => {
   const serverId = req.query.serverId ?? null;
   const isAdmin = process.env.ADMIN_TOKEN && req.get('x-admin-token') === process.env.ADMIN_TOKEN;
   if (!isAdmin) {
-    if (!serverId) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN หรือระบุ serverId');
+    if (!serverId) throw new ApiError('ADMIN_TOKEN or a serverId is required', { status: 403, code: 'FORBIDDEN' });
     await guildService.assertPermission({
       userId: req.userId, serverId, permission: 'MANAGE_MESSAGES'
     });
@@ -1863,7 +1897,7 @@ app.patch('/api/reports/:reportId', requireUser, asyncRoute(async (req, res) => 
     // A guild moderator may only close reports raised inside their own guild.
     const report = await getQuery(`SELECT server_id FROM reports WHERE id = ?`, [req.params.reportId]);
     if (!report) throw ApiError.notFound('Report');
-    if (!report.server_id) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN');
+    if (!report.server_id) throw new ApiError('ADMIN_TOKEN is required', { status: 403, code: 'FORBIDDEN' });
     await guildService.assertPermission({
       userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
     });

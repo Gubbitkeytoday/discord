@@ -1,23 +1,29 @@
 // ============================================================================
 //  /api/auth — register, login, logout, session listing.
+//
+//  Error bodies carry an English `error` for logs and a stable machine `code`
+//  (INVALID_CREDENTIALS, USERNAME_TAKEN, MFA_REQUIRED, …) that the client maps
+//  to its own translations.
 // ============================================================================
 
 import express from 'express';
 
-import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql, isUniqueViolation } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError, asyncRoute } from '../lib/httpUtils.js';
 import {
-  hashPassword, verifyPassword, createSession, revokeSession, revokeAllSessions,
-  extractToken, sessionCookie, clearedCookie, SESSION_TTL_MS
+  hashPassword, verifyPassword, createSession, revokeSession, revokeSessionById,
+  revokeAllSessions, extractToken, sessionCookie, clearedCookie, SESSION_TTL_MS
 } from '../lib/auth.js';
 import { loginRateLimit, rateLimit } from '../lib/rateLimit.js';
 import { config } from '../lib/config.js';
+import { sendMail } from '../lib/mailer.js';
 import { verifyMfaChallenge } from '../services/accountSecurity.js';
 
 const router = express.Router();
 
 const USERNAME = /^[a-zA-Z0-9_.฀-๿-]{2,32}$/;
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 const PUBLIC_USER = `
   id, username, discriminator, display_name, email, avatar_url, banner_url,
@@ -37,6 +43,8 @@ const registerRateLimit = rateLimit({
   windowMs: 60 * 60_000, byIpOnly: true
 });
 
+const usernameTaken = () => new ApiError('That username is taken', { status: 409, code: 'USERNAME_TAKEN' });
+
 /** Four random digits, avoiding a collision with the same username. */
 async function allocateDiscriminator(username) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -46,40 +54,65 @@ async function allocateDiscriminator(username) {
     );
     if (!clash) return candidate;
   }
-  throw ApiError.conflict('ชื่อผู้ใช้นี้เต็มแล้ว ลองชื่ออื่น');
+  throw usernameTaken();
 }
 
 router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => {
   const username = String(req.body?.username ?? '').trim();
   const displayName = String(req.body?.display_name ?? username).trim().slice(0, 80);
-  const email = req.body?.email ? String(req.body.email).trim().toLowerCase() : null;
+  const requestedEmail = req.body?.email ? String(req.body.email).trim().toLowerCase() : null;
   const password = req.body?.password;
 
   if (!USERNAME.test(username)) {
-    throw new ApiError('ชื่อผู้ใช้ใช้ได้เฉพาะ a-z, 0-9, _ . - และภาษาไทย ยาว 2-32 ตัว',
+    throw new ApiError('Usernames are 2-32 characters: letters, digits, Thai, _ . -',
       { code: 'INVALID_USERNAME' });
   }
-  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    throw new ApiError('อีเมลไม่ถูกต้อง', { code: 'INVALID_EMAIL' });
+  if (requestedEmail && !EMAIL.test(requestedEmail)) {
+    throw new ApiError('That e-mail address is not valid', { code: 'INVALID_EMAIL' });
   }
-  if (email) {
-    const taken = await getQuery(
-      `SELECT 1 FROM users WHERE email = ? AND deleted_at IS NULL`, [email]
-    );
-    if (taken) throw ApiError.conflict('อีเมลนี้ถูกใช้แล้ว');
+  // Usernames are public (they are shown everywhere), so saying one is taken
+  // discloses nothing. Usernames are unique: login by username is unambiguous.
+  if (await getQuery(`SELECT 1 FROM users WHERE username = ? AND deleted_at IS NULL`, [username])) {
+    throw usernameTaken();
   }
+
+  // E-mail addresses are private. A distinct answer for "already registered"
+  // would make this endpoint an oracle for who has an account — exactly what
+  // forgot-password is careful not to be. So the response is the same either
+  // way: the account is created, and when the address already belongs to
+  // someone it is simply not attached; its owner is told out of band.
+  const emailOwner = requestedEmail
+    ? await getQuery(`SELECT id, username FROM users WHERE email = ? AND deleted_at IS NULL`, [requestedEmail])
+    : null;
+  const email = emailOwner ? null : requestedEmail;
 
   const passwordHash = await hashPassword(password);
   const discriminator = await allocateDiscriminator(username);
   const id = generateId();
 
-  await transaction(async () => {
-    await runQuery(
-      `INSERT INTO users (id, username, discriminator, display_name, email, password_hash, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'online')`,
-      [id, username, discriminator, displayName || username, email, passwordHash]
-    );
-  });
+  try {
+    await transaction(async () => {
+      await runQuery(
+        `INSERT INTO users (id, username, discriminator, display_name, email, password_hash, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'online')`,
+        [id, username, discriminator, displayName || username, email, passwordHash]
+      );
+    });
+  } catch (err) {
+    // Lost a race for the same username (the unique index decides).
+    if (isUniqueViolation(err)) throw usernameTaken();
+    throw err;
+  }
+
+  if (emailOwner) {
+    sendMail({
+      to: requestedEmail,
+      subject: 'Someone tried to register with your e-mail address',
+      text: `Hello ${emailOwner.username},\n\nSomeone just tried to create a new account with this address. `
+        + 'It already belongs to your account, so it was not attached to the new one.\n\n'
+        + 'If that was you, sign in instead — or use "Forgot password" if you cannot.\n'
+    }).catch(() => {});
+  }
 
   const { token, expiresAt } = await createSession({
     userId: id, ip: req.ip, userAgent: req.get('user-agent'), deviceName: req.body?.device ?? null
@@ -87,26 +120,26 @@ router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => 
   res.setHeader('Set-Cookie', sessionCookie(token, { secure: secureCookies }));
 
   const user = await getQuery(`SELECT ${PUBLIC_USER} FROM users WHERE id = ?`, [id]);
-  res.status(201).json({ user, token, expires_at: expiresAt });
+  // Echo what was asked for, identically in both cases; whether the address is
+  // attached shows up only after it is verified (/api/auth/me, email_verified).
+  res.status(201).json({ user: { ...user, email: requestedEmail }, token, expires_at: expiresAt });
 }));
 
 router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
   const identifier = String(req.body?.username ?? req.body?.email ?? '').trim();
   const password = req.body?.password ?? '';
 
-  const user = await getQuery(
-    `SELECT * FROM users
-      WHERE deleted_at IS NULL AND (username = ? OR email = ? OR id = ?)
-      ORDER BY CASE WHEN username = ? THEN 0 ELSE 1 END
-      LIMIT 1`,
-    [identifier, identifier.toLowerCase(), identifier, identifier]
-  );
+  // Exactly one way to match: an address containing '@' is an e-mail (unique),
+  // anything else a username (unique). Never "whichever column happens to hit".
+  const user = identifier.includes('@')
+    ? await getQuery(`SELECT * FROM users WHERE deleted_at IS NULL AND email = ?`, [identifier.toLowerCase()])
+    : await getQuery(`SELECT * FROM users WHERE deleted_at IS NULL AND username = ?`, [identifier]);
 
   // Always run a verification, even for an unknown user, so a missing account
   // and a wrong password take the same time.
   const ok = await verifyPassword(password, user?.password_hash ?? 'scrypt$16384$8$1$AA$AA');
   if (!user || !ok) {
-    throw new ApiError('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง', { status: 401, code: 'INVALID_CREDENTIALS' });
+    throw new ApiError('Incorrect username or password', { status: 401, code: 'INVALID_CREDENTIALS' });
   }
 
   // Second factor. Without this, enabling 2FA protected nothing: a password
@@ -115,10 +148,10 @@ router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
   if (user.mfa_enabled) {
     const code = String(req.body?.mfa_code ?? req.body?.code ?? '').trim();
     if (!code) {
-      throw new ApiError('ต้องใส่รหัสยืนยันตัวตนสองชั้น', { status: 401, code: 'MFA_REQUIRED' });
+      throw new ApiError('A two-factor authentication code is required', { status: 401, code: 'MFA_REQUIRED' });
     }
     if (!(await verifyMfaChallenge({ userId: user.id, code }))) {
-      throw new ApiError('รหัสยืนยันตัวตนสองชั้นไม่ถูกต้อง', { status: 401, code: 'INVALID_MFA_CODE' });
+      throw new ApiError('That two-factor code is not valid', { status: 401, code: 'INVALID_MFA_CODE' });
     }
   }
 
@@ -132,6 +165,7 @@ router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
 }));
 
 router.post('/auth/logout', asyncRoute(async (req, res) => {
+  // Also disconnects any socket that signed in with this session.
   await revokeSession(extractToken(req));
   res.setHeader('Set-Cookie', clearedCookie());
   res.json({ success: true });
@@ -158,7 +192,6 @@ router.get('/auth/me', asyncRoute(async (req, res) => {
  * which lib/config.js refuses to allow in production.
  */
 router.get('/auth/dev-accounts', asyncRoute(async (_req, res) => {
-  const { config } = await import('../lib/config.js');
   if (!config.allowDevIdentity) { res.json([]); return; }
   const { SEED_PASSWORD } = await import('../db/seed.js').catch(() => ({ SEED_PASSWORD: null }));
   if (!SEED_PASSWORD) { res.json([]); return; }
@@ -184,11 +217,8 @@ router.get('/auth/sessions', asyncRoute(async (req, res) => {
 
 router.delete('/auth/sessions/:sessionId', asyncRoute(async (req, res) => {
   if (!req.userId) throw ApiError.unauthorized();
-  await runQuery(
-    `UPDATE sessions SET revoked_at = ${sql.now}
-      WHERE id = ? AND user_id = ?`,
-    [req.params.sessionId, req.userId]
-  );
+  // Revoking a device also drops its live socket connections.
+  await revokeSessionById(req.userId, req.params.sessionId);
   res.json({ success: true });
 }));
 
@@ -199,12 +229,12 @@ router.post('/auth/change-password', asyncRoute(async (req, res) => {
   // A user created before auth existed has no password yet; allow setting one.
   if (user?.password_hash) {
     const ok = await verifyPassword(req.body?.current_password ?? '', user.password_hash);
-    if (!ok) throw new ApiError('รหัสผ่านเดิมไม่ถูกต้อง', { status: 401, code: 'INVALID_CREDENTIALS' });
+    if (!ok) throw new ApiError('Your current password is incorrect', { status: 401, code: 'INVALID_CREDENTIALS' });
   }
 
   const hashed = await hashPassword(req.body?.new_password);
   await runQuery(`UPDATE users SET password_hash = ? WHERE id = ?`, [hashed, req.userId]);
-  // Changing a password must invalidate other devices.
+  // Changing a password must invalidate other devices (and their sockets).
   await revokeAllSessions(req.userId, { exceptToken: extractToken(req) });
   res.json({ success: true });
 }));

@@ -9,6 +9,8 @@
 import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { toBigInt, ALL_PERMISSIONS } from '../lib/permissions.js';
 import { addReference, releaseReference, findFileByPublicUrl } from '../storageService.js';
 import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAuditLog } from './guilds.js';
@@ -50,6 +52,10 @@ export async function updateGuild({ serverId, actorId, patch }) {
 
   if (patch.vanity_url !== undefined) {
     patch = { ...patch, vanity_url: await validateVanity(patch.vanity_url, serverId) };
+  }
+  // Remote guild images are stored as same-origin proxy URLs.
+  for (const field of ['icon_url', 'banner_url', 'splash_url']) {
+    if (typeof patch[field] === 'string') patch = { ...patch, [field]: proxiedImageUrl(patch[field]) };
   }
   if (patch.verification_level !== undefined) {
     const level = Number(patch.verification_level);
@@ -214,7 +220,9 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     if (role.is_everyone && field !== 'permissions') continue;
     const value = ['hoist', 'mentionable'].includes(field)
       ? (patch[field] ? 1 : 0)
-      : field === 'permissions' ? String(patch[field]) : patch[field];
+      : field === 'permissions' ? String(patch[field])
+      : field === 'color' || field === 'color_secondary' ? normaliseColor(patch[field], field)
+      : patch[field];
     sets.push(`${field} = ?`);
     params.push(value);
     changes.push({ key: field, old: role[field], new: value });
@@ -526,17 +534,17 @@ export async function listEmojis(serverId) {
 export async function createEmoji({ serverId, actorId, name, fileId, url, animated = false }) {
   await assertPermission({ userId: actorId, serverId, permission: 'MANAGE_EMOJIS' });
   if (!EMOJI_NAME.test(name ?? '')) {
-    throw new ApiError('ชื่ออีโมจิใช้ได้เฉพาะ a-z, 0-9 และ _ ยาว 2-32 ตัว', { code: 'INVALID_NAME' });
+    throw new ApiError('Emoji names are 2-32 characters: a-z, 0-9 and _', { code: 'INVALID_NAME' });
   }
   const clash = await getQuery(
     `SELECT 1 FROM emojis WHERE server_id = ? AND name = ?`, [serverId, name]
   );
-  if (clash) throw ApiError.conflict('มีอีโมจิชื่อนี้อยู่แล้ว');
+  if (clash) throw new ApiError('An emoji with that name already exists', { status: 409, code: 'EMOJI_NAME_TAKEN' });
 
   const resolvedFile = fileId
     ? await getQuery(`SELECT * FROM files WHERE id = ?`, [fileId])
     : await findFileByPublicUrl(url);
-  if (!resolvedFile && !url) throw new ApiError('ต้องมีรูปภาพ', { code: 'MISSING_IMAGE' });
+  if (!resolvedFile && !url) throw new ApiError('An image is required', { code: 'MISSING_IMAGE' });
 
   const id = generateId();
   await transaction(async () => {

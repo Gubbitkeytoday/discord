@@ -36,14 +36,14 @@ export async function setOverwrite({
   channelId, actorId, targetType, targetId, allow = '0', deny = '0'
 }) {
   if (!['role', 'member'].includes(targetType)) {
-    throw new ApiError("target_type ต้องเป็น 'role' หรือ 'member'", { code: 'INVALID_TARGET' });
+    throw new ApiError("target_type must be 'role' or 'member'", { code: 'INVALID_TARGET' });
   }
 
   const channel = await getQuery(
     `SELECT id, server_id FROM channels WHERE id = ? AND deleted_at IS NULL`, [channelId]
   );
   if (!channel) throw ApiError.notFound('Channel');
-  if (!channel.server_id) throw ApiError.conflict('ตั้งค่าสิทธิ์ได้เฉพาะห้องในเซิร์ฟเวอร์');
+  if (!channel.server_id) throw new ApiError('Permission overwrites exist only on server channels', { status: 409, code: 'NOT_A_GUILD_CHANNEL' });
 
   const actor = await assertPermission({
     userId: actorId, serverId: channel.server_id, permission: 'MANAGE_ROLES'
@@ -52,7 +52,7 @@ export async function setOverwrite({
   if (!actor.isOwner) {
     const granting = (toBigInt(allow) | toBigInt(deny)) & ~toBigInt(actor.permissions);
     if (granting !== 0n) {
-      throw ApiError.forbidden('คุณไม่สามารถกำหนดสิทธิ์ที่ตัวเองไม่มี');
+      throw new ApiError('You cannot grant permissions you do not have', { status: 403, code: 'MISSING_PERMISSIONS' });
     }
   }
 
@@ -124,16 +124,16 @@ export async function createSticker({
 
   const trimmed = String(name ?? '').trim();
   if (trimmed.length < 2 || trimmed.length > 30) {
-    throw new ApiError('ชื่อสติกเกอร์ต้องยาว 2-30 ตัวอักษร', { code: 'INVALID_NAME' });
+    throw new ApiError('Sticker names are 2-30 characters', { code: 'INVALID_NAME' });
   }
   if (!STICKER_FORMATS.includes(format)) {
-    throw new ApiError(`format ต้องเป็นหนึ่งใน ${STICKER_FORMATS.join(', ')}`, { code: 'INVALID_FORMAT' });
+    throw new ApiError(`format must be one of ${STICKER_FORMATS.join(', ')}`, { code: 'INVALID_FORMAT' });
   }
 
   const file = fileId
     ? await getQuery(`SELECT * FROM files WHERE id = ?`, [fileId])
     : await findFileByPublicUrl(url);
-  if (!file && !url) throw new ApiError('ต้องมีรูปภาพ', { code: 'MISSING_IMAGE' });
+  if (!file && !url) throw new ApiError('An image is required', { code: 'MISSING_IMAGE' });
 
   const id = generateId();
   await transaction(async () => {
@@ -188,15 +188,15 @@ export async function createSound({
 
   const trimmed = String(name ?? '').trim();
   if (trimmed.length < 2 || trimmed.length > 32) {
-    throw new ApiError('ชื่อเสียงต้องยาว 2-32 ตัวอักษร', { code: 'INVALID_NAME' });
+    throw new ApiError('Sound names are 2-32 characters', { code: 'INVALID_NAME' });
   }
 
   const file = fileId
     ? await getQuery(`SELECT * FROM files WHERE id = ?`, [fileId])
     : await findFileByPublicUrl(url);
-  if (!file && !url) throw new ApiError('ต้องมีไฟล์เสียง', { code: 'MISSING_AUDIO' });
+  if (!file && !url) throw new ApiError('An audio file is required', { code: 'MISSING_AUDIO' });
   if (file && !file.mime_type.startsWith('audio/')) {
-    throw new ApiError('ไฟล์ต้องเป็นเสียง', { code: 'NOT_AUDIO' });
+    throw new ApiError('The file must be audio', { code: 'NOT_AUDIO' });
   }
 
   const id = generateId();

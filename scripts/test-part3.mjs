@@ -131,7 +131,7 @@ describe('MFA enrolment', () => {
 
   test('a recovery code works once and only once', async () => {
     const code = recoveryCodes[0];
-    const first = await asSession(token, 'POST', '/api/auth/mfa/disable', { code });
+    const first = await asSession(token, 'POST', '/api/auth/mfa/disable', { code, password: 'antigravity123' });
     assert.equal(first.status, 200);
     assert.equal(first.body.enabled, false);
 
@@ -140,12 +140,12 @@ describe('MFA enrolment', () => {
     await asSession(token, 'POST', '/api/auth/mfa/confirm', {
       code: generateCode(begun.body.secret)
     });
-    const reused = await asSession(token, 'POST', '/api/auth/mfa/disable', { code });
+    const reused = await asSession(token, 'POST', '/api/auth/mfa/disable', { code, password: 'antigravity123' });
     assert.equal(reused.status, 401, 'a used recovery code was accepted again');
 
     // Clean up so later tests see a normal account.
     await asSession(token, 'POST', '/api/auth/mfa/disable', {
-      code: generateCode(begun.body.secret)
+      code: generateCode(begun.body.secret), password: 'antigravity123'
     });
   });
 
@@ -155,11 +155,11 @@ describe('MFA enrolment', () => {
       code: generateCode(begun.body.secret)
     });
 
-    const noCode = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: '111111' });
+    const noCode = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: '111111', password: 'antigravity123' });
     assert.equal(noCode.status, 401, 'MFA was removed without proof');
 
     await asSession(token, 'POST', '/api/auth/mfa/disable', {
-      code: generateCode(begun.body.secret)
+      code: generateCode(begun.body.secret), password: 'antigravity123'
     });
   });
 });
@@ -2341,7 +2341,7 @@ describe('data export and account deletion', () => {
   });
 
   test('deleting an account that owns a server is refused, with the servers named', async () => {
-    const { status, body } = await api('DELETE', '/api/users/@me', undefined);
+    const { status, body } = await api('DELETE', '/api/users/@me', { password: 'antigravity123' });
     assert.equal(status, 409);
     assert.equal(body.code, 'OWNS_SERVERS');
     assert.ok(body.details.servers.length > 0);
@@ -2358,7 +2358,14 @@ describe('data export and account deletion', () => {
       channel_id: 'chan-102', content: 'still here after I go'
     }, { 'x-user-id': id });
 
-    const gone = await api('DELETE', '/api/users/@me', undefined, { 'x-user-id': id });
+    // Irreversible, so it needs the password again, not just a session.
+    const unconfirmed = await api('DELETE', '/api/users/@me', undefined, { 'x-user-id': id });
+    assert.equal(unconfirmed.status, 401);
+    assert.equal(unconfirmed.body.code, 'PASSWORD_REQUIRED');
+    const wrong = await api('DELETE', '/api/users/@me', { password: 'not the password' }, { 'x-user-id': id });
+    assert.equal(wrong.status, 401);
+
+    const gone = await api('DELETE', '/api/users/@me', { password: 'correct horse battery staple' }, { 'x-user-id': id });
     assert.equal(gone.status, 200);
 
     const history = await get('/api/messages/chan-102?limit=100');

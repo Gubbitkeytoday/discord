@@ -19,6 +19,7 @@ import { resolveBotToken } from './services/applications.js';
 import { checkSocketLimit } from './lib/rateLimit.js';
 import { resolvePermissions } from './services/guilds.js';
 import { ApiError, publicError } from './lib/httpUtils.js';
+import { sessionEvents } from './lib/sessionEvents.js';
 
 /** What a socket client may see of an error: never raw database text. */
 const clientError = (err) => publicError(err).body;
@@ -70,7 +71,11 @@ async function authenticateSocket(socket, { userId, token, botToken }) {
   const candidate = token || cookieToken(socket);
   if (candidate) {
     const session = await resolveSession(candidate);
-    if (session) return session.userId;
+    if (session) {
+      // Remembered so ending the session (logout, revoke) can drop this socket.
+      socket.data.sessionId = session.sessionId;
+      return session.userId;
+    }
   }
   if (config.allowDevIdentity && userId) return userId;
   return null;
@@ -82,6 +87,12 @@ async function authenticateSocket(socket, { userId, token, botToken }) {
 const MESH_LIMIT = Number(process.env.VOICE_MESH_LIMIT) || 8;
 
 export function registerRealtime(io) {
+  // Sessions ended elsewhere (logout, revoke, password change) take their
+  // sockets with them.
+  sessionEvents.on('revoked', (payload) => {
+    disconnectSessions(io, payload).catch((err) => console.error('session disconnect failed:', err.message));
+  });
+
   io.on('connection', (socket) => {
     // --- identity ------------------------------------------------------------
     // The client announces who it is; replace with session-token validation
@@ -166,7 +177,7 @@ export function registerRealtime(io) {
         if (!budget.allowed) {
           ack?.({
             ok: false, code: 'RATE_LIMITED',
-            error: `ส่งเร็วเกินไป ลองใหม่ในอีก ${Math.ceil(budget.retryAfterMs / 1000)} วินาที`
+            error: `Sending too fast — try again in ${Math.ceil(budget.retryAfterMs / 1000)} s`
           });
           return;
         }
@@ -320,11 +331,11 @@ export function registerRealtime(io) {
       );
       const limit = Number(channel?.user_limit) || MESH_LIMIT;
       if (occupants.length + 1 > Math.min(limit, MESH_LIMIT)) {
-        ack?.({ ok: false, error: `ห้องเสียงนี้เต็ม (สูงสุด ${Math.min(limit, MESH_LIMIT)} คน)`, code: 'VOICE_FULL' });
+        ack?.({ ok: false, error: `This voice channel is full (${Math.min(limit, MESH_LIMIT)} max)`, code: 'VOICE_FULL' });
         socket.emit('voice_error', {
           channelId,
           code: 'VOICE_FULL',
-          error: `ห้องเสียงนี้รับได้สูงสุด ${Math.min(limit, MESH_LIMIT)} คน`
+          error: `This voice channel holds at most ${Math.min(limit, MESH_LIMIT)} people`
         });
         return;
       }
@@ -615,7 +626,18 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
         if (!member) sock.leave(room);
         continue;
       }
-      if (room.startsWith('voice-')) continue;
+      if (room.startsWith('voice-')) {
+        // Voice is an access decision too: someone kicked, banned or stripped
+        // of CONNECT must drop out of the call, not keep relaying media until
+        // they hang up themselves.
+        const voiceChannel = room.slice('voice-'.length);
+        if (channelIds && !channelIds.includes(voiceChannel)) continue;
+        if (serverChannels && !channelIds && !serverChannels.has(voiceChannel)) continue;
+        const mayStay = await check(userId, room, () =>
+          canInChannel({ channelId: voiceChannel, userId, permission: 'CONNECT' }));
+        if (!mayStay) await evictFromVoice(io, sock, voiceChannel);
+        continue;
+      }
       if (channelIds && !channelIds.includes(room)) continue;
       if (serverChannels && !channelIds && !serverChannels.has(room)) continue;
       const allowed = await check(userId, room, () =>
@@ -623,6 +645,58 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
       if (!allowed) sock.leave(room);
     }
   }
+
+  // A voice_states row can outlive its socket's room (a reconnect in flight,
+  // another process's socket). For explicitly named users who are no longer
+  // members of the guild, clear their voice presence there regardless.
+  if (serverId && userIds?.length) {
+    for (const uid of userIds) {
+      const stillMember = await check(uid, serverId, async () =>
+        (await resolvePermissions({ userId: uid, serverId })).isMember);
+      if (stillMember) continue;
+      const row = await getQuery(
+        `SELECT channel_id FROM voice_states WHERE user_id = ? AND server_id = ?`, [uid, serverId]
+      );
+      if (!row) continue;
+      await runQuery(`DELETE FROM voice_states WHERE user_id = ? AND server_id = ?`, [uid, serverId]);
+      await broadcastVoice(io, row.channel_id);
+    }
+  }
+}
+
+/** Remove one socket from a voice room: state row, room, peers told. */
+async function evictFromVoice(io, sock, channelId) {
+  sock.leave(`voice-${channelId}`);
+  if (sock.data.voiceChannelId === channelId) sock.data.voiceChannelId = null;
+  await runQuery(
+    `DELETE FROM voice_states WHERE user_id = ? AND channel_id = ?`, [sock.data.userId, channelId]
+  );
+  // The client tears down its peer connections on this; the others see the
+  // roster change through broadcastVoice.
+  sock.emit('voice_disconnected', { channelId, reason: 'removed' });
+  await broadcastVoice(io, channelId);
+}
+
+/**
+ * Sessions end (logout, revoke from another device, password change, account
+ * deletion): sockets that authenticated with them must not keep receiving
+ * events. Called through lib/sessionEvents.js so auth code needs no io handle.
+ */
+export async function disconnectSessions(io, { sessionIds = null, userId = null, exceptSessionId = null } = {}) {
+  if (!io) return 0;
+  const targets = userId
+    ? await io.in(`user-${userId}`).fetchSockets()
+    : await io.fetchSockets();
+  let dropped = 0;
+  for (const sock of targets) {
+    const sid = sock.data?.sessionId;
+    if (!sid || sid === exceptSessionId) continue;
+    if (sessionIds && !sessionIds.includes(sid)) continue;
+    sock.emit('session_revoked', { reason: 'session_ended' });
+    sock.disconnect(true);
+    dropped += 1;
+  }
+  return dropped;
 }
 
 /**

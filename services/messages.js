@@ -347,10 +347,10 @@ export async function createMessage({
     throw new ApiError('Create a post instead of sending a message in a forum', { code: 'FORUM_NEEDS_POST' });
   }
   if (channel.locked) {
-    throw new ApiError('ห้องนี้ถูกล็อก ส่งข้อความไม่ได้', { status: 403, code: 'CHANNEL_LOCKED' });
+    throw new ApiError('This channel is locked', { status: 403, code: 'CHANNEL_LOCKED' });
   }
   if (channel.archived) {
-    throw new ApiError('เธรดนี้ถูกเก็บถาวรแล้ว', { status: 403, code: 'THREAD_ARCHIVED' });
+    throw new ApiError('This thread is archived', { status: 403, code: 'THREAD_ARCHIVED' });
   }
 
   // Webhooks and system messages skip moderation and carry no user; every real
@@ -445,7 +445,7 @@ export async function createMessage({
         serverId: channel.server_id, userId, channelId,
         rule: verdict.rule, reason: verdict.reason, content: trimmed
       });
-      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
         status: 403, code: 'AUTOMOD_BLOCKED',
         details: { rule: verdict.rule?.name, reason: verdict.reason }
       });
@@ -753,7 +753,7 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
         serverId: message.server_id, userId, channelId: message.channel_id,
         rule: verdict.rule, reason: verdict.reason, content: trimmed
       });
-      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
         status: 403, code: 'AUTOMOD_BLOCKED',
         details: { rule: verdict.rule?.name, reason: verdict.reason }
       });
@@ -922,7 +922,7 @@ export async function setPinned({ messageId, channelId, userId, pinned }) {
   }
   if (pinned) {
     const { n } = await getQuery(`SELECT count(*) AS n FROM pins WHERE channel_id = ?`, [channelId]);
-    if (n >= 50) throw new ApiError('ปักหมุดได้สูงสุด 50 ข้อความต่อห้อง', { code: 'MAX_PINS' });
+    if (n >= 50) throw new ApiError('A channel can have at most 50 pinned messages', { code: 'MAX_PINS' });
   }
   await transaction(async () => {
     await runQuery(`UPDATE messages SET pinned = ? WHERE id = ?`, [pinned ? 1 : 0, messageId]);

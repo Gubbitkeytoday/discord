@@ -14,6 +14,7 @@ import https from 'https';
 import net from 'net';
 
 import { runQuery, getQuery, sql } from '../db.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
@@ -24,14 +25,15 @@ const hashUrl = (url) => crypto.createHash('sha256').update(url).digest('hex').s
 
 /** Reject anything that is not a public http(s) host. */
 async function assertPublicUrl(rawUrl) {
+  const fail = (message, code) => Object.assign(new Error(message), { code });
   let url;
-  try { url = new URL(rawUrl); } catch { throw new Error('URL ไม่ถูกต้อง'); }
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('รองรับเฉพาะ http/https');
+  try { url = new URL(rawUrl); } catch { throw fail('Invalid URL', 'EINVALIDURL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw fail('Only http(s) URLs are supported', 'EINVALIDURL');
 
   // WHATWG keeps the brackets on an IPv6 literal ("[::1]").
   const host = url.hostname.replace(/^\[|\]$/g, '');
   if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host)) {
-    throw new Error('ปฏิเสธ host ภายในเครื่อง');
+    throw fail('Refusing a local host', 'EPRIVATE');
   }
 
   // Resolve and check every address — a public name can point at a private IP.
@@ -41,11 +43,11 @@ async function assertPublicUrl(rawUrl) {
       ? [{ address: host }]
       : await dns.lookup(host, { all: true });
   } catch {
-    throw new Error('resolve host ไม่ได้');
+    throw fail('Host does not resolve', 'ENOTFOUND');
   }
 
   for (const { address } of addresses) {
-    if (isPrivateAddress(address)) throw new Error('ปฏิเสธที่อยู่ภายในเครือข่าย');
+    if (isPrivateAddress(address)) throw fail('Refusing a private network address', 'EPRIVATE');
   }
   return url;
 }
@@ -95,7 +97,7 @@ function guardedLookup(hostname, options, callback) {
     const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: options?.family }];
     const bad = list.find(({ address }) => isPrivateAddress(address));
     if (bad || list.length === 0) {
-      return callback(Object.assign(new Error('ปฏิเสธที่อยู่ภายในเครือข่าย'), { code: 'EPRIVATE' }));
+      return callback(Object.assign(new Error('Refusing a private network address'), { code: 'EPRIVATE' }));
     }
     if (options?.all) return callback(null, list);
     return callback(null, list[0].address, list[0].family ?? (net.isIPv6(list[0].address) ? 6 : 4));
@@ -108,7 +110,7 @@ function guardedLookup(hostname, options, callback) {
  * `redirect: 'follow'` a public page could 302 the unfurler straight to the
  * cloud metadata service.
  */
-async function safeGet(startUrl, { signal }) {
+export async function safeGet(startUrl, { signal, accept = 'text/html,application/xhtml+xml' }) {
   let current = await assertPublicUrl(startUrl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const response = await new Promise((resolve, reject) => {
@@ -119,7 +121,7 @@ async function safeGet(startUrl, { signal }) {
         headers: {
           // Many sites only emit OpenGraph tags for a bot-looking agent.
           'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
-          Accept: 'text/html,application/xhtml+xml'
+          Accept: accept
         }
       }, resolve);
       req.on('error', reject);
@@ -203,7 +205,9 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
 
     if (contentType.startsWith('image/')) {
       response.destroy();
-      embed = { type: 'image', url: rawUrl, image: rawUrl };
+      // `url` is the link; `image` is what the browser loads — via our proxy,
+      // so viewing the preview does not reveal the viewer to the site.
+      embed = { type: 'image', url: rawUrl, image: proxiedImageUrl(rawUrl) };
     } else if (contentType.includes('html')) {
       // Read at most MAX_BYTES rather than buffering an arbitrary page.
       const chunks = [];
@@ -224,7 +228,7 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
           url: rawUrl,
           title,
           description: extract(html, META_PATTERNS.description),
-          image: image ? safeHttpUrl(image, url) : null,
+          image: image ? proxiedImageUrl(safeHttpUrl(image, url)) : null,
           site_name: extract(html, META_PATTERNS.siteName) ?? url.hostname,
           // Rendered into a style; only a plain colour is accepted.
           color: /^#[0-9a-f]{3,8}$/i.test(extract(html, META_PATTERNS.themeColor) ?? '')

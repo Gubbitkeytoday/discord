@@ -108,10 +108,10 @@ export async function executeWebhook({ webhookId, token, content, username = nul
   const ok = webhook
     && provided.length === expected.length
     && crypto.timingSafeEqual(provided, expected);
-  if (!ok) throw new ApiError('Webhook token ไม่ถูกต้อง', { status: 401, code: 'INVALID_TOKEN' });
+  if (!ok) throw new ApiError('Invalid webhook token', { status: 401, code: 'INVALID_TOKEN' });
 
   const body = String(content ?? '').trim();
-  if (!body) throw new ApiError('content ว่างเปล่า', { code: 'EMPTY_MESSAGE' });
+  if (!body) throw new ApiError('content is empty', { code: 'EMPTY_MESSAGE' });
 
   // Webhooks post as the webhook's creator so foreign keys and the UI have a
   // real author, with the webhook recorded on the row.

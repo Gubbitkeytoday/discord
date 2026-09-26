@@ -35,7 +35,7 @@ export async function createThread({
     `SELECT * FROM channels WHERE id = ? AND deleted_at IS NULL`, [parentChannelId]
   );
   if (!parent) throw ApiError.notFound('Channel');
-  if (parent.type === 'thread') throw ApiError.conflict('ไม่สามารถสร้างเธรดในเธรดได้');
+  if (parent.type === 'thread') throw new ApiError('Threads cannot contain threads', { status: 409, code: 'NESTED_THREAD' });
 
   if (parent.server_id) {
     await assertPermission({
@@ -45,7 +45,7 @@ export async function createThread({
   }
 
   const trimmed = String(name ?? '').trim().slice(0, 100);
-  if (!trimmed) throw new ApiError('ต้องตั้งชื่อเธรด', { code: 'INVALID_NAME' });
+  if (!trimmed) throw new ApiError('A thread needs a name', { code: 'INVALID_NAME' });
 
   const threadId = generateId();
 
@@ -122,7 +122,7 @@ export async function joinThread({ threadId, userId }) {
   // row here without checking the target is a thread — and one this user can
   // already see — would hand out access to any conversation by id.
   const thread = await assertIsVisibleThread(threadId, userId);
-  if (thread.archived) throw ApiError.conflict('เธรดนี้ถูกเก็บถาวรแล้ว');
+  if (thread.archived) throw new ApiError('This thread is archived', { status: 409, code: 'THREAD_ARCHIVED' });
   await runQuery(
     `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
     [threadId, userId]

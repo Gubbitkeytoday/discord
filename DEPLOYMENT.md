@@ -232,6 +232,18 @@ It **warns** but starts on these — check them yourself:
 - `SECURE_COOKIES=0` → session cookies sent over plain HTTP
 - `PUBLIC_URL` not `https://`
 - `ADMIN_TOKEN` unset → maintenance and report-triage endpoints stay disabled
+- `METRICS_TOKEN` unset → `/metrics` is not served at all in production
+- `MAIL_TRANSPORT` is `console`/unset → password reset and e-mail verification
+  are disabled (503 `MAIL_NOT_CONFIGURED`); configure SMTP to enable them.
+  Reset/verification tokens are never returned in API responses in production.
+
+Also enforced in code, no configuration needed: remote images are served
+through the same-origin proxy `/api/media/proxy?url=…` and the CSP allows
+images only from `'self'` (plus `STORAGE_PUBLIC_BASE`'s origin and any
+`CSP_IMG_SOURCES`); sessions end after `SESSION_TTL_DAYS` (30) or
+`SESSION_IDLE_DAYS` (14) idle; logging out or revoking a device disconnects its
+live sockets; deleting an account and turning off 2FA require the password
+again (and a 2FA code where enabled); a TOTP code is accepted once.
 
 Verify the whole build before shipping:
 
@@ -259,8 +271,9 @@ Use `/api/live` for liveness and `/api/ready` for readiness — never the revers
 A database blip should pull an instance out of rotation, not have the
 orchestrator kill an otherwise healthy container.
 
-Never expose `/metrics` publicly. Either scrape it over a private network or set
-`METRICS_TOKEN` and send `Authorization: Bearer <token>`.
+In production `/metrics` exists only when `METRICS_TOKEN` is set, and every
+scrape must send `Authorization: Bearer <token>` (compared in constant time).
+Still scrape it over a private network where you can.
 
 Exported metrics include request counts by method and status, p50/p95/p99
 latency, 5xx count, live WebSocket connections, messages sent, uploads and

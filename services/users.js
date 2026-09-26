@@ -5,6 +5,8 @@
 import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import {
   addReference, releaseReference, getStorageUsage, findFileByPublicUrl
 } from '../storageService.js';
@@ -16,9 +18,33 @@ const PUBLIC_COLUMNS = `
   profile_visibility
 `;
 
-export function listUsers() {
+/**
+ * The people `viewerId` can legitimately know about: themselves, anyone who
+ * shares a server with them, anyone in a DM or group DM with them, and anyone
+ * in a friend relationship (including pending requests) with them. Never the
+ * whole instance — that would let any single account scrape every member and
+ * track everyone's presence.
+ */
+export function listUsers(viewerId) {
+  if (!viewerId) return Promise.resolve([]);
   return allQuery(
-    `SELECT ${PUBLIC_COLUMNS} FROM users WHERE deleted_at IS NULL ORDER BY display_name`
+    `SELECT ${PUBLIC_COLUMNS} FROM users u
+      WHERE u.deleted_at IS NULL
+        AND (
+          u.id = ?
+          OR u.id IN (
+            SELECT them.user_id FROM server_members them
+              JOIN server_members me ON me.server_id = them.server_id
+             WHERE me.user_id = ? AND me.left_at IS NULL AND them.left_at IS NULL)
+          OR u.id IN (
+            SELECT them.user_id FROM channel_recipients them
+              JOIN channel_recipients me ON me.channel_id = them.channel_id
+             WHERE me.user_id = ?)
+          OR u.id IN (SELECT friend_id FROM friends WHERE user_id = ?)
+          OR u.id IN (SELECT user_id FROM friends WHERE friend_id = ?)
+        )
+      ORDER BY u.display_name`,
+    [viewerId, viewerId, viewerId, viewerId, viewerId]
   );
 }
 
@@ -165,6 +191,12 @@ export async function updateProfile({ userId, patch }) {
   }
 
   const resolved = { ...patch };
+  if (patch.accent_color !== undefined) resolved.accent_color = normaliseColor(patch.accent_color, 'accent_color');
+  // A remote avatar/banner is stored as its same-origin proxy URL, so viewers'
+  // browsers never contact the third-party host (see services/mediaProxy.js).
+  for (const field of ['avatar_url', 'banner_url']) {
+    if (typeof resolved[field] === 'string') resolved[field] = proxiedImageUrl(resolved[field]);
+  }
   for (const [urlField, idField] of [['avatar_url', 'avatar_file_id'], ['banner_url', 'banner_file_id']]) {
     if (resolved[urlField] === undefined || resolved[idField] !== undefined) continue;
     const file = await findFileByPublicUrl(resolved[urlField]);

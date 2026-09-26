@@ -13,12 +13,12 @@ const STATUSES = ['open', 'reviewing', 'resolved', 'dismissed'];
 export async function createReport({ reporterId, targetType, targetId, reason, details = null }) {
   if (!reporterId) throw ApiError.unauthorized();
   if (!TARGETS.includes(targetType)) {
-    throw new ApiError(`target_type ต้องเป็นหนึ่งใน ${TARGETS.join(', ')}`, { code: 'INVALID_TARGET' });
+    throw new ApiError(`target_type must be one of ${TARGETS.join(', ')}`, { code: 'INVALID_TARGET' });
   }
   if (!REASONS.includes(reason)) {
-    throw new ApiError(`reason ต้องเป็นหนึ่งใน ${REASONS.join(', ')}`, { code: 'INVALID_REASON' });
+    throw new ApiError(`reason must be one of ${REASONS.join(', ')}`, { code: 'INVALID_REASON' });
   }
-  if (!targetId) throw new ApiError('ต้องระบุ target_id', { code: 'MISSING_TARGET' });
+  if (!targetId) throw new ApiError('target_id is required', { code: 'MISSING_TARGET' });
 
   // One open report per reporter per target: repeat submissions are noise, not
   // extra signal.
@@ -28,7 +28,7 @@ export async function createReport({ reporterId, targetType, targetId, reason, d
     [reporterId, targetType, targetId]
   );
   if (existing) {
-    throw ApiError.conflict('คุณรายงานสิ่งนี้ไว้แล้ว และกำลังรอการตรวจสอบ');
+    throw new ApiError('You already reported this; it is awaiting review', { status: 409, code: 'ALREADY_REPORTED' });
   }
 
   // Resolve the guild so the server's own moderators can triage it, rather
@@ -60,7 +60,7 @@ export async function createReport({ reporterId, targetType, targetId, reason, d
  */
 export async function listReports({ status = 'open', limit = 50, serverId = null } = {}) {
   if (status !== 'all' && !STATUSES.includes(status)) {
-    throw new ApiError(`status ต้องเป็นหนึ่งใน ${STATUSES.join(', ')} หรือ all`, { code: 'INVALID_STATUS' });
+    throw new ApiError(`status must be one of ${STATUSES.join(', ')} or all`, { code: 'INVALID_STATUS' });
   }
 
   const where = [];
@@ -122,7 +122,7 @@ async function describeTarget(type, id) {
 
 export async function resolveReport({ reportId, resolverId, status, action = null }) {
   if (!['resolved', 'dismissed', 'reviewing'].includes(status)) {
-    throw new ApiError('status ต้องเป็น reviewing, resolved หรือ dismissed', { code: 'INVALID_STATUS' });
+    throw new ApiError('status must be reviewing, resolved or dismissed', { code: 'INVALID_STATUS' });
   }
   const report = await getQuery(`SELECT * FROM reports WHERE id = ?`, [reportId]);
   if (!report) throw ApiError.notFound('Report');
