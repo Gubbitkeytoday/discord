@@ -1,4 +1,5 @@
 import React from 'react';
+import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Pin, X } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
@@ -8,6 +9,7 @@ const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
 /** Discord's pinned-messages popover, anchored under the pin icon. */
 export default function PinnedMessagesPopover({ messages = [], canUnpin = true, onClose, onJump, onUnpin }) {
+  useEscapeLayer(onClose);
   return (
     <>
       {/* Click-away layer, so the popover closes like Discord's does. */}

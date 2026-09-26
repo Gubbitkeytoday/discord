@@ -11,10 +11,12 @@ import React, { useEffect, useState } from 'react';
 import { X, History, Loader2 } from 'lucide-react';
 import { get } from '../api';
 import { t } from '../i18n/index.jsx';
+import { useDialog } from './settings/primitives';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 
 export default function EditHistoryModal({ message, onClose }) {
   const [state, setState] = useState({ loading: true, revisions: [], error: null });
+  const dialogRef = useDialog(onClose);
 
   useEffect(() => {
     let cancelled = false;
@@ -27,6 +29,7 @@ export default function EditHistoryModal({ message, onClose }) {
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[80] bg-black/60 overlay-center p-4"
       role="dialog"
       aria-modal="true"

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { t } from '../i18n/index.jsx';
 import { getPreferences } from '../hooks/useUserSettings';
 import {
@@ -16,18 +17,7 @@ export default function ServerDropdown({
 }) {
   const ref = useRef(null);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    // Deferred so the click that opened the menu does not immediately close it.
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const can = (name) => permissions?.includes(name) || permissions?.includes('ADMINISTRATOR') || isOwner;
 
