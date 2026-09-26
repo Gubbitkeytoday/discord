@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Pin, X } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
@@ -11,18 +11,31 @@ const FALLBACK_AVATAR = DEFAULT_AVATAR;
 /** Discord's pinned-messages popover, anchored under the pin icon. */
 export default function PinnedMessagesPopover({ messages = [], canUnpin = true, onClose, onJump, onUnpin }) {
   useEscapeLayer(onClose);
+  const ref = useRef(null);
+  // Focus moves into the popover when it opens and back when it closes.
+  useEffect(() => {
+    const returnTo = document.activeElement;
+    ref.current?.focus();
+    return () => { if (returnTo?.isConnected) returnTo.focus?.({ preventScroll: true }); };
+  }, []);
   return (
     <>
       {/* Click-away layer, so the popover closes like Discord's does. */}
       <div className="fixed inset-0 z-30" onClick={onClose} />
 
-      <div className="absolute right-4 top-12 w-96 max-h-[70vh] bg-d-surface border border-d-edge rounded-lg shadow-2xl z-40 flex flex-col overflow-hidden">
-        <div className="px-4 py-3 border-b border-d-edge flex items-center justify-between shrink-0">
-          <span className="text-sm font-bold text-d-strong flex items-center gap-2">
-            <Pin className="w-4 h-4" /> {t('chat.pinnedMessages')}
-          </span>
-          <button type="button" onClick={onClose} aria-label={t('common.close')} className="text-d-text3 hover:text-d-strong transition-colors">
-            <X className="w-4 h-4" />
+      <div
+        ref={ref}
+        role="dialog"
+        aria-labelledby="pins-title"
+        tabIndex={-1}
+        className="absolute right-4 max-sm:right-2 top-12 w-96 max-w-[calc(100vw-1rem)] max-h-[70vh] bg-d-surface border border-d-edge rounded-lg shadow-2xl z-40 flex flex-col overflow-hidden outline-none"
+      >
+        <div className="px-4 py-2 border-b border-d-edge flex items-center justify-between shrink-0">
+          <h2 id="pins-title" className="text-sm font-bold text-d-strong flex items-center gap-2">
+            <Pin className="w-4 h-4" aria-hidden="true" /> {t('chat.pinnedMessages')}
+          </h2>
+          <button type="button" onClick={onClose} aria-label={t('common.close')} className="text-d-text3 hover:text-d-strong transition-colors w-8 h-8 pointer-coarse:w-11 pointer-coarse:h-11 inline-flex items-center justify-center rounded">
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 
@@ -56,7 +69,7 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
                     >
                       {msg.display_name || msg.username}
                     </span>
-                    <span className="text-[10px] text-d-text3 shrink-0">
+                    <span className="text-[11px] text-d-text3 shrink-0">
                       {formatFullTimestamp(msg.created_at)}
                     </span>
                   </div>
@@ -64,24 +77,27 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
                     {msg.content}
                   </p>
                   {msg.attachments?.length > 0 && (
-                    <span className="text-[10px] text-d-text3 mt-1 inline-block">
+                    <span className="text-[11px] text-d-text3 mt-1 inline-block">
                       📎 {t('chat.attachmentCount', { count: msg.attachments.length })}
                     </span>
                   )}
                 </div>
               </div>
 
-              <div className="absolute right-2 top-2 hidden group-hover:flex gap-1">
+              {/* Visible on hover, on keyboard focus and always on touch. */}
+              <div className="absolute right-2 top-2 flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 pointer-coarse:static pointer-coarse:mt-2 pointer-coarse:justify-end">
                 <button
+                  type="button"
                   onClick={() => onJump?.(msg)}
-                  className="text-[10px] bg-d-brand hover:bg-d-brandhover text-white px-2 py-0.5 rounded transition-colors"
+                  className="text-xs bg-d-brand hover:bg-d-brandhover text-white px-2 min-h-7 pointer-coarse:min-h-11 rounded transition-colors"
                 >
                   {t('chat.jumpToMessage')}
                 </button>
                 {canUnpin && (
                   <button
+                    type="button"
                     onClick={() => onUnpin?.(msg)}
-                    className="text-[10px] bg-d-control hover:bg-d-danger text-white px-2 py-0.5 rounded transition-colors"
+                    className="text-xs bg-d-control hover:bg-d-danger text-white px-2 min-h-7 pointer-coarse:min-h-11 rounded transition-colors"
                   >
                     {t('chat.unpin')}
                   </button>

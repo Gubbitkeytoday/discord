@@ -34,18 +34,21 @@ async function assertRecentAuth(req) {
     const created = session?.created_at ? new Date(session.created_at).getTime() : NaN;
     if (Number.isFinite(created) && Date.now() - created < FRESH_SESSION_MS) return;
   }
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (password.length > 0) {
-    await security.assertReauthenticated({ userId: req.userId, password, code: req.body?.code ?? null })
-      .catch((err) => {
-        // Enabling 2FA on an account that already has it is refused later;
-        // here only the password matters.
-        if (err?.code === 'MFA_REQUIRED' || err?.code === 'INVALID_MFA_CODE') return;
-        throw err;
-      });
-    return;
-  }
-  throw new ApiError('Confirm with your password to continue', { status: 401, code: 'PASSWORD_REQUIRED' });
+  // Not fresh: the password must be verified. No branch depends on what the
+  // client sent — a missing or wrong password is rejected by the verifier.
+  await security.assertReauthenticated({
+    userId: req.userId,
+    password: typeof req.body?.password === 'string' ? req.body.password : '',
+    code: req.body?.code ?? null
+  }).catch((err) => {
+    // Enabling 2FA on an account that already has it is refused later; here
+    // only the password matters, so a missing second factor is not an error.
+    if (err?.code === 'MFA_REQUIRED' || err?.code === 'INVALID_MFA_CODE') return;
+    if (err?.code === 'PASSWORD_REQUIRED' || err?.status === 401) {
+      throw new ApiError('Confirm with your password to continue', { status: 401, code: 'PASSWORD_REQUIRED' });
+    }
+    throw err;
+  });
 }
 
 // Both of these send email and are unauthenticated (reset) or cheap to abuse,

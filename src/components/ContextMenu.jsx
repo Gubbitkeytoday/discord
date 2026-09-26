@@ -99,7 +99,7 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
           disabled={item.disabled}
           aria-haspopup={item.submenu ? 'menu' : undefined}
           aria-expanded={item.submenu ? isOpen : undefined}
-          className={`w-[calc(100%-12px)] mx-1.5 flex items-center gap-2 px-2 py-1.5 rounded transition-colors text-left text-sm disabled:opacity-40 disabled:cursor-not-allowed ${
+          className={`w-[calc(100%-12px)] mx-1.5 flex items-center gap-2 px-2 py-1.5 min-h-8 pointer-coarse:min-h-11 rounded transition-colors text-left text-sm focus-visible:bg-d-brand focus-visible:text-white outline-none disabled:opacity-40 disabled:cursor-not-allowed ${
             item.danger
               ? 'text-d-danger hover:bg-d-danger hover:text-white'
               : item.accent

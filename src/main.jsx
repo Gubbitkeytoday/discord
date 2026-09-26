@@ -42,6 +42,11 @@ document.addEventListener('error', (event) => {
   img.src = DEFAULT_AVATAR;
 }, true);
 
+// A horizontal swipe on a phone is the app's (channel drawer), not the
+// browser's back gesture — which used to leave the app for about:blank.
+document.documentElement.style.overscrollBehaviorX = 'none';
+document.body.style.overscrollBehaviorX = 'none';
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <I18nProvider>

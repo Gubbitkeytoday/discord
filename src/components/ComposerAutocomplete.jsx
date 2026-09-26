@@ -4,6 +4,7 @@ import { t, useLocaleCode } from '../i18n/index.jsx';
 import { matchCommands } from '../utils/slashCommands';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
+import { searchShortcodes } from '../chat/emojiShortcodes.js';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -121,8 +122,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         image: e.url,
         insert: `:${e.name}: `
       }));
-    const unicode = EMOJI_TABLE
-      .filter((e) => e.name.includes(q))
+    const unicode = searchShortcodes(q, 10)
       .map((e) => ({
         id: e.name,
         primary: `:${e.name}:`,
@@ -165,7 +165,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
  * The popup itself. Purely presentational — selection state and keyboard
  * handling live in the composer so Enter/Tab/arrows compose with sending.
  */
-export default function ComposerAutocomplete({ trigger, options, activeIndex, onPick }) {
+export default function ComposerAutocomplete({ trigger, options, activeIndex, onPick, onHover }) {
   const listRef = useRef(null);
 
   // Keep the highlighted row in view when arrowing past the visible window.
@@ -183,21 +183,28 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
 
   return (
     <div className="absolute bottom-full left-0 right-0 mb-2 bg-d-surface border border-d-edge rounded-lg shadow-2xl overflow-hidden z-40">
-      <div className="px-3 py-2 text-[11px] font-bold text-d-text3 uppercase tracking-wide border-b border-d-edge flex items-center gap-1.5">
-        <Icon className="w-3.5 h-3.5" />
+      <div className="px-3 py-2 text-[11px] font-bold text-d-text3 uppercase tracking-wide border-b border-d-edge flex items-center gap-1.5" id="composer-ac-label">
+        <Icon className="w-3.5 h-3.5" aria-hidden="true" />
         {meta.label}
-        <span className="ml-auto font-normal normal-case text-[10px]">
+        <span className="ml-auto font-normal normal-case text-[11px] max-sm:hidden" aria-hidden="true">
           {t('autocomplete.hint')}
         </span>
       </div>
 
-      <div ref={listRef} className="max-h-60 overflow-y-auto py-1">
+      {/* A listbox driven from the composer: the textarea keeps focus and
+          points at the highlighted option with aria-activedescendant. */}
+      <div ref={listRef} id="composer-ac" role="listbox" aria-labelledby="composer-ac-label" className="max-h-60 overflow-y-auto py-1">
         {options.map((option, index) => (
-          <button
+          <div
             key={option.id}
-            type="button"
-            onMouseDown={(e) => { e.preventDefault(); onPick(option); }}
-            className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+            id={`composer-ac-${index}`}
+            role="option"
+            aria-selected={index === activeIndex}
+            // mousedown keeps focus (and the caret) in the composer.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onPick(option)}
+            onMouseEnter={() => onHover?.(index)}
+            className={`w-full flex items-center gap-2 px-3 py-1.5 min-h-9 pointer-coarse:min-h-11 text-left cursor-pointer transition-colors ${
               index === activeIndex ? 'bg-d-active' : 'hover:bg-d-hover'
             }`}
           >
@@ -216,7 +223,7 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
             {Boolean(option.secondary) && (
               <span className="text-xs text-d-text3 truncate ml-auto pl-2">{option.secondary}</span>
             )}
-          </button>
+          </div>
         ))}
       </div>
     </div>

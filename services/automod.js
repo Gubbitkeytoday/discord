@@ -10,9 +10,14 @@ import { runQuery, getQuery, allQuery } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { has, isActiveTimeout } from '../lib/permissions.js';
+import { findKeyword, baseNormalize } from './admin/textNormalize.js';
+import { expandKeywords, PRESET_IDS } from './admin/automodPresets.js';
+import { postModAlert, nameOf } from './admin/modAlerts.js';
 
 const LINK = /https?:\/\/[^\s<]+/gi;
 const MENTION = /<@[!&]?[\w-]+>/g;
+// @everyone / @here ping the whole server; Discord counts them as mentions.
+const MASS_MENTION = /@(everyone|here)\b/g;
 
 // Recent messages per (channel, user) for spam heuristics. Ephemeral by design.
 const recentSends = new Map();
@@ -82,6 +87,47 @@ function safeJson(value, fallback) {
 const TRIGGERS = ['keyword', 'spam', 'mention_spam', 'link', 'regex'];
 const ACTIONS = ['block', 'alert', 'timeout'];
 
+const cleanList = (list, max, len) => (Array.isArray(list) ? list : [])
+  .map((v) => String(v ?? '').trim().slice(0, len)).filter(Boolean).slice(0, max);
+
+/**
+ * Validate and normalise a rule's trigger metadata. A rule that can never
+ * match (a keyword rule with no words, a regex rule with no pattern) is
+ * refused rather than saved as a silent no-op.
+ */
+async function cleanMetadata(serverId, triggerType, meta = {}, actions = []) {
+  const out = { ...(meta && typeof meta === 'object' ? meta : {}) };
+  if (triggerType === 'keyword') {
+    out.keywords = cleanList(out.keywords, 1000, 60);
+    out.presets = cleanList(out.presets, PRESET_IDS.length, 40).filter((id) => PRESET_IDS.includes(id));
+    out.allow_list = cleanList(out.allow_list, 100, 60);
+    if (out.keywords.length === 0 && out.presets.length === 0) {
+      throw new ApiError('Add at least one word or choose a word list', { code: 'EMPTY_RULE' });
+    }
+  }
+  if (triggerType === 'regex' && !safeRegex(out.pattern)) {
+    throw new ApiError('That regex is invalid or unsafe', { code: 'INVALID_REGEX' });
+  }
+  if (triggerType === 'link') {
+    out.allowed_domains = cleanList(out.allowed_domains, 100, 253)
+      .map((d) => d.toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''));
+  }
+  if (out.alert_channel_id) {
+    const channel = await getQuery(
+      `SELECT id FROM channels WHERE id = ? AND server_id = ? AND deleted_at IS NULL AND type IN ('text', 'announcement')`,
+      [String(out.alert_channel_id), serverId]
+    );
+    if (!channel) throw new ApiError('The alert channel must be a text channel of this server', { code: 'INVALID_ALERT_CHANNEL' });
+  } else {
+    delete out.alert_channel_id;
+  }
+  if (actions.includes('timeout')) {
+    const seconds = Number(out.timeout_seconds) || 300;
+    out.timeout_seconds = Math.max(10, Math.min(28 * 24 * 3600, Math.round(seconds)));
+  }
+  return out;
+}
+
 export async function createRule({ serverId, actorId, rule }) {
   if (!TRIGGERS.includes(rule?.trigger_type)) {
     throw new ApiError(`trigger_type must be one of ${TRIGGERS.join(', ')}`, { code: 'INVALID_TRIGGER' });
@@ -90,9 +136,10 @@ export async function createRule({ serverId, actorId, rule }) {
   if (actions.length === 0) {
     throw new ApiError(`actions must include at least one of ${ACTIONS.join(', ')}`, { code: 'INVALID_ACTION' });
   }
-  if (rule.trigger_type === 'regex' && !safeRegex(rule.trigger_metadata?.pattern)) {
-    throw new ApiError('That regex is invalid or unsafe', { code: 'INVALID_REGEX' });
+  if (!String(rule.name ?? '').trim()) {
+    throw new ApiError('A rule needs a name', { code: 'INVALID_NAME' });
   }
+  rule = { ...rule, trigger_metadata: await cleanMetadata(serverId, rule.trigger_type, rule.trigger_metadata, actions) };
 
   const id = generateId();
   await runQuery(
@@ -100,7 +147,7 @@ export async function createRule({ serverId, actorId, rule }) {
                                 trigger_metadata, actions, enabled,
                                 exempt_roles, exempt_channels, creator_id)
      VALUES (?, ?, ?, 'message_send', ?, ?, ?, ?, ?, ?, ?)`,
-    [id, serverId, String(rule.name ?? 'New rule').slice(0, 100), rule.trigger_type,
+    [id, serverId, String(rule.name).trim().slice(0, 100), rule.trigger_type,
      JSON.stringify(rule.trigger_metadata ?? {}), JSON.stringify(actions),
      rule.enabled === false ? 0 : 1,
      JSON.stringify(rule.exempt_roles ?? []), JSON.stringify(rule.exempt_channels ?? []),
@@ -116,15 +163,35 @@ export async function updateRule({ serverId, ruleId, patch }) {
   );
   if (!existing) throw ApiError.notFound('Rule');
 
-  if (patch.trigger_type === 'regex' && !safeRegex(patch.trigger_metadata?.pattern)) {
-    throw new ApiError('That regex is invalid or unsafe', { code: 'INVALID_REGEX' });
+  if (patch.trigger_type !== undefined && !TRIGGERS.includes(patch.trigger_type)) {
+    throw new ApiError(`trigger_type must be one of ${TRIGGERS.join(', ')}`, { code: 'INVALID_TRIGGER' });
+  }
+  let actions;
+  if (patch.actions !== undefined) {
+    actions = (Array.isArray(patch.actions) ? patch.actions : []).filter((a) => ACTIONS.includes(a));
+    if (actions.length === 0) {
+      throw new ApiError(`actions must include at least one of ${ACTIONS.join(', ')}`, { code: 'INVALID_ACTION' });
+    }
+  }
+  if (patch.name !== undefined && !String(patch.name ?? '').trim()) {
+    throw new ApiError('A rule needs a name', { code: 'INVALID_NAME' });
+  }
+  // Metadata is validated against the rule as it will be after the patch.
+  let metadata;
+  if (patch.trigger_metadata !== undefined || patch.trigger_type !== undefined || actions !== undefined) {
+    metadata = await cleanMetadata(
+      serverId,
+      patch.trigger_type ?? existing.trigger_type,
+      patch.trigger_metadata ?? safeJson(existing.trigger_metadata, {}),
+      actions ?? safeJson(existing.actions, [])
+    );
   }
 
   const fields = {
-    name: patch.name,
+    name: patch.name === undefined ? undefined : String(patch.name).trim().slice(0, 100),
     trigger_type: patch.trigger_type,
-    trigger_metadata: patch.trigger_metadata ? JSON.stringify(patch.trigger_metadata) : undefined,
-    actions: patch.actions ? JSON.stringify(patch.actions) : undefined,
+    trigger_metadata: metadata ? JSON.stringify(metadata) : undefined,
+    actions: actions ? JSON.stringify(actions) : undefined,
     enabled: patch.enabled === undefined ? undefined : (patch.enabled ? 1 : 0),
     exempt_roles: patch.exempt_roles ? JSON.stringify(patch.exempt_roles) : undefined,
     exempt_channels: patch.exempt_channels ? JSON.stringify(patch.exempt_channels) : undefined
@@ -171,33 +238,69 @@ export async function evaluate({ serverId, channelId, userId, content, memberRol
   if (rules.length === 0) return { blocked: false, actions: [] };
 
   const history = rememberSend(channelId, userId, content);
-  const lowered = String(content ?? '').toLowerCase();
+  const lowered = baseNormalize(content);
 
+  // Every rule is evaluated: an alert-only rule that matches first must not
+  // hide a blocking rule further down the list.
+  const hits = [];
   for (const rule of rules) {
     if (!rule.enabled) continue;
     if (rule.exempt_channels.includes(channelId)) continue;
     if (rule.exempt_roles.some((roleId) => memberRoleIds.includes(roleId))) continue;
 
-    const hit = matches(rule, { content, lowered, history });
-    if (!hit) continue;
+    const hit = matches(rule, { content: String(content ?? ''), lowered, history });
+    if (hit) hits.push({ rule, reason: hit });
+  }
+  if (hits.length === 0) return { blocked: false, actions: [] };
 
-    if (rule.actions.includes('timeout')) {
-      const seconds = Number(rule.trigger_metadata?.timeout_seconds) || 300;
-      await runQuery(
-        `UPDATE server_members SET timeout_until = ? WHERE server_id = ? AND user_id = ?`,
-        [new Date(Date.now() + seconds * 1000).toISOString(), serverId, userId]
-      );
-    }
-
-    return {
-      blocked: rule.actions.includes('block'),
-      rule,
-      reason: hit,
-      actions: rule.actions
-    };
+  const blocking = hits.find((h) => h.rule.actions.includes('block')) ?? null;
+  const timeoutHit = hits.find((h) => h.rule.actions.includes('timeout'));
+  if (timeoutHit) {
+    const seconds = Number(timeoutHit.rule.trigger_metadata?.timeout_seconds) || 300;
+    await runQuery(
+      `UPDATE server_members SET timeout_until = ? WHERE server_id = ? AND user_id = ?`,
+      [new Date(Date.now() + seconds * 1000).toISOString(), serverId, userId]
+    );
   }
 
-  return { blocked: false, actions: [] };
+  for (const h of hits.filter((x) => x.rule.actions.includes('alert'))) {
+    await alertModerators({
+      serverId, channelId, userId, content, rule: h.rule, reason: h.reason,
+      blocked: Boolean(blocking), timedOut: Boolean(timeoutHit)
+    });
+    // A blocked message is logged as AUTOMOD_BLOCK by the caller; an alert on
+    // a message that still goes through gets its own entry.
+    if (!blocking) {
+      await logHit({ serverId, userId, channelId, rule: h.rule, reason: h.reason, content, actionType: 'AUTOMOD_ALERT' });
+    }
+  }
+
+  const primary = blocking ?? hits[0];
+  return {
+    blocked: Boolean(blocking),
+    rule: primary.rule,
+    reason: primary.reason,
+    actions: [...new Set(hits.flatMap((h) => h.rule.actions))]
+  };
+}
+
+/** Post the "AutoMod caught something" alert into the rule's alert channel. */
+async function alertModerators({ serverId, channelId, userId, content, rule, reason, blocked, timedOut }) {
+  const who = await nameOf(userId);
+  await postModAlert({
+    serverId,
+    channelId: rule.trigger_metadata?.alert_channel_id ?? null,
+    title: `AutoMod ${blocked ? 'blocked' : 'flagged'} a message from ${who}`,
+    description: String(content ?? '').slice(0, 1000),
+    color: blocked ? '#ed4245' : '#faa61a',
+    fields: [
+      { name: 'Rule', value: rule.name, inline: true },
+      { name: 'Channel', value: `<#${channelId}>`, inline: true },
+      { name: 'Member', value: `${who} (${userId})`, inline: true },
+      { name: 'Reason', value: reason },
+      timedOut ? { name: 'Action', value: 'Timed out' } : null
+    ]
+  });
 }
 
 function matches(rule, { content, lowered, history }) {
@@ -205,8 +308,8 @@ function matches(rule, { content, lowered, history }) {
 
   switch (rule.trigger_type) {
     case 'keyword': {
-      const words = (meta.keywords ?? []).map((k) => String(k).toLowerCase()).filter(Boolean);
-      const found = words.find((word) => lowered.includes(word));
+      const { keywords, allow } = expandKeywords(meta);
+      const found = findKeyword(content, keywords, { allowList: allow });
       return found ? `Blocked word: "${found}"` : null;
     }
     case 'regex': {
@@ -228,7 +331,7 @@ function matches(rule, { content, lowered, history }) {
     }
     case 'mention_spam': {
       const limit = Number(meta.max_mentions) || 5;
-      const count = (content.match(MENTION) ?? []).length;
+      const count = (content.match(MENTION) ?? []).length + (lowered.match(MASS_MENTION) ?? []).length;
       return count > limit ? `Too many mentions (${count} > ${limit})` : null;
     }
     case 'spam': {
@@ -244,11 +347,11 @@ function matches(rule, { content, lowered, history }) {
 }
 
 /** Record a blocked message so moderators can see what AutoMod caught. */
-export async function logHit({ serverId, userId, channelId, rule, reason, content }) {
+export async function logHit({ serverId, userId, channelId, rule, reason, content, actionType = 'AUTOMOD_BLOCK' }) {
   await runQuery(
     `INSERT INTO audit_logs (id, server_id, user_id, action_type, target_type, target_id, changes, reason)
-     VALUES (?, ?, ?, 'AUTOMOD_BLOCK', 'user', ?, ?, ?)`,
-    [generateId(), serverId, userId, userId,
+     VALUES (?, ?, ?, ?, 'user', ?, ?, ?)`,
+    [generateId(), serverId, userId, actionType, userId,
      JSON.stringify([{ key: 'rule', new: rule?.name ?? 'unknown' },
                      { key: 'content', new: String(content ?? '').slice(0, 200) },
                      { key: 'channel', new: channelId }]),

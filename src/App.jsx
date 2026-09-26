@@ -11,7 +11,7 @@ import ToastStack, { useToasts } from './components/ToastStack';
 import ErrorBoundary from './components/ErrorBoundary';
 import ConnectionBanner from './components/ConnectionBanner';
 import { useRealtimeConnection } from './hooks/useRealtimeConnection';
-import { readSyncState, writeSyncState, clearSyncState, compareIds } from './utils/syncCursor';
+import { readSyncState, writeSyncState, clearSyncState } from './utils/syncCursor';
 import ConfirmModal from './components/ConfirmModal';
 import InputModal from './components/InputModal';
 import NotificationSettingsPopover from './components/NotificationSettingsPopover';
@@ -28,6 +28,16 @@ import { useKeybinds } from './hooks/useKeybinds';
 import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
 import { t, adoptAccountLocale } from './i18n/index.jsx';
 import { lazyComponent, preloadWhenIdle } from './utils/lazyComponent';
+import LiveAnnouncer from './components/chat/LiveAnnouncer';
+import { RECONNECTED_EVENT } from './chat/events';
+import { announce, announceMessage, announceVoice, setMessageVerbosity } from './chat/announcer';
+import { createReadAcker, createFrameQueue } from './chat/scheduling.js';
+import {
+  mergeMessages, reconcile, capHistory, cachedPage, rememberPage, fetchFirstPage, prefetchChannel,
+  clearMessageCache, MAX_HISTORY
+} from './chat/messageStore';
+import { useBackClose, setCanonicalPath } from './chat/useBackClose';
+import { mentionsUser } from './utils/mentions';
 
 // Code-split: each of these is a separate chunk, fetched on first use (and
 // warmed on idle after sign-in), so the first paint only pays for the chat.
@@ -55,7 +65,15 @@ const NotificationsInbox = lazyComponent(() => import('./components/Notification
 
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
-const socket = io({ withCredentials: true, autoConnect: true });
+// WebSocket first (saves the polling handshake round trips before realtime
+// is live); falls back to long-polling where a proxy blocks upgrades.
+const socket = io({ withCredentials: true, autoConnect: true, transports: ['websocket', 'polling'], tryAllTransports: true });
+
+// Socket-driven state updates run together once per animation frame (one
+// React commit per frame during a burst, not one per event), and read
+// acknowledgements are throttled to one per channel per 1.5 s.
+const frameQueue = createFrameQueue();
+const readAcker = createReadAcker((channelId, messageId) => socket.emit('mark_read', { channelId, messageId }));
 
 // The session lives outside App so that anything that remounts it (an error
 // boundary reset, a hot reload) keeps the signed-in user and gateway token.
@@ -75,6 +93,35 @@ function isNarrowViewport(query) {
   try { return typeof window !== 'undefined' && Boolean(window.matchMedia?.(query).matches); } catch { return false; }
 }
 const LAST_SERVER_KEY = 'antigravity.lastServer';
+// The last channel opened in each server (and in DMs), so a boot, a rail
+// click or a reload lands where you were — not on the channel drawer.
+const LAST_CHANNEL_KEY = 'antigravity.lastChannels';
+
+function readLastChannels() {
+  try { return JSON.parse(localStorage.getItem(LAST_CHANNEL_KEY) ?? '{}') ?? {}; } catch { return {}; }
+}
+function lastChannelFor(serverId) {
+  return serverId ? readLastChannels()[serverId] ?? null : null;
+}
+function rememberLastChannel(serverId, channelId) {
+  if (!serverId || !channelId) return;
+  try {
+    const map = readLastChannels();
+    if (map[serverId] === channelId) return;
+    map[serverId] = channelId;
+    localStorage.setItem(LAST_CHANNEL_KEY, JSON.stringify(map));
+  } catch { /* private mode */ }
+}
+
+/** Where the app opens: the URL, else the last server and its last channel. */
+function initialPlace() {
+  const loc = parseLocation();
+  if (loc.serverId) return { serverId: loc.serverId, channelId: loc.channelId ?? lastChannelFor(loc.serverId) };
+  let serverId = 'home';
+  try { serverId = localStorage.getItem(LAST_SERVER_KEY) || 'home'; } catch { /* storage unavailable */ }
+  return { serverId, channelId: loc.invite || loc.template ? null : lastChannelFor(serverId) };
+}
+const BOOT_PLACE = typeof window !== 'undefined' ? initialPlace() : { serverId: 'home', channelId: null };
 // Why the last session ended, carried across the reload that sign-out does so
 // the login screen can say it (an i18n key).
 const SIGN_OUT_NOTICE_KEY = 'antigravity.signOutNotice';
@@ -89,7 +136,7 @@ function takeSignOutNotice() {
 
 // Bumped with every db.js migration. The client compares it to the running
 // server's own number (GET /api/health) so a stale backend is loud, not silent.
-const EXPECTED_SCHEMA_VERSION = 40;
+const EXPECTED_SCHEMA_VERSION = 42;
 
 /** Parse a Discord-style path: /channels/@me/:dm, /channels/:server/:channel, /invite/:code */
 function parseLocation() {
@@ -115,13 +162,9 @@ export default function App() {
   const [devAccounts, setDevAccounts] = useState([]);
 
   const [servers, setServers] = useState([]);
-  const [activeServerId, setActiveServerId] = useState(() => {
-    const loc = parseLocation();
-    if (loc.serverId) return loc.serverId;
-    try { return localStorage.getItem(LAST_SERVER_KEY) || 'home'; } catch { return 'home'; }
-  });
+  const [activeServerId, setActiveServerId] = useState(() => BOOT_PLACE.serverId);
   const [channels, setChannels] = useState([]);
-  const [activeChannelId, setActiveChannelId] = useState(() => parseLocation().channelId ?? null);
+  const [activeChannelId, setActiveChannelId] = useState(() => BOOT_PLACE.channelId ?? null);
   const [pendingJumpMessageId, setPendingJumpMessageId] = useState(() => parseLocation().messageId ?? null);
   const [inviteCode, setInviteCode] = useState(() => parseLocation().invite ?? null);
   const [messages, setMessages] = useState([]);
@@ -145,7 +188,14 @@ export default function App() {
   const [readStates, setReadStates] = useState({});
   const [channelReadMarker, setChannelReadMarker] = useState(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  // True while the loaded window does not reach the newest message (after a
+  // jump to an old message, or after trimming while reading far back).
+  const [hasNewerHistory, setHasNewerHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  // Every server's channels, for the cross-server quick switcher.
+  const [serverChannels, setServerChannels] = useState({});
+  const [jumpTarget, setJumpTarget] = useState(null);       // { id, n } → ChatArea scrolls + flashes
+  const [focusSearchSignal, setFocusSearchSignal] = useState(0);
 
   // Typing: channelId -> { userId -> { displayName, at } }
   const [typingByChannel, setTypingByChannel] = useState({});
@@ -178,11 +228,17 @@ export default function App() {
   // A link or reload that names a channel opens on that conversation instead
   // (the drawer used to cover it on every load).
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(
-    () => isNarrowViewport('(max-width: 767px)') && !parseLocation().channelId
+    () => isNarrowViewport('(max-width: 767px)') && !BOOT_PLACE.channelId && !parseLocation().invite
   );
+  // Layout breakpoints as state, for behaviour that differs on phones
+  // (history entries for drawers, swipe gestures).
+  const [isPhone, setIsPhone] = useState(() => isNarrowViewport('(max-width: 767px)'));
+  const [isNarrow, setIsNarrow] = useState(() => isNarrowViewport('(max-width: 1023px)'));
   // True while the open channel's first page is in flight, so the chat can
-  // show a skeleton instead of the previous channel's history.
-  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  // show a skeleton instead of the previous channel's history. Starts true
+  // when the URL names a channel, so the first paint is the skeleton and not
+  // a "Welcome to #…" header that is replaced a moment later (CLS).
+  const [isLoadingMessages, setIsLoadingMessages] = useState(() => Boolean(BOOT_PLACE.channelId));
   // A /template/:code link opens the "use template" flow with the code filled in.
   const [showCreateServerModal, setShowCreateServerModal] = useState(() => (parseLocation().template ? { templateCode: parseLocation().template } : false));
   const [showCreateChannelModal, setShowCreateChannelModal] = useState(false);
@@ -203,6 +259,8 @@ export default function App() {
     setActiveChannelId(id);
     setMobileSidebarOpen(false);
   }, []);
+  const mobileSidebarOpenRef = useRef(mobileSidebarOpen);
+  mobileSidebarOpenRef.current = mobileSidebarOpen;
   const [selectedProfileUser, setSelectedProfileUser] = useState(null);
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [serverSettingsTab, setServerSettingsTab] = useState(null);
@@ -274,6 +332,10 @@ export default function App() {
           setCurrentUser(data.user);
           setCurrentUserId(data.user.id);
           setAuthState(true);
+          // Start the open channel's first page now, in parallel with
+          // initial-data and the server detail, instead of four round trips
+          // later. The channel effect picks up the same request.
+          if (BOOT_PLACE.channelId && !parseLocation().messageId) fetchFirstPage(BOOT_PLACE.channelId).catch(() => {});
         } else {
           setAuthState(false);
         }
@@ -313,6 +375,8 @@ export default function App() {
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    readAcker.flush();
+    clearMessageCache();
     try { await post('/api/auth/logout'); } catch { /* offline */ }
     // The gateway socket was identified as this user: drop it at once so a
     // signed-out tab stops receiving their DMs and channel traffic.
@@ -428,6 +492,8 @@ export default function App() {
       // `identified` reply re-join the rooms.
       identifiedRef.current = false;
       socket.emit('identify', { userId: currentUserRef.current.id, token: authToken });
+      // Images that failed while offline retry by themselves.
+      window.dispatchEvent(new Event(RECONNECTED_EVENT));
     };
     socket.on('connect', onConnect);
     return () => socket.off('connect', onConnect);
@@ -447,6 +513,7 @@ export default function App() {
         const threads = keepChannel ? prev.filter((c) => c.type === 'thread' && c.server_id === serverId) : [];
         return [...(data.channels || []), ...threads];
       });
+      setServerChannels((prev) => ({ ...prev, [serverId]: (data.channels || []).map((c) => ({ ...c, server_id: c.server_id ?? serverId })) }));
       setMembers(data.members || []);
       setRoles(data.roles || []);
       setServerEmojis(data.emojis || []);
@@ -477,8 +544,11 @@ export default function App() {
         const wanted = activeChannelIdRef.current;
         const stillThere = wanted && data.channels?.some((c) => c.id === wanted);
         if (!stillThere) {
+          // The channel you were last in here, like Discord; else the first text channel.
+          const last = lastChannelFor(serverId);
+          const remembered = last && data.channels?.find((c) => c.id === last && c.type !== 'voice' && c.type !== 'stage');
           const firstText = data.channels?.find((c) => c.type === 'text' || c.type === 'announcement');
-          setActiveChannelId(firstText?.id ?? data.channels?.[0]?.id ?? null);
+          setActiveChannelId(remembered?.id ?? firstText?.id ?? data.channels?.[0]?.id ?? null);
         }
       }
     } catch (err) {
@@ -511,17 +581,25 @@ export default function App() {
   allChannelsRef.current = allChannels;
 
   const markChannelRead = useCallback((channelId, messageId) => {
-    socket.emit('mark_read', { channelId, messageId });
-    setReadStates((prev) => ({
-      ...prev,
-      [channelId]: { ...prev[channelId], channel_id: channelId, unread: 0, mention_count: 0, last_read_message_id: messageId }
-    }));
+    if (!channelId) return;
+    readAcker.queue(channelId, messageId);
+    setReadStates((prev) => {
+      const current = prev[channelId];
+      if (current && !current.unread && !current.mention_count && current.last_read_message_id === messageId) return prev;
+      return {
+        ...prev,
+        [channelId]: { ...current, channel_id: channelId, unread: 0, mention_count: 0, last_read_message_id: messageId }
+      };
+    });
   }, []);
 
   // --- catch-up after a reconnect (see routes/sync.js) ---------------------------
 
   const messagesRef = useRef([]);
   messagesRef.current = messages;
+  const hasNewerHistoryRef = useRef(false);
+  hasNewerHistoryRef.current = hasNewerHistory;
+  const historyRequestRef = useRef(null);
   const serversRef = useRef([]);
   serversRef.current = servers;
   const dmChannelsRef = useRef([]);
@@ -539,8 +617,9 @@ export default function App() {
   const reloadOpenChannel = useCallback(async (channelId) => {
     const list = await get(`/api/channels/${channelId}/messages?limit=${PAGE_SIZE}`);
     if (activeChannelIdRef.current !== channelId || !Array.isArray(list)) return null;
-    setMessages((prev) => [...list, ...prev.filter((m) => m.pending || m.failed)]);
+    setMessages((prev) => reconcile(prev, [...list, ...prev.filter((m) => m.pending || m.failed)]));
     setHasMoreHistory(list.length >= PAGE_SIZE);
+    setHasNewerHistory(false);
     return list[list.length - 1]?.id ?? null;
   }, []);
 
@@ -558,21 +637,7 @@ export default function App() {
       if (list.length < 100) break;
       after = list[list.length - 1].id;
     }
-    if (missed.length) {
-      setMessages((prev) => {
-        const next = [...prev];
-        const known = new Set(prev.map((m) => m.id));
-        for (const msg of missed) {
-          if (known.has(msg.id)) continue;
-          const pendingIdx = msg.nonce ? next.findIndex((m) => m.pending && m.nonce === msg.nonce) : -1;
-          if (pendingIdx !== -1) next[pendingIdx] = msg;
-          else next.push(msg);
-          known.add(msg.id);
-        }
-        const settled = next.filter((m) => !m.pending && !m.failed).sort((a, b) => compareIds(a.id, b.id));
-        return [...settled, ...next.filter((m) => m.pending || m.failed)];
-      });
-    }
+    if (missed.length) setMessages((prev) => mergeMessages(prev, missed));
     return missed[missed.length - 1]?.id ?? null;
   }, [reloadOpenChannel]);
 
@@ -666,7 +731,8 @@ export default function App() {
     const path = activeServerId === 'home'
       ? `/channels/@me/${activeChannelId}`
       : `/channels/${activeServerId}/${activeChannelId}`;
-    if (window.location.pathname !== path && !pendingJumpMessageId) window.history.replaceState(null, '', path);
+    if (!pendingJumpMessageId) setCanonicalPath(path);
+    rememberLastChannel(activeServerId, activeChannelId);
 
     // Discord voice channels carry a text channel too, and people use it
     // constantly — links, "brb", the thing you cannot say over a hot mic. So
@@ -679,28 +745,34 @@ export default function App() {
     setSearchResults(null);
     setPins([]);
 
-    const query = pendingJumpMessageId
-      ? `around=${pendingJumpMessageId}&limit=${PAGE_SIZE}`
-      : `limit=${PAGE_SIZE}`;
     // Clear the previous channel's history straight away: leaving it on screen
     // under the new channel's header — and letting a slow response for a
     // channel the user already left land on top of the one they are in — both
-    // show the wrong conversation.
+    // show the wrong conversation. A channel visited recently renders from
+    // the first-page cache at once and is revalidated underneath.
     let stale = false;
-    setMessages([]);
-    setHasMoreHistory(false);
-    setIsLoadingMessages(true);
-    get(`/api/messages/${activeChannelId}?${query}`)
+    const jumpId = pendingJumpMessageId;
+    const cached = jumpId ? null : cachedPage(activeChannelId);
+    historyRequestRef.current = null;
+    setIsLoadingHistory(false);
+    setMessages(cached ?? []);
+    setHasMoreHistory(Boolean(cached && cached.length >= PAGE_SIZE));
+    setHasNewerHistory(false);
+    setIsLoadingMessages(!cached);
+    const request = jumpId
+      ? get(`/api/messages/${activeChannelId}?around=${jumpId}&limit=${PAGE_SIZE}`)
+      : fetchFirstPage(activeChannelId);
+    request
       .then((list) => {
         if (stale) return;
         list = Array.isArray(list) ? list : [];
-        setMessages(list);
-        setHasMoreHistory(list.length >= PAGE_SIZE || Boolean(pendingJumpMessageId));
-        if (list.length && !pendingJumpMessageId) markChannelRead(activeChannelId, list[list.length - 1].id);
-        if (pendingJumpMessageId) {
-          const id = pendingJumpMessageId;
+        setMessages((prev) => reconcile(prev, [...list, ...prev.filter((m) => (m.pending || m.failed) && m.channel_id === activeChannelId)]));
+        setHasMoreHistory(list.length >= PAGE_SIZE || Boolean(jumpId));
+        setHasNewerHistory(Boolean(jumpId));
+        if (list.length && !jumpId && document.visibilityState === 'visible') markChannelRead(activeChannelId, list[list.length - 1].id);
+        if (jumpId) {
           setPendingJumpMessageId(null);
-          setTimeout(() => flashMessage(id), 150);
+          setJumpTarget({ id: jumpId, n: Date.now() });
         }
       })
       .catch((err) => {
@@ -743,6 +815,9 @@ export default function App() {
     joinWantedRooms();
     return () => {
       stale = true;
+      // Remember the newest page for an instant re-open (not an old window
+      // we jumped into — that is not what the channel looks like now).
+      if (!hasNewerHistoryRef.current) rememberPage(activeChannelId, messagesRef.current);
       socket.emit('leave_channel', activeChannelId);
       if (wantedChannelRef.current === activeChannelId) wantedChannelRef.current = null;
     };
@@ -752,34 +827,80 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChannelId, channelExists, currentUserId]);
 
-  const handleLoadMore = useCallback(() => {
-    if (!activeChannelId || !messages.length || isLoadingHistory) return;
+  /**
+   * One page of history in either direction. A ref (not state) guards the
+   * in-flight request, so two scroll events in one frame cannot fetch the
+   * same page twice; pages merge by id; a channel switch cancels.
+   */
+  const loadPage = useCallback((direction) => {
+    const channelId = activeChannelIdRef.current;
+    const held = messagesRef.current.filter((m) => !m.pending && !m.failed);
+    if (!channelId || !held.length || historyRequestRef.current) return;
+    const anchor = direction === 'older' ? held[0].id : held[held.length - 1].id;
+    const token = { channelId, direction };
+    historyRequestRef.current = token;
     setIsLoadingHistory(true);
-    const channelId = activeChannelId;
-    get(`/api/messages/${channelId}?limit=${PAGE_SIZE}&before=${messages[0].id}`)
-      .then((older) => {
-        // The user may have switched channels while this page was loading.
-        if (activeChannelIdRef.current !== channelId) return;
-        setMessages((prev) => [...(older || []), ...prev]);
-        setHasMoreHistory((older || []).length >= PAGE_SIZE);
+    const param = direction === 'older' ? 'before' : 'after';
+    get(`/api/messages/${channelId}?limit=${PAGE_SIZE}&${param}=${encodeURIComponent(anchor)}`)
+      .then((rows) => {
+        if (historyRequestRef.current !== token || activeChannelIdRef.current !== channelId) return;
+        const page = Array.isArray(rows) ? rows : [];
+        // Bounded memory: reading far back drops the newest end, reading
+        // forward again drops the oldest; either end refetches on demand.
+        const merged = mergeMessages(messagesRef.current, page);
+        const capped = capHistory(merged, { max: MAX_HISTORY, keep: direction === 'older' ? 'oldest' : 'newest' });
+        setMessages(capped.list);
+        if (direction === 'older') {
+          setHasMoreHistory(page.length >= PAGE_SIZE);
+          if (capped.droppedNewer) setHasNewerHistory(true);
+        } else {
+          setHasNewerHistory(page.length >= PAGE_SIZE);
+          if (capped.droppedOlder) setHasMoreHistory(true);
+        }
       })
       .catch((err) => console.error('Failed to load history:', err))
-      .finally(() => setIsLoadingHistory(false));
-  }, [activeChannelId, messages, isLoadingHistory]);
+      .finally(() => {
+        if (historyRequestRef.current !== token) return;
+        historyRequestRef.current = null;
+        setIsLoadingHistory(false);
+      });
+  }, []);
+  const handleLoadMore = useCallback(() => loadPage('older'), [loadPage]);
+  const handleLoadNewer = useCallback(() => loadPage('newer'), [loadPage]);
 
-  const flashMessage = (messageId) => {
-    requestAnimationFrame(() => {
-      const node = document.getElementById(`message-${messageId}`);
-      if (!node) return;
-      node.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      node.classList.add('ring-2', 'ring-d-brand');
-      setTimeout(() => node.classList.remove('ring-2', 'ring-d-brand'), 1800);
-    });
-  };
+  /** "Jump to present" from an old window: the newest page, fresh. */
+  const handleJumpToPresent = useCallback(() => {
+    const channelId = activeChannelIdRef.current;
+    if (!channelId) return;
+    historyRequestRef.current = null;
+    fetchFirstPage(channelId, { force: true }).then((list) => {
+      if (activeChannelIdRef.current !== channelId) return;
+      setMessages((prev) => reconcile(prev, [...list, ...prev.filter((m) => m.pending || m.failed)]));
+      setHasMoreHistory(list.length >= PAGE_SIZE);
+      setHasNewerHistory(false);
+      setJumpTarget({ id: list[list.length - 1]?.id, n: Date.now(), bottom: true });
+    }).catch(() => {});
+  }, []);
 
   // --- socket listeners ----------------------------------------------------------
 
   useEffect(() => {
+    const later = (fn) => (...args) => frameQueue.push(() => fn(...args));
+    let incoming = [];
+    const flushIncoming = () => {
+      const batch = incoming;
+      incoming = [];
+      if (!batch.length || hasNewerHistoryRef.current) return;
+      const channelId = activeChannelIdRef.current;
+      const mine = batch.filter((m) => m.channel_id === channelId);
+      if (!mine.length) return;
+      setMessages((prev) => {
+        const merged = mergeMessages(prev, mine);
+        return merged.length > MAX_HISTORY ? merged.slice(merged.length - MAX_HISTORY) : merged;
+      });
+      if (messagesRef.current.length + mine.length > MAX_HISTORY) setHasMoreHistory(true);
+    };
+
     const bumpUnread = (channelId, messageId, { mention = false } = {}) =>
       setReadStates((prev) => ({
         ...prev,
@@ -797,20 +918,18 @@ export default function App() {
         speakTtsMessage({ author: msg.display_name ?? msg.username ?? '', content: msg.content });
       }
       if (msg.channel_id === activeChannelIdRef.current) {
-        setMessages((prev) => {
-          const pendingIdx = msg.nonce ? prev.findIndex((m) => m.pending && m.nonce === msg.nonce) : -1;
-          if (pendingIdx !== -1) {
-            const next = [...prev];
-            next[pendingIdx] = msg;
-            return next;
-          }
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
+        if (incoming.length === 0) frameQueue.push(flushIncoming);
+        incoming.push(msg);
+        if (document.visibilityState === 'visible') frameQueue.push(() => markChannelRead(msg.channel_id, msg.id));
+        else frameQueue.push(() => bumpUnread(msg.channel_id, msg.id));
+        const open = allChannelsRef.current.find((c) => c.id === msg.channel_id);
+        announceMessage(msg, {
+          channelName: open ? (open.server_id ? `#${open.name}` : `@${open.display_name ?? ''}`) : '',
+          currentUserId: currentUserRef.current?.id,
+          mentionsMe: mentionsUser(msg, currentUserRef.current)
         });
-        if (document.visibilityState === 'visible') markChannelRead(msg.channel_id, msg.id);
-        else bumpUnread(msg.channel_id, msg.id);
       } else {
-        bumpUnread(msg.channel_id, msg.id);
+        frameQueue.push(() => bumpUnread(msg.channel_id, msg.id));
         const muted = Boolean(
           channelSettingsRef.current[msg.channel_id]?.muted
           || (msg.server_id && serverSettingsRef.current[msg.server_id]?.muted)
@@ -934,7 +1053,21 @@ export default function App() {
         [state.channel_id]: { ...prev[state.channel_id], ...state, unread: 0 }
       }));
 
-    const onVoiceParticipants = ({ participants }) => setActiveVoiceParticipants(participants || []);
+    let lastVoiceRoster = null;
+    const onVoiceParticipants = ({ channelId, participants }) => {
+      const list = participants || [];
+      // Someone joined or left the room you are in: say so (screen readers).
+      const current = currentVoiceChannelRef.current;
+      if (current && (!channelId || channelId === current.id)) {
+        const ids = new Map(list.map((p) => [p.userId, p.displayName ?? p.username ?? '']));
+        if (lastVoiceRoster && lastVoiceRoster.channelId === current.id) {
+          for (const [id, name] of ids) if (!lastVoiceRoster.ids.has(id) && id !== currentUserRef.current?.id) announceVoice('joined', { name });
+          for (const [id, name] of lastVoiceRoster.ids) if (!ids.has(id) && id !== currentUserRef.current?.id) announceVoice('left', { name });
+        }
+        lastVoiceRoster = { channelId: current.id, ids };
+      }
+      setActiveVoiceParticipants(list);
+    };
 
     // The server moved us (AFK sweep). Point the client at the new channel so the
     // mesh re-forms there; the server has already updated the rosters.
@@ -1083,18 +1216,18 @@ export default function App() {
 
     const handlers = {
       new_message: onNewMessage,
-      channel_activity: onChannelActivity,
-      message_deleted: onMessageDeleted,
-      message_updated: onMessageUpdated,
-      reaction_updated: onReactionUpdated,
-      poll_updated: onPollUpdated,
+      channel_activity: later(onChannelActivity),
+      message_deleted: later(onMessageDeleted),
+      message_updated: later(onMessageUpdated),
+      reaction_updated: later(onReactionUpdated),
+      poll_updated: later(onPollUpdated),
       event_reminder: onEventReminder,
       pins_updated: onPinsUpdated,
-      typing: onTyping,
-      typing_stop: onTypingStop,
-      presence_updated: onPresence,
+      typing: later(onTyping),
+      typing_stop: later(onTypingStop),
+      presence_updated: later(onPresence),
       notification: onNotification,
-      read_state_updated: onReadStateUpdated,
+      read_state_updated: later(onReadStateUpdated),
       voice_participants: onVoiceParticipants,
       voice_moved: onVoiceMoved,
       voice_speaking: onVoiceSpeaking,
@@ -1126,7 +1259,7 @@ export default function App() {
       user_settings_updated: ({ category, value }) => applyCategoryFromServer(category, value),
       call_ring: onCallRing,
       call_updated: onCallUpdated,
-      messages_bulk_deleted: onBulkDeleted,
+      messages_bulk_deleted: later(onBulkDeleted),
       channels_reordered: refreshServer,
       channel_permissions_synced: refreshServer,
       action_error: onActionError,
@@ -1222,7 +1355,8 @@ export default function App() {
     markChannelRead: () => { if (activeChannelId) handleMarkChannelRead(activeChannelId); },
     toggleMemberList: () => setShowMemberList((v) => !v),
     togglePins: () => setShowPinsFromSlash(Date.now()),
-    search: () => setShowQuickSwitcher(true),
+    // Ctrl+F searches messages (it used to open the channel switcher).
+    search: () => setFocusSearchSignal(Date.now()),
     openSettings: () => setShowUserSettingsModal(true),
     openShortcuts: () => setShowShortcuts((v) => !v),
     openEvents: () => { if (activeServerId !== 'home') setShowEvents(true); },
@@ -1231,19 +1365,30 @@ export default function App() {
     jumpToHome: () => setActiveServerId('home')
   });
 
-  // Mark the open channel read when the tab regains focus.
+  // Mark the open channel read when the tab is looked at again; send any
+  // throttled acknowledgement straight away when it is hidden or closed.
+  const readStatesRef = useRef(readStates);
+  readStatesRef.current = readStates;
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible') { readAcker.flush(); return; }
       const id = activeChannelIdRef.current;
-      const state = readStates[id];
-      if (id && (state?.unread || state?.mention_count)) {
-        markChannelRead(id, state.last_message_id ?? messages[messages.length - 1]?.id);
+      const state = readStatesRef.current[id];
+      if (id && (state?.unread || state?.mention_count) && !hasNewerHistoryRef.current) {
+        const held = messagesRef.current.filter((m) => !m.pending && !m.failed);
+        markChannelRead(id, state.last_message_id ?? held[held.length - 1]?.id);
       }
     };
+    const onHide = () => readAcker.flush();
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [readStates, markChannelRead, messages]);
+    window.addEventListener('focus', onVisible);
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      window.removeEventListener('pagehide', onHide);
+    };
+  }, [markChannelRead]);
 
   // Typing entries expire client-side too, in case a stop event is missed.
   useEffect(() => {
@@ -1263,11 +1408,27 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Unread total in the tab title, like the desktop badge.
+  // Unread total in the tab title, like the desktop badge — and where you
+  // are (WCAG 2.4.2): "#general | Server — Antigravity", as Discord does.
+  const mentionTotal = useMemo(
+    () => Object.values(readStates).reduce((n, s) => n + (s?.mention_count ?? 0), 0),
+    [readStates]
+  );
+  const titleChannel = allChannels.find((c) => c.id === activeChannelId);
+  const titleServer = servers.find((s) => s.id === activeServerId)?.name ?? '';
   useEffect(() => {
-    const mentions = Object.values(readStates).reduce((n, s) => n + (s?.mention_count ?? 0), 0);
-    applyUnreadBadge(mentions);
-  }, [readStates, prefs.notifications.unreadBadge]);
+    applyUnreadBadge(mentionTotal);
+    if (authState !== true) return;
+    const isDmTitle = titleChannel && !titleChannel.server_id;
+    const place = titleChannel
+      ? (isDmTitle ? `@${titleChannel.display_name ?? ''}` : `#${titleChannel.name}`)
+      : activeServerId === 'home' ? t('dm.friends') : '';
+    const where = [place, activeServerId !== 'home' ? titleServer : ''].filter(Boolean).join(' | ');
+    const prefix = prefs.notifications.unreadBadge && mentionTotal > 0 ? `(${mentionTotal}) ` : '';
+    document.title = `${prefix}${where ? `${where} — ` : ''}Antigravity`;
+  }, [mentionTotal, prefs.notifications.unreadBadge, titleChannel?.id, titleChannel?.name, titleChannel?.display_name, titleServer, activeServerId, authState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { setMessageVerbosity(prefs.accessibility?.announceMessages ?? 'all'); }, [prefs.accessibility?.announceMessages]);
 
   // --- message actions -------------------------------------------------------
 
@@ -1410,11 +1571,13 @@ export default function App() {
     }, (ack) => {
       if (ack && !ack.ok) {
         setMessages((prev) => prev.map((m) =>
-          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack) } : m
+          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack), errorCode: ack.code ?? null } : m
         ));
       }
     });
   };
+
+  const handleDiscardMessage = (msg) => setMessages((prev) => prev.filter((m) => m.id !== msg.id));
 
   const handleRetryMessage = (msg) => {
     setMessages((prev) => prev.filter((m) => m.id !== msg.id));
@@ -1459,13 +1622,19 @@ export default function App() {
       return;
     }
     try {
+      setSearchResults(null);
+      if (messagesRef.current.some((m) => String(m.id) === String(message.id))) {
+        setJumpTarget({ id: message.id, n: Date.now() });
+        return;
+      }
       const page = await get(`/api/messages/${message.channel_id}?around=${message.id}&limit=${PAGE_SIZE}`);
       if (Array.isArray(page)) {
+        historyRequestRef.current = null;
         setMessages(page);
         setHasMoreHistory(true);
+        setHasNewerHistory(true);
       }
-      setSearchResults(null);
-      setTimeout(() => flashMessage(message.id), 120);
+      setJumpTarget({ id: message.id, n: Date.now() });
     } catch (err) {
       pushToast(t('search.jumpFailed', { error: err.message }), { type: 'error' });
     }
@@ -1668,7 +1837,8 @@ export default function App() {
   const handleJoinVoice = (voiceChan) => {
     setCurrentVoiceChannel(voiceChan);
     socket.emit('join_voice', { channelId: voiceChan.id }, (ack) => {
-      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(localizeError(ack), { type: 'error' }); }
+      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(localizeError(ack), { type: 'error' }); return; }
+      announceVoice('connected', { channel: voiceChan.name ?? voiceChan.display_name ?? '' });
     });
   };
   const handleLeaveVoice = () => {
@@ -1677,6 +1847,7 @@ export default function App() {
     setScreenSharing(false);
     setCurrentVoiceChannel(null);
     setActiveVoiceParticipants([]);
+    announceVoice('disconnected');
     // Staying put: a voice channel now carries a text channel, so hanging up
     // leaves you reading it rather than teleporting you somewhere else.
   };
@@ -1693,6 +1864,7 @@ export default function App() {
   const handleToggleMute = () => {
     const newMute = !isMuted;
     setIsMuted(newMute);
+    announceVoice(newMute ? 'muted' : 'unmuted');
     if (newMute === false && isDeafened) setIsDeafened(false);
     if (currentVoiceChannel) {
       socket.emit('voice_state_change', { channelId: currentVoiceChannel.id, isMuted: newMute, isDeafened: newMute ? isDeafened : false });
@@ -1701,6 +1873,7 @@ export default function App() {
   const handleToggleDeafen = () => {
     const newDeafen = !isDeafened;
     setIsDeafened(newDeafen);
+    announceVoice(newDeafen ? 'deafened' : 'undeafened');
     // Discord: deafening also mutes; undeafening restores the previous mute.
     if (newDeafen) setIsMuted(true);
     if (currentVoiceChannel) {
@@ -1725,7 +1898,7 @@ export default function App() {
     try {
       const newChannel = await post('/api/channels', {
         server_id: activeServerId, name, type,
-        category: category ?? (type === 'voice' ? 'VOICE CHANNELS' : 'TEXT CHANNELS')
+        category: category ?? ((type === 'voice' || type === 'stage') ? 'VOICE CHANNELS' : 'TEXT CHANNELS')
       });
       if (isPrivate) {
         // Private channel = deny VIEW_CHANNEL to @everyone, allow it back to the
@@ -1736,7 +1909,8 @@ export default function App() {
         newChannel.is_private = true;
       }
       setChannels((prev) => (prev.some((c) => c.id === newChannel.id) ? prev : [...prev, newChannel]));
-      if (newChannel.type !== 'voice') setActiveChannelId(newChannel.id);
+      // Creating a voice or stage channel must not join it.
+      if (newChannel.type !== 'voice' && newChannel.type !== 'stage') setActiveChannelId(newChannel.id);
     } catch (err) { toastError(err); }
   };
 
@@ -1863,8 +2037,12 @@ export default function App() {
     body: t('members.banBody'),
     confirmLabel: t('members.ban'),
     withReason: true,
-    onConfirm: async (reason) => {
-      await post(`/api/servers/${activeServerId}/bans/${user.id}`, { reason, deleteMessageSeconds: 0 });
+    // The dialog offers "Delete message history" (none / 1 h / 24 h / 7 d)
+    // and passes the choice as the second argument.
+    withDeleteHistory: true,
+    onConfirm: async (reason, options = {}) => {
+      const seconds = Math.max(0, Math.min(604800, Number(options?.deleteMessageSeconds ?? 0) || 0));
+      await post(`/api/servers/${activeServerId}/bans/${user.id}`, { reason, deleteMessageSeconds: seconds });
       setMembers((prev) => prev.filter((m) => m.id !== user.id));
       pushToast(t('members.banned', { name: user.display_name || user.username }), { type: 'success', ttl: 3000 });
     }
@@ -1912,8 +2090,18 @@ export default function App() {
     if (server) {
       setServers((prev) => (prev.some((s) => s.id === server.id) ? prev : [...prev, server]));
       setActiveServerId(server.id);
+      // Land in the conversation the invite pointed at (or the first text
+      // channel), with the drawer closed — not on the channel list.
+      const list = detail.channels ?? [];
+      const target = detail.channel_id ?? detail.invite?.channel_id
+        ?? list.find((c) => c.type === 'text' || c.type === 'announcement')?.id ?? null;
+      if (target) setActiveChannelId(target);
+      setMobileSidebarOpen(false);
+      setCanonicalPath(target ? `/channels/${server.id}/${target}` : '/');
+      announce(t('a11y.joinedServer', { name: server.name }));
+      return;
     }
-    window.history.replaceState(null, '', '/');
+    setCanonicalPath('/');
   };
 
   // --- derived -------------------------------------------------------------------
@@ -1930,10 +2118,6 @@ export default function App() {
     return map;
   }, [members]);
 
-  const decoratedMessages = useMemo(
-    () => messages.map((m) => ({ ...m, role_color: m.role_color ?? memberColors.get(m.user_id) ?? null })),
-    [messages, memberColors]
-  );
 
   const typingUsers = useMemo(() => {
     const users = typingByChannel[activeChannelId] ?? {};
@@ -2054,7 +2238,15 @@ export default function App() {
   const chatArea = forumView ?? (
     <ChatArea
       channel={activeChannel}
-      messages={decoratedMessages}
+      messages={messages}
+      memberColors={memberColors}
+      hasNewerHistory={hasNewerHistory}
+      onLoadNewer={handleLoadNewer}
+      onJumpToPresent={handleJumpToPresent}
+      onJumpToMessage={handleJumpToMessage}
+      onDiscardMessage={handleDiscardMessage}
+      jumpTarget={jumpTarget}
+      focusSearchSignal={focusSearchSignal}
       pins={pins}
       onSendMessage={handleSendMessage}
       onCreatePoll={handleCreatePoll}
@@ -2243,6 +2435,131 @@ export default function App() {
     voiceHost
   ) : null;
 
+  // Breakpoints as state (matchMedia listeners), for phone-only behaviour.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const phone = window.matchMedia('(max-width: 767px)');
+    const narrow = window.matchMedia('(max-width: 1023px)');
+    const onPhone = () => setIsPhone(phone.matches);
+    const onNarrow = () => {
+      setIsNarrow(narrow.matches);
+      // Crossing into a narrow layout (rotating a tablet, zooming in): the
+      // member list becomes a sheet over the chat, so put it away.
+      if (narrow.matches) setShowMemberList(false);
+    };
+    phone.addEventListener?.('change', onPhone);
+    narrow.addEventListener?.('change', onNarrow);
+    return () => {
+      phone.removeEventListener?.('change', onPhone);
+      narrow.removeEventListener?.('change', onNarrow);
+    };
+  }, []);
+
+  // Android back / browser back closes the drawer or the member sheet
+  // instead of leaving the app.
+  useBackClose(isPhone && mobileSidebarOpen && authState === true, () => setMobileSidebarOpen(false));
+  useBackClose(isNarrow && showMemberList && authState === true && activeServerId !== 'home', () => setShowMemberList(false));
+
+  // The on-screen keyboard: size the app to the *visual* viewport while it is
+  // open, so the composer sits above the keyboard on iOS and Android alike.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const root = document.documentElement;
+    const update = () => {
+      const keyboard = window.innerHeight - vv.height > 120;
+      if (keyboard) {
+        root.style.setProperty('--app-height', `${Math.round(vv.height)}px`);
+        if (window.scrollY) window.scrollTo(0, 0);
+      } else {
+        root.style.removeProperty('--app-height');
+      }
+    };
+    vv.addEventListener('resize', update);
+    update();
+    return () => vv.removeEventListener('resize', update);
+  }, []);
+
+  // Swipe (phones): right opens the channel drawer (or closes the member
+  // sheet), left closes the drawer or opens the member list — Discord's
+  // mobile gestures. Horizontal scrollers, sliders and text fields keep
+  // their own horizontal drags.
+  const swipeRef = useRef(null);
+  const onTouchStart = (e) => {
+    if (!isPhone || e.touches.length !== 1) { swipeRef.current = null; return; }
+    const target = e.target;
+    if (target.closest?.('input, textarea, [role="slider"], [data-no-swipe], .overflow-x-auto, [role="dialog"]')) { swipeRef.current = null; return; }
+    const touch = e.touches[0];
+    swipeRef.current = { x: touch.clientX, y: touch.clientY, at: Date.now() };
+  };
+  const onTouchEnd = (e) => {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!start || !e.changedTouches?.length) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Date.now() - start.at > 700 || Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+    if (dx > 0) {
+      if (showMemberList && activeServerId !== 'home') setShowMemberList(false);
+      else if (!mobileSidebarOpen) setMobileSidebarOpen(true);
+    } else if (mobileSidebarOpen) {
+      setMobileSidebarOpen(false);
+    } else if (activeServerId !== 'home' && activeChannelId && searchResults === null) {
+      setShowMemberList(true);
+    }
+  };
+
+  // Focus after a navigation (sign-in, joining, picking a channel, the quick
+  // switcher): the composer with a mouse/keyboard, the channel heading on a
+  // touch screen (focusing the composer there would pop the keyboard up).
+  // Never while a dialog is open or the drawer covers the chat.
+  useEffect(() => {
+    if (!activeChannelId || authState !== true) return undefined;
+    let frame = null;
+    let tries = 0;
+    const attempt = () => {
+      tries += 1;
+      const active = document.activeElement;
+      if (active?.closest?.('[role="dialog"], [aria-modal="true"]')) return;
+      if (mobileSidebarOpenRef.current && isNarrowViewport('(max-width: 767px)')) return;
+      const composer = document.getElementById('message-composer');
+      const heading = document.getElementById('channel-title');
+      if (!composer && !heading) { if (tries < 30) frame = requestAnimationFrame(attempt); return; }
+      const fine = isNarrowViewport('(pointer: fine)');
+      if (fine && composer && !composer.disabled) composer.focus({ preventScroll: true });
+      else heading?.focus({ preventScroll: true });
+    };
+    frame = requestAnimationFrame(attempt);
+    return () => cancelAnimationFrame(frame);
+  }, [activeChannelId, authState]);
+
+  // Every server's channels for the quick switcher (the active server's come
+  // with loadServer; the rest are fetched once, when the switcher opens).
+  const serverChannelsRef = useRef(serverChannels);
+  serverChannelsRef.current = serverChannels;
+  const loadAllServerChannels = useCallback(async () => {
+    const missing = serversRef.current.filter((sv) => !serverChannelsRef.current[sv.id]);
+    for (let i = 0; i < missing.length; i += 4) {
+      const chunk = missing.slice(i, i + 4);
+      const results = await Promise.all(chunk.map((sv) => get(`/api/servers/${sv.id}`).then(
+        (data) => [sv.id, (data?.channels ?? []).map((c) => ({ ...c, server_id: c.server_id ?? sv.id }))],
+        () => null
+      )));
+      setServerChannels((prev) => {
+        const next = { ...prev };
+        for (const entry of results) if (entry) next[entry[0]] = entry[1];
+        return next;
+      });
+    }
+  }, []);
+  const switcherChannels = useMemo(() => {
+    const byId = new Map();
+    for (const list of Object.values(serverChannels)) for (const c of list) byId.set(c.id, c);
+    for (const c of channels) if (c.server_id) byId.set(c.id, c);
+    return [...byId.values()].filter((c) => c.type !== 'category');
+  }, [serverChannels, channels]);
+
   /** What a crashed dialog's "Close" does: drop every dialog that could be it. */
   const closeAllModals = () => {
     setShowCreateServerModal(false); setShowCreateChannelModal(false); setShowEvents(false);
@@ -2290,18 +2607,24 @@ export default function App() {
       <InviteJoinScreen
         code={inviteCode}
         onJoined={handleInviteAccepted}
-        onCancel={() => { setInviteCode(null); window.history.replaceState(null, '', '/'); }}
+        onCancel={() => { setInviteCode(null); setCanonicalPath('/'); }}
       />
     );
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-d-base text-d-text font-sans antialiased">
+    <div
+      className="flex h-[var(--app-height,100dvh)] w-screen overflow-hidden overscroll-none bg-d-base text-d-text font-sans antialiased"
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+    >
+      <LiveAnnouncer />
       {/* Skip links (WCAG 2.4.1): straight to the composer or the channel
           list instead of tabbing through the rail and every message. */}
       {connection.showBanner && <ConnectionBanner status={connection.status} onRetry={connection.retry} />}
       <nav aria-label={t('a11y.skipLinks')} className="contents">
-        <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>
+        {/* Only when there is a composer to skip to (not on the friends page). */}
+        {activeChannel && activeChannel.type !== 'forum' && <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>}
         <a href="#channel-list" className="skip-link">{t('a11y.skipToChannels')}</a>
       </nav>
       <ErrorBoundary region="rail" className={RAIL_FALLBACK}>
@@ -2331,6 +2654,7 @@ export default function App() {
           readStates={readStates}
           currentUser={currentUser}
           onSelectDm={pickChannel}
+          onPrefetchChannel={prefetchChannel}
           mobileOpen={mobileSidebarOpen}
           onOpenMobile={() => setMobileSidebarOpen(true)}
           onCloseMobile={() => setMobileSidebarOpen(false)}
@@ -2358,7 +2682,9 @@ export default function App() {
           onLeaveVoice={handleLeaveVoice}
         >
           <>
-            <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{chatArea}</ErrorBoundary>
+            <main id="main-content" aria-labelledby="channel-title" className="flex-1 flex min-w-0 min-h-0">
+              <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{chatArea}</ErrorBoundary>
+            </main>
             {searchResults !== null && (
               <SearchResultsPanel
                 query={searchQuery}
@@ -2377,7 +2703,9 @@ export default function App() {
       ) : (
         <div className="flex-1 flex overflow-hidden min-w-0">
           <ErrorBoundary region="sidebar" resetKeys={[activeServerId]} className={SIDE_FALLBACK}>
+            <nav aria-label={t('a11y.channelsOf', { server: currentServer?.name ?? '' })} className="contents">
             <ChannelSidebar
+              onPrefetchChannel={prefetchChannel}
               currentServer={currentServer}
               channels={channels}
               activeChannelId={activeChannelId}
@@ -2423,8 +2751,10 @@ export default function App() {
                 } catch (err) { toastError(err); }
               }}
             />
+            </nav>
           </ErrorBoundary>
 
+          <main id="main-content" aria-labelledby="channel-title" className="flex-1 flex min-w-0 min-h-0">
           {isVoiceChannel ? (
             // A voice channel is two panes: the room on top, its own text chat
             // underneath. Both are flex children with `min-h-0`, so the video
@@ -2437,7 +2767,7 @@ export default function App() {
               {/* The live room is mounted once, higher up, and only *shown*
                   here — see voiceRoomPortal. */}
               {isConnectedHere && (
-                <div ref={voiceSlotRef} className="flex-[3] flex flex-col min-h-[16rem]" />
+                <div ref={voiceSlotRef} className="flex-[3] flex flex-col min-h-[16rem] [@media(max-height:520px)]:min-h-[12rem]" />
               )}
               {!isConnectedHere && (
                 <div className="shrink-0 px-4 py-3 border-b border-d-edge bg-d-surface/40 flex items-center gap-3">
@@ -2471,6 +2801,7 @@ export default function App() {
               <ErrorBoundary region="chat" resetKeys={[activeChannelId]}>{chatArea}</ErrorBoundary>
             </ChannelGate>
           )}
+          </main>
 
           {searchResults !== null && (
             <SearchResultsPanel
@@ -2566,14 +2897,19 @@ export default function App() {
 
       {showQuickSwitcher && (
         <QuickSwitcher
-          channels={channels}
+          channels={switcherChannels}
           dms={dmChannels}
           servers={servers}
+          readStates={readStates}
+          activeChannelId={activeChannelId}
+          onOpen={loadAllServerChannels}
+          onPrefetch={prefetchChannel}
           onClose={() => setShowQuickSwitcher(false)}
           onPick={(entry) => {
             setShowQuickSwitcher(false);
             if (entry.kind === 'server') { setActiveServerId(entry.id); return; }
-            if (entry.kind === 'dm') { setActiveServerId('home'); }
+            if (entry.kind === 'dm') setActiveServerId('home');
+            else if (entry.serverId && entry.serverId !== activeServerId) setActiveServerId(entry.serverId);
             pickChannel(entry.id);
           }}
         />
@@ -2702,7 +3038,15 @@ export default function App() {
               channel_id: targetChannelId,
               content: body,
               attachments: forwardMessage.attachments ?? [],
-              sticker_id: forwardMessage.sticker?.id ?? null
+              sticker_id: forwardMessage.sticker?.id ?? null,
+              // Forwarding v2: where it came from, so the copy can say
+              // "Forwarded" and link back (needs server support to persist).
+              forwarded_from: {
+                message_id: forwardMessage.id,
+                channel_id: forwardMessage.channel_id,
+                guild_id: forwardMessage.server_id ?? null,
+                created_at: forwardMessage.created_at
+              }
             });
             pushToast(t('chat.forwarded'), { type: 'success', ttl: 3000 });
           }}

@@ -8,9 +8,11 @@
 //  the way Discord's client does. Code spans and blocks are left alone.
 // ============================================================================
 
+import { emojiFor } from '../chat/emojiShortcodes.js';
+
 const USER = /(^|[\s(>*_~|])@([\p{L}\p{M}\p{N}_.-]+)/gu;
 const CHANNEL = /(^|[\s(>*_~|])#([\p{L}\p{M}\p{N}_-]+)/gu;
-const EMOJI = /(^|[^<\w]):([\w-]{2,32}):(?!\d)/g;
+const EMOJI = /(^|[^<\w]):([\w+-]{1,32}):(?!\d)/g;
 
 const lower = (s) => String(s ?? '').toLowerCase();
 
@@ -44,7 +46,10 @@ function resolvePlain(text, { members, channels, customEmojis }) {
   });
   out = out.replace(EMOJI, (whole, lead, name) => {
     const emoji = customEmojis.find((e) => e.name === name) ?? customEmojis.find((e) => lower(e.name) === lower(name));
-    return emoji ? `${lead}<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>` : whole;
+    if (emoji) return `${lead}<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>`;
+    // Not a server emoji: a unicode shortcode (`:fire:` → 🔥), as Discord does.
+    const char = emojiFor(name);
+    return char ? `${lead}${char}` : whole;
   });
   return out;
 }
