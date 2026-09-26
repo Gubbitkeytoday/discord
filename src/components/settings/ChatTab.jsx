@@ -1,8 +1,9 @@
 import React from 'react';
 import { useUserSettings } from '../../hooks/useUserSettings';
-import { t } from '../../i18n/index.jsx';
+import { t, localeTag, getAvailableLocales, currentLocaleCode } from '../../i18n/index.jsx';
+import { targetLanguage } from '../../translation';
 import {
-  PageHeader, Section, SettingToggle, RadioList, ResetButton, Divider
+  PageHeader, Section, SettingToggle, RadioList, ResetButton, Divider, Select
 } from './primitives';
 
 const SPOILER_MODES = () => [
@@ -12,6 +13,20 @@ const SPOILER_MODES = () => [
 ];
 
 /** Text & Images: what actually renders inside a message. */
+function languageLabel(code) {
+  try { return new Intl.DisplayNames([localeTag()], { type: 'language' }).of(code) ?? code; } catch { return code; }
+}
+
+/** One option per distinct target the app's own locales map to, by name. */
+function translationTargets() {
+  const seen = new Map();
+  for (const { code } of getAvailableLocales()) {
+    const target = targetLanguage(code);
+    if (!seen.has(target)) seen.set(target, { code: target, label: languageLabel(target) });
+  }
+  return [...seen.values()].sort((a, b) => a.label.localeCompare(b.label, localeTag()));
+}
+
 export default function ChatTab() {
   const { prefs, update, reset } = useUserSettings();
   const chat = prefs.chat;
@@ -90,6 +105,24 @@ export default function ChatTab() {
           onChange={(value) => set({ showTypingIndicator: value })}
           last
         />
+      </Section>
+
+      <Divider />
+
+      <Section title={t('chatTab.translation')} description={t('chatTab.translateTargetHint')}>
+        <Select
+          id="translate-target"
+          label={t('chatTab.translateTarget')}
+          value={chat.translateTarget ?? ''}
+          onChange={(value) => set({ translateTarget: value })}
+        >
+          <option value="">
+            {t('chatTab.translateTargetDefault', { lang: languageLabel(targetLanguage(currentLocaleCode())) })}
+          </option>
+          {translationTargets().map(({ code, label }) => (
+            <option key={code} value={code}>{label}</option>
+          ))}
+        </Select>
       </Section>
 
       <Divider />

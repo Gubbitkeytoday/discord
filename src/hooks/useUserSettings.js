@@ -66,6 +66,9 @@ export const PREFERENCE_DEFAULTS = {
     // null to turn the gesture off entirely — some people double-click to
     // select text and would rather not leave a heart behind every time.
     tapToReactEmoji: '❤️',
+    // Language the Translate button translates into; '' follows the app
+    // language (see src/translation/translationClient.js).
+    translateTarget: '',
     developerMode: false
   },
   privacy: {

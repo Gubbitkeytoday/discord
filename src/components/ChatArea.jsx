@@ -51,6 +51,7 @@ import { useUserSettings } from '../hooks/useUserSettings';
 import ComposerAutocomplete, { detectTrigger, buildOptions } from './ComposerAutocomplete';
 import { proxiedImageUrl, cssImageUrl } from '../utils/media';
 import { localizeError } from '../api';
+import { TranslateButton, TranslatedText } from '../translation';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const QUICK_EMOJIS = ['❤️', '🔥', '👍', '😂', '🎉', '🚀', '💯', '💩', '✨'];
@@ -1374,6 +1375,9 @@ export default function ChatArea({
                       </div>
                     ) : null
                   )}
+                  {editingId !== msg.id && msg.content && !msg.pending && !msg.failed && (
+                    <TranslatedText message={msg} render={(text) => parseDiscordMarkdown(text, markdownContext)} />
+                  )}
 
                   {Boolean(msg.poll) && (
                     <PollCard
@@ -1520,6 +1524,7 @@ export default function ChatArea({
                         <Reply className="w-4 h-4" />
                       </button>
                     )}
+                    {msg.content && <TranslateButton message={msg} onDone={() => setTouchActionsId(null)} />}
                     {isOwn && (
                       <button
                         type="button"

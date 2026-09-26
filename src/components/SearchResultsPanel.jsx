@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { X, Hash, Users, Paperclip } from 'lucide-react';
+import { X, Hash, Users, Paperclip, Loader2 } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
@@ -11,7 +11,9 @@ const FALLBACK_AVATAR = DEFAULT_AVATAR;
  * Discord's right-hand search results rail. Results are grouped by channel and
  * can be narrowed further without re-running the query.
  */
-export default function SearchResultsPanel({ query, results = [], channels = [], onJumpToMessage, onClose }) {
+export default function SearchResultsPanel({
+  query, results = [], channels = [], onJumpToMessage, onClose, hasMore = false, loadingMore = false, onLoadMore
+}) {
   const [channelFilter, setChannelFilter] = useState('');
   const [authorFilter, setAuthorFilter] = useState('');
   const [attachmentsOnly, setAttachmentsOnly] = useState(false);
@@ -119,6 +121,18 @@ export default function SearchResultsPanel({ query, results = [], channels = [],
             </div>
           </button>
         ))}
+        {hasMore && onLoadMore && (
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            data-testid="search-load-more"
+            className="w-full text-xs font-semibold text-d-link hover:underline disabled:opacity-60 py-2 flex items-center justify-center gap-1.5"
+          >
+            {loadingMore && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {loadingMore ? t('common.loading') : t('search.loadMore')}
+          </button>
+        )}
       </div>
     </aside>
   );

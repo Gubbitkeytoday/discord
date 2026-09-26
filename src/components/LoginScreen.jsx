@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
-import { LogIn, UserPlus, AlertTriangle, Loader2, ArrowLeft, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { LogIn, UserPlus, AlertTriangle, Loader2, ArrowLeft, ShieldCheck, Fingerprint } from 'lucide-react';
 import { post, setApiIdentity } from '../api';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
 import { LanguageMenu } from '../i18n/LanguagePicker.jsx';
 import { proxiedImageUrl } from '../utils/media';
+import {
+  passkeysAvailable, conditionalUiAvailable, signInWithPasskey, cancelPasskeyCeremony
+} from '../auth/passkeys';
 
 /**
  * Real login / registration against /api/auth. Shown when there is no session.
@@ -17,9 +20,62 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(initialNotice);
   const [busy, setBusy] = useState(false);
+  const [passkeys, setPasskeys] = useState(false);   // server + browser support
+  const mounted = useRef(true);
+  // Bumped after a failed attempt so the autofill ceremony (cancelled by the
+  // attempt) is offered again.
+  const [autofillRound, setAutofillRound] = useState(0);
+
+  /** Both the button and the autofill end here with { user, token }. */
+  const finishPasskey = useCallback((data) => {
+    if (!data?.user?.id) throw Object.assign(new Error(t('apiError.generic', { code: 'NO_SESSION' })), { code: 'NO_SESSION' });
+    setApiIdentity({ userId: data.user.id, token: data.token });
+    onAuthenticated(data.user, data.token);
+  }, [onAuthenticated]);
+
+  useEffect(() => {
+    mounted.current = true;
+    passkeysAvailable().then((ok) => { if (mounted.current) setPasskeys(ok); }).catch(() => {});
+    return () => { mounted.current = false; cancelPasskeyCeremony(); };
+  }, []);
+
+  // Conditional UI: offer saved passkeys in the username field's autofill
+  // while the sign-in form is showing. The ceremony waits until the user
+  // picks one (or it is cancelled when the form is submitted / left).
+  useEffect(() => {
+    if (mode !== 'login') return undefined;
+    let cancelled = false;
+    (async () => {
+      if (!(await conditionalUiAvailable()) || cancelled) return;
+      try {
+        const data = await signInWithPasskey({ conditional: true });
+        if (!cancelled && mounted.current) finishPasskey(data);
+      } catch (err) {
+        if (!cancelled && mounted.current && !err?.cancelled) setError(err?.message ?? String(err));
+      }
+    })();
+    return () => { cancelled = true; cancelPasskeyCeremony(); };
+  }, [mode, finishPasskey, autofillRound]);
+
+  const passkeyLogin = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      // The modal request replaces a pending autofill one.
+      await cancelPasskeyCeremony();
+      finishPasskey(await signInWithPasskey());
+    } catch (err) {
+      if (!err?.cancelled) setError(err?.message ?? String(err));
+      if (mounted.current) setAutofillRound((n) => n + 1);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
 
   const submit = async (event) => {
     event.preventDefault();
+    if (mode === 'login') cancelPasskeyCeremony();
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -54,6 +110,7 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
         return;
       }
       setError(err.message);
+      if (mode === 'login') setAutofillRound((n) => n + 1);
     } finally {
       setBusy(false);
     }
@@ -172,7 +229,7 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
                 <input
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
-                  autoComplete="username"
+                  autoComplete={mode === 'login' && passkeys ? 'username webauthn' : 'username'}
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
@@ -254,6 +311,26 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
               : mode === 'mfa' ? t('auth.mfaVerify')
               : t('auth.sendResetLink')}
           </button>
+
+          {mode === 'login' && passkeys && (
+            <>
+              <div className="flex items-center gap-3 my-3 text-[11px] uppercase text-d-text4" aria-hidden="true">
+                <span className="flex-1 h-px bg-d-edge" />
+                {t('passkeys.or')}
+                <span className="flex-1 h-px bg-d-edge" />
+              </div>
+              <button
+                type="button"
+                onClick={passkeyLogin}
+                disabled={busy}
+                data-testid="passkey-login"
+                className="w-full bg-d-surface hover:bg-d-hover disabled:opacity-50 text-d-strong font-semibold py-2.5 rounded border border-d-edge transition-colors flex items-center justify-center gap-2"
+              >
+                <Fingerprint className="w-4 h-4" />
+                {t('passkeys.signIn')}
+              </button>
+            </>
+          )}
 
           {(mode === 'login' || mode === 'register') && (
             <p className="text-xs text-d-text3 mt-3">

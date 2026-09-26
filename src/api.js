@@ -85,7 +85,7 @@ export function localizeError(data, status) {
  * api('/api/servers', { method: 'POST', body })  JSON body
  * api('/api/upload/avatar', { method: 'POST', body: formData })  multipart
  */
-export async function api(path, { method = 'GET', body, headers = {}, signal } = {}) {
+export async function api(path, { method = 'GET', body, headers = {}, signal, withHeaders = false } = {}) {
   const isForm = typeof FormData !== 'undefined' && body instanceof FormData;
   const res = await fetch(path, {
     method,
@@ -110,7 +110,9 @@ export async function api(path, { method = 'GET', body, headers = {}, signal } =
       status: res.status, code: data?.code, details: data?.details
     });
   }
-  return data;
+  // `withHeaders` is for the few endpoints that page through a response
+  // header (search's X-Next-Cursor).
+  return withHeaders ? { data, headers: res.headers } : data;
 }
 
 export const get  = (path, opts) => api(path, { ...opts, method: 'GET' });
