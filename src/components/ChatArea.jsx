@@ -1729,6 +1729,7 @@ export default function ChatArea({
           {/* textarea, not input: Shift+Enter must insert a newline like Discord */}
           <textarea
             ref={textareaRef}
+            id="message-composer"
             value={inputText}
             onChange={(e) => {
               setInputText(e.target.value);

@@ -161,7 +161,7 @@ export default function HomeDirectMessages({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5">
+        <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5 focus:outline-none">
           <div className="px-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider mb-1 mt-2">
             <span>{t('dm.directMessages')}</span>
             <button

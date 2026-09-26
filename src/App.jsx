@@ -43,6 +43,7 @@ const CreateGroupDmModal = lazyComponent(() => import('./components/CreateGroupD
 const EditHistoryModal = lazyComponent(() => import('./components/EditHistoryModal'));
 const SearchResultsPanel = lazyComponent(() => import('./components/SearchResultsPanel'));
 const InviteModal = lazyComponent(() => import('./components/InviteModal'));
+const ShortcutsModal = lazyComponent(() => import('./components/ShortcutsModal'));
 const CreateChannelModal = lazyComponent(() => import('./components/CreateChannelModal'));
 const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
 const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
@@ -197,7 +198,8 @@ export default function App() {
   const [activeCall, setActiveCall] = useState(null);       // { channelId, call }
   const [showGroupDmModal, setShowGroupDmModal] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
-  const [inviteFor, setInviteFor] = useState(null);   // { server, channelId } for the invite dialog
+  const [inviteFor, setInviteFor] = useState(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);   // { server, channelId } for the invite dialog
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const { prefs } = useUserSettings();
   // A preference that failed to save has already been rolled back; say so.
@@ -1046,6 +1048,7 @@ export default function App() {
     togglePins: () => setShowPinsFromSlash(Date.now()),
     search: () => setShowQuickSwitcher(true),
     openSettings: () => setShowUserSettingsModal(true),
+    openShortcuts: () => setShowShortcuts((v) => !v),
     openEvents: () => { if (activeServerId !== 'home') setShowEvents(true); },
     toggleEmojiPicker: () => setOpenEmojiSignal(Date.now()),
     toggleFormatting: () => setToggleFormattingSignal(Date.now()),
@@ -2071,6 +2074,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-d-base text-d-text font-sans antialiased">
+      {/* Skip links (WCAG 2.4.1): straight to the composer or the channel
+          list instead of tabbing through the rail and every message. */}
+      <nav aria-label={t('a11y.skipLinks')} className="contents">
+        <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>
+        <a href="#channel-list" className="skip-link">{t('a11y.skipToChannels')}</a>
+      </nav>
       <ServerRail
         servers={servers}
         serverSettings={serverSettings}
@@ -2507,6 +2516,13 @@ export default function App() {
       {voiceRoomPortal}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      {showShortcuts && (
+        <ShortcutsModal
+          onClose={() => setShowShortcuts(false)}
+          onOpenKeybinds={() => { setShowShortcuts(false); setShowUserSettingsModal('keybinds'); }}
+        />
+      )}
 
       {inviteFor && (
         <InviteModal

@@ -466,3 +466,18 @@ input[type="range"] { height: 1.25rem; }
   font-size: 0.8125rem;
   line-height: 1.6;
 }
+
+/* Skip links: invisible until focused, then pinned top-left above everything. */
+.skip-link {
+  position: fixed;
+  left: 8px;
+  top: -64px;
+  z-index: 200;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--color-d-brand);
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+}
+.skip-link:focus { top: 8px; }

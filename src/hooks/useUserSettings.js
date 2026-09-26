@@ -107,7 +107,8 @@ export const PREFERENCE_DEFAULTS = {
     toggleEmojiPicker: 'Ctrl+E',
     openEvents: 'Ctrl+Shift+E',
     toggleFormatting: 'Ctrl+Shift+F',
-    jumpToHome: 'Ctrl+Shift+Home'
+    jumpToHome: 'Ctrl+Shift+Home',
+    openShortcuts: 'Ctrl+Slash'
   },
   voice: {
     inputMode: 'voice',

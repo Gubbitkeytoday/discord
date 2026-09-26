@@ -231,7 +231,7 @@ export default function ChannelSidebar({
       </div>
 
       {/* Channels */}
-      <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+      <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 py-3 space-y-4 focus:outline-none">
         {grouped.map(([category, list]) => {
           const isCollapsed = collapsed[category];
           const visible = isCollapsed

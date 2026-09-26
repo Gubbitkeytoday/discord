@@ -5,7 +5,7 @@ import { describeKeyEvent, formatBinding, findConflicts } from '../../hooks/useK
 import { t } from '../../i18n/index.jsx';
 import { PageHeader, Section, Row, ResetButton, Note } from './primitives';
 
-const GROUPS = () => [
+export const keybindGroups = () => [
   {
     title: t('keys.groupVoice'),
     actions: [
@@ -45,7 +45,8 @@ const GROUPS = () => [
     actions: [
       { key: 'openSettings',       label: t('keys.openSettings') },
       { key: 'openEvents',         label: t('keys.openEvents') },
-      { key: 'toggleStreamerMode', label: t('keys.toggleStreamerMode') }
+      { key: 'toggleStreamerMode', label: t('keys.toggleStreamerMode') },
+      { key: 'openShortcuts',      label: t('shortcuts.title') }
     ]
   }
 ];
@@ -82,7 +83,7 @@ export default function KeybindsTab({ onToast }) {
         </div>
       )}
 
-      {GROUPS().map((group) => (
+      {keybindGroups().map((group) => (
         <Section key={group.title} title={group.title}>
           {group.actions.map((action, index) => {
             const isCapturing = capturing === action.key;
