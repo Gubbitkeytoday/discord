@@ -706,7 +706,7 @@ export default {
   'members.transferBody': '{name} becomes the owner and can remove you or delete the server. You cannot take it back yourself.',
   'members.noMatch': 'No members match “{query}”',
   'members.copyUserId': 'Copy user ID',
-  'roles.dragToReorder': 'Drag to reorder',
+  'roles.dragToReorder': 'Drag, or press Alt+↑ / Alt+↓, to reorder',
   'perms.roles': 'Roles',
   'perms.members': 'Members',
   'perms.member': '@{name}',
@@ -1674,4 +1674,9 @@ export default {
   'insights.lastDays_one': 'Last {n} day',
   'roles.create': 'Create role',
   'settings.saveFailedReverted': 'Could not save your setting, so it was changed back. {reason}',
+  'bans.unbanTitle': 'Unban {name}?',
+  'bans.unbanBody': 'They will be able to rejoin this server with an invite.',
+  'roles.moveUp': 'Move {name} up',
+  'roles.moveDown': 'Move {name} down',
+  'roles.moved': '{name} moved to position {position}',
 };

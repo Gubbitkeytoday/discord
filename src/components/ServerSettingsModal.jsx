@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
-  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3
+  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3,
+  ChevronUp, ChevronDown
 } from 'lucide-react';
 
 import { useDialog, UnsavedBar, useReportDirty } from './settings/primitives';
@@ -697,18 +698,34 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
    * first. The server rejects any move that would put a role at or above the
    * actor's own highest role, so hierarchy stays enforced server-side.
    */
-  const dropOn = async (targetId) => {
-    if (!dragId || dragId === targetId) { setDragId(null); return; }
+  const moveRole = async (roleId, to) => {
     const ordered = roles.filter((r) => !r.is_everyone).map((r) => r.id);
-    const from = ordered.indexOf(dragId);
-    const to = ordered.indexOf(targetId);
-    if (from === -1 || to === -1) { setDragId(null); return; }
+    const from = ordered.indexOf(roleId);
+    if (from === -1 || to < 0 || to >= ordered.length || from === to) return false;
     ordered.splice(to, 0, ordered.splice(from, 1)[0]);
-    setDragId(null);
     try {
       await api('/roles/order', { method: 'PUT', body: { order: ordered } });
       await reload();
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+      return true;
+    } catch (err) { onToast?.(err.message, { type: 'error' }); return false; }
+  };
+
+  const dropOn = async (targetId) => {
+    const source = dragId;
+    setDragId(null);
+    if (!source || source === targetId) return;
+    const to = roles.filter((r) => !r.is_everyone).findIndex((r) => r.id === targetId);
+    await moveRole(source, to);
+  };
+
+  /** Keyboard alternative to dragging: Move up / Move down, and Alt+↑/↓. */
+  const nudgeRole = async (roleId, delta) => {
+    const list = roles.filter((r) => !r.is_everyone);
+    const from = list.findIndex((r) => r.id === roleId);
+    const moved = await moveRole(roleId, from + delta);
+    if (moved) {
+      onToast?.(t('roles.moved', { name: list[from].name, position: from + delta + 1 }), { type: 'success', ttl: 1500 });
+    }
   };
 
   const selected = roles.find((r) => r.id === selectedId) ?? null;
@@ -791,11 +808,20 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
       <div className="flex gap-6">
         {/* Role list, highest first — the same order that decides hierarchy. */}
         <div className="w-52 shrink-0 space-y-0.5">
-          {roles.map((role) => (
+          {roles.map((role, index) => {
+            const movable = !role.is_everyone;
+            const lastMovable = roles.filter((r) => !r.is_everyone).length - 1;
+            return (
+            <div key={role.id} className="group/role relative flex items-center">
             <button
-              key={role.id}
               onClick={() => selectRole(role.id)}
+              onKeyDown={(e) => {
+                if (!movable || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                e.preventDefault();
+                nudgeRole(role.id, e.key === 'ArrowUp' ? -1 : 1);
+              }}
               aria-current={selectedId === role.id ? 'true' : undefined}
+              aria-keyshortcuts={movable ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
               draggable={!role.is_everyone}
               onDragStart={() => setDragId(role.id)}
               onDragOver={(e) => { if (dragId && !role.is_everyone) e.preventDefault(); }}
@@ -812,9 +838,35 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                 style={{ backgroundColor: role.color || '#99aab5' }}
               />
               <span className="text-sm text-d-strong truncate flex-1">{role.name}</span>
-              <span className="text-[10px] text-d-text3 shrink-0">{role.member_count}</span>
+              <span className="text-[10px] text-d-text3 shrink-0 group-hover/role:invisible group-focus-within/role:invisible">{role.member_count}</span>
             </button>
-          ))}
+            {movable && (
+              <span className="absolute right-1 flex opacity-0 group-hover/role:opacity-100 group-focus-within/role:opacity-100">
+                <button
+                  type="button"
+                  onClick={() => nudgeRole(role.id, -1)}
+                  disabled={index === 0}
+                  aria-label={t('roles.moveUp', { name: role.name })}
+                  title={t('roles.moveUp', { name: role.name })}
+                  className="p-0.5 rounded text-d-text3 hover:text-d-strong hover:bg-d-hover disabled:opacity-30"
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => nudgeRole(role.id, 1)}
+                  disabled={index >= lastMovable}
+                  aria-label={t('roles.moveDown', { name: role.name })}
+                  title={t('roles.moveDown', { name: role.name })}
+                  className="p-0.5 rounded text-d-text3 hover:text-d-strong hover:bg-d-hover disabled:opacity-30"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+              </span>
+            )}
+            </div>
+            );
+          })}
         </div>
 
         {/* Editor */}
@@ -1451,6 +1503,8 @@ function InvitesTab({ invites, api, reload, channels, onToast }) {
 // --- Bans --------------------------------------------------------------------
 
 function BansTab({ bans, api, reload, onToast }) {
+  // Unbanning lets someone straight back in; ask first, as Discord does.
+  const [confirmUnban, setConfirmUnban] = useState(null);
   return (
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-5">{t('bans.count', { count: bans.length })}</h1>
@@ -1468,10 +1522,9 @@ function BansTab({ bans, api, reload, onToast }) {
               </p>
             </div>
             <button
-              onClick={async () => {
-                try { await api(`/bans/${ban.user_id}`, { method: 'DELETE' }); await reload(); onToast?.(t('bans.unbanned'), { type: 'success', ttl: 2500 }); }
-                catch (err) { onToast?.(err.message, { type: 'error' }); }
-              }}
+              type="button"
+              onClick={() => setConfirmUnban(ban)}
+              aria-label={`${t('bans.unban')} ${ban.display_name ?? ban.username}`}
               className="text-xs text-d-link hover:underline shrink-0"
             >
               {t('bans.unban')}
@@ -1479,6 +1532,20 @@ function BansTab({ bans, api, reload, onToast }) {
           </div>
         ))}
       </div>
+      {confirmUnban && (
+        <ConfirmModal
+          title={t('bans.unbanTitle', { name: confirmUnban.display_name ?? confirmUnban.username })}
+          body={t('bans.unbanBody')}
+          confirmLabel={t('bans.unban')}
+          danger={false}
+          onConfirm={async () => {
+            await api(`/bans/${confirmUnban.user_id}`, { method: 'DELETE' });
+            await reload();
+            onToast?.(t('bans.unbanned'), { type: 'success', ttl: 2500 });
+          }}
+          onClose={() => setConfirmUnban(null)}
+        />
+      )}
     </div>
   );
 }

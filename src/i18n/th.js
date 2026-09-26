@@ -706,7 +706,7 @@ export default {
   'members.transferBody': '{name} จะเป็นเจ้าของ และสามารถเอาคุณออกหรือลบเซิร์ฟเวอร์ได้ คุณเอาคืนเองไม่ได้',
   'members.noMatch': 'ไม่พบสมาชิกที่ตรงกับ “{query}”',
   'members.copyUserId': 'คัดลอก ID ผู้ใช้',
-  'roles.dragToReorder': 'ลากเพื่อจัดลำดับ',
+  'roles.dragToReorder': 'ลาก หรือกด Alt+↑ / Alt+↓ เพื่อจัดลำดับ',
   'perms.roles': 'บทบาท',
   'perms.members': 'สมาชิก',
   'perms.member': '@{name}',
@@ -1674,4 +1674,9 @@ export default {
   'insights.lastDays_one': '{n} วันล่าสุด',
   'roles.create': 'สร้างบทบาท',
   'settings.saveFailedReverted': 'บันทึกการตั้งค่าไม่สำเร็จ จึงเปลี่ยนกลับเป็นค่าเดิม {reason}',
+  'bans.unbanTitle': 'ยกเลิกแบน {name}?',
+  'bans.unbanBody': 'ผู้ใช้นี้จะกลับเข้าร่วมเซิร์ฟเวอร์ได้อีกครั้งด้วยคำเชิญ',
+  'roles.moveUp': 'เลื่อน {name} ขึ้น',
+  'roles.moveDown': 'เลื่อน {name} ลง',
+  'roles.moved': 'ย้าย {name} ไปลำดับที่ {position} แล้ว',
 };
