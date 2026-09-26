@@ -41,6 +41,7 @@
     "express": "^4.21.2",
     "lucide-react": "^0.469.0",
     "multer": "^2.2.0",
+    "pg": "^8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "socket.io": "^4.8.1",

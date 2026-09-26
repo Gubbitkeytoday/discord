@@ -1,31 +1,49 @@
-// SQLite access layer: connection, promise helpers, transactions, migrations.
+// Database access layer: driver selection, promise helpers, transactions,
+// migrations.
 //
-// Exports runQuery / getQuery / allQuery / initDB and the raw `db` handle so
-// existing callers keep working unchanged.
+//   DATABASE_URL=postgres://…  → PostgreSQL (db/postgres.js, pooled)
+//   otherwise                  → SQLite at DB_PATH (db/sqlite.js)
+//
+// Callers use runQuery / getQuery / allQuery / transaction with `?`
+// placeholders, and the `sql` fragments from db/dialect.js wherever the two
+// engines genuinely differ. See DEPLOYMENT.md for the operational side.
 
-import sqlite3 from 'sqlite3';
+// dialect.js loads .env, so it must stay the first import.
+import { DIALECT, isPostgres, sql } from './db/dialect.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
-import { AsyncLocalStorage } from 'async_hooks';
+import { createSqliteDriver } from './db/sqlite.js';
 import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-if (!process.env.NODE_TEST_CONTEXT && process.env.NODE_ENV !== 'test') {
-  try {
-    process.loadEnvFile?.();
-  } catch {}
-}
+export { sql, DIALECT, isPostgres };
 
 export const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'discord.db');
 const SCHEMA_PATH = path.join(__dirname, 'db', 'schema.sql');
+const PG_SCHEMA_PATH = path.join(__dirname, 'db', 'schema.pg.sql');
+
+/**
+ * db/schema.pg.sql is the Postgres baseline and already contains everything
+ * SQLite migrations 1..PG_BASELINE_VERSION add, so on Postgres those versions
+ * are recorded as applied when the baseline is created. Every migration after
+ * it must provide a `postgres` implementation alongside the SQLite `up`.
+ */
+const PG_BASELINE_VERSION = 17;
+
+// Arbitrary but fixed: every instance contends for the same advisory lock, so
+// only one of several processes booting at once runs migrations and seeding.
+const MIGRATION_LOCK_KEY = 7_311_452_019;
 
 /**
  * Ordered migrations applied after schema.sql. schema.sql is the baseline for a
  * fresh database (every statement is CREATE ... IF NOT EXISTS); these handle
  * changes that an existing database cannot pick up from it.
+ *
+ * `up` is the SQLite implementation. From v18 on, each entry also needs a
+ * `postgres` implementation (see PG_BASELINE_VERSION).
  */
 const MIGRATIONS = [
   { version: 1, name: 'initial full schema', up: async () => {} },
@@ -394,112 +412,113 @@ for (let i = 1; i < MIGRATIONS.length; i += 1) {
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 
-const verbose = process.env.SQL_DEBUG === '1' ? sqlite3.verbose() : sqlite3;
-
-const db = new verbose.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('❌ Error opening SQLite database:', err.message);
-    process.exit(1);
+for (const migration of MIGRATIONS) {
+  if (migration.version > PG_BASELINE_VERSION && typeof migration.postgres !== 'function') {
+    throw new Error(`Migration v${migration.version} has no postgres implementation`);
   }
-  // Inside `node --test` the child's stdout is the runner's own channel, and a
-  // stray banner from a directly-imported module corrupts it.
-  if (!process.env.NODE_TEST_CONTEXT) {
-    console.log(`🗄️  Connected to SQLite database: ${path.basename(DB_PATH)}`);
-  }
-});
+}
 
-// Serialize writes so concurrent socket handlers never interleave a transaction.
-db.serialize();
+// Inside `node --test` the child's stdout is the runner's own channel, and a
+// stray banner from a directly-imported module corrupts it.
+const quiet = Boolean(process.env.NODE_TEST_CONTEXT);
+
+const driver = isPostgres
+  ? (await import('./db/postgres.js')).createPgDriver(process.env, { quiet })
+  : createSqliteDriver({ dbPath: DB_PATH, verbose: process.env.SQL_DEBUG === '1', quiet });
 
 // --- promise helpers ---------------------------------------------------------
 
-export const runQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(decorate(err, sql));
-      else resolve(this); // { lastID, changes }
-    });
-  });
+/** Execute a statement. Resolves to { changes, lastID } (plus `rows` on Postgres). */
+export const runQuery = (text, params = []) => driver.run(text, params);
 
-export const getQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(decorate(err, sql));
-      else resolve(row);
-    });
-  });
+/** First row, or undefined. */
+export const getQuery = (text, params = []) => driver.get(text, params);
 
-export const allQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(decorate(err, sql));
-      else resolve(rows ?? []);
-    });
-  });
+/** All rows (never null). */
+export const allQuery = (text, params = []) => driver.all(text, params);
 
-export const execScript = (sql) =>
-  new Promise((resolve, reject) => {
-    db.exec(sql, (err) => (err ? reject(decorate(err, sql)) : resolve()));
-  });
-
-function decorate(err, sql) {
-  err.sql = String(sql).trim().slice(0, 200);
-  return err;
-}
+/** Several statements, no parameters (schema scripts). */
+export const execScript = (text) => driver.exec(text);
 
 /**
  * Run `fn` inside a transaction, rolling back on any throw.
  *
- * There is one connection and SQLite has no nested transactions, so concurrent
- * callers are *serialised* rather than interleaved. A plain boolean guard is
- * not enough: it cannot tell a nested call from a concurrent one, so a second
- * request arriving mid-transaction would run its writes inside — and be
- * committed or rolled back by — the first one's transaction.
+ * Every query on fn's async call stack joins the transaction — including ones
+ * made deep inside helpers — and no query from any other request does. A
+ * nested transaction() is a SAVEPOINT: if it throws, only its own writes are
+ * undone and the error propagates to the enclosing fn.
  *
- * Nesting is detected with AsyncLocalStorage (a nested call really does join
- * the outer transaction, which is what callers expect); everything else queues
- * behind a promise chain and gets a transaction of its own.
+ * SQLite runs transactions one at a time (and queues writes made outside one
+ * behind it). Postgres runs them concurrently at SERIALIZABLE isolation and
+ * re-runs fn after a serialization failure or deadlock, so fn may execute
+ * more than once: keep socket emits and other side effects outside it.
+ *
+ * `opts` (Postgres only): { isolation: 'read committed' | 'repeatable read' |
+ * 'serializable', retries }.
  */
-const transactionContext = new AsyncLocalStorage();
-let transactionQueue = Promise.resolve();
+export const transaction = (fn, opts) => driver.transaction(fn, opts);
 
-export function transaction(fn) {
-  // Already inside one on this async call stack: join it.
-  if (transactionContext.getStore()) return fn();
+/** True when the caller is inside a transaction(). */
+export const inTransaction = () => driver.inTransaction();
 
-  const run = async () => {
-    await runQuery('BEGIN IMMEDIATE');
-    try {
-      const result = await transactionContext.run({ depth: 1 }, fn);
-      await runQuery('COMMIT');
-      return result;
-    } catch (err) {
-      try { await runQuery('ROLLBACK'); } catch { /* already rolled back */ }
-      throw err;
-    }
-  };
+// --- error classification ----------------------------------------------------
 
-  // Queue behind whatever is already running, but never let one caller's
-  // failure break the chain for the next.
-  const result = transactionQueue.then(run, run);
-  transactionQueue = result.then(() => {}, () => {});
-  return result;
+const sqliteConstraint = (err, pattern) =>
+  err?.code === 'SQLITE_CONSTRAINT' && pattern.test(String(err.message));
+
+/** A UNIQUE / PRIMARY KEY violation, on either engine. */
+export function isUniqueViolation(err) {
+  return (err?.isDatabaseError && err.code === '23505') || sqliteConstraint(err, /UNIQUE|PRIMARY KEY/);
+}
+
+/** A FOREIGN KEY violation, on either engine. */
+export function isForeignKeyViolation(err) {
+  return (err?.isDatabaseError && err.code === '23503') || sqliteConstraint(err, /FOREIGN KEY/);
+}
+
+/** Any integrity-constraint violation (unique, FK, NOT NULL, CHECK), on either engine. */
+export function isConstraintViolation(err) {
+  if (!err?.isDatabaseError) return false;
+  return err.code === 'SQLITE_CONSTRAINT' || (typeof err.code === 'string' && err.code.startsWith('23'));
+}
+
+// --- health ------------------------------------------------------------------
+
+/** Driver details for logs and /api/health. Never includes credentials. */
+export const dbInfo = () => driver.info();
+
+/** Round-trip the database, bounded by `timeoutMs`. Never throws. */
+export async function dbHealth({ timeoutMs = 3000 } = {}) {
+  let timer;
+  try {
+    const result = await Promise.race([
+      driver.ping(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no response within ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+    return { ...dbInfo(), reachable: true, ...result };
+  } catch (err) {
+    return { ...dbInfo(), reachable: false, ok: false, error: err.message };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- schema management -------------------------------------------------------
 
 async function tableExists(name) {
-  const row = await getQuery(
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, [name]
-  );
-  return Boolean(row);
+  const row = isPostgres
+    ? await getQuery(`SELECT to_regclass(?) IS NOT NULL AS present`, [name])
+    : await getQuery(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`, [name]);
+  return Boolean(row?.present);
 }
 
 /**
  * The prototype schema had no schema_migrations table and a much thinner shape
  * (no roles, no files registry, reactions as a JSON blob). There is no sensible
  * column-by-column upgrade path and the only data in it is seed data, so back
- * the file up and rebuild.
+ * the file up and rebuild. SQLite only: Postgres support postdates it.
  */
 async function rebuildLegacySchema() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -533,7 +552,11 @@ export function shouldSeed(env = process.env) {
   return env.NODE_ENV !== 'production';
 }
 
-export async function initDB({ seed = shouldSeed() } = {}) {
+const logMigration = (migration) => {
+  if (!quiet) console.log(`📐 Applied migration v${migration.version} — ${migration.name}`);
+};
+
+async function initSqlite({ seed }) {
   // WAL keeps readers unblocked while a write transaction is open — needed once
   // socket handlers and HTTP routes write concurrently.
   await runQuery('PRAGMA journal_mode = WAL');
@@ -566,22 +589,77 @@ export async function initDB({ seed = shouldSeed() } = {}) {
     };
     if (migration.unsafeOutsideTransaction) await runIt();
     else await transaction(runIt);
-    if (!process.env.NODE_TEST_CONTEXT) {
-      console.log(`📐 Applied migration v${migration.version} — ${migration.name}`);
-    }
+    logMigration(migration);
   }
 
   if (seed) await seedDatabase({ runQuery, getQuery, transaction });
 
   await runQuery('PRAGMA optimize');
-  return db;
 }
 
-/** Flush WAL and close cleanly. */
-export function closeDB() {
-  return new Promise((resolve) => {
-    db.run('PRAGMA wal_checkpoint(TRUNCATE)', () => db.close(() => resolve()));
+/**
+ * Postgres: create the baseline on an empty database, then apply versioned
+ * migrations — each in its own transaction together with the row recording
+ * it — all while holding a session advisory lock, so several instances
+ * starting at once apply every migration exactly once.
+ */
+async function initPostgres({ seed }) {
+  await driver.withAdvisoryLock(MIGRATION_LOCK_KEY, async () => {
+    if (!(await tableExists('schema_migrations'))) {
+      if (await tableExists('users')) {
+        throw new Error(
+          'The Postgres database has application tables but no schema_migrations table. ' +
+          'Refusing to guess its schema version; point DATABASE_URL at an empty database.'
+        );
+      }
+      await transaction(async () => {
+        await execScript(fs.readFileSync(PG_SCHEMA_PATH, 'utf8'));
+        for (const migration of MIGRATIONS) {
+          if (migration.version > PG_BASELINE_VERSION) break;
+          await runQuery(
+            `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`,
+            [migration.version, migration.name]
+          );
+        }
+      });
+      if (!quiet) console.log(`📐 Created PostgreSQL schema (baseline v${PG_BASELINE_VERSION})`);
+    }
+
+    const appliedRows = await allQuery(`SELECT version FROM schema_migrations`);
+    const applied = new Set(appliedRows.map((r) => r.version));
+    const newest = Math.max(0, ...applied);
+    if (newest > SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema is v${newest} but this build only knows v${SCHEMA_VERSION}. ` +
+        'Deploy the newer build (or restore a matching backup) instead of downgrading.'
+      );
+    }
+
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.version) || migration.version <= PG_BASELINE_VERSION) continue;
+      await transaction(async () => {
+        await migration.postgres();
+        await runQuery(
+          `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`,
+          [migration.version, migration.name]
+        );
+      }, { isolation: 'read committed', retries: 0 });
+      logMigration(migration);
+    }
+
+    if (seed) await seedDatabase({ runQuery, getQuery, transaction });
   });
 }
 
-export default db;
+export async function initDB({ seed = shouldSeed() } = {}) {
+  if (isPostgres) await initPostgres({ seed });
+  else await initSqlite({ seed });
+  return driver.handle;
+}
+
+/** Drain and close: flushes the SQLite WAL, or ends the Postgres pool. */
+export function closeDB() {
+  return driver.close();
+}
+
+export default driver.handle;
