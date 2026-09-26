@@ -63,15 +63,23 @@ import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
-  revalidateRooms, emitToChannelViewers
+  revalidateRooms, emitToChannelViewers, emitToRelated
 } from './realtime.js';
 import { requireUser } from './lib/httpUtils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// After an uncaught exception the process is in an unknown state (a half-
+// finished write, a leaked lock or connection). Log it, then drain and exit so
+// the supervisor (Docker restart policy / systemd) starts a clean process —
+// the documented Node guidance, rather than limping on.
 process.on('uncaughtException', (err) => {
   if (err?.code === 'EPIPE') return;
-  console.error('⚠️ Uncaught Exception caught:', err);
+  console.error('💥 Uncaught exception — shutting down:', err);
+  process.exitCode = 1;
+  // `shutdown` is defined below; by the time anything can throw, it exists.
+  if (typeof globalThis.__agShutdown === 'function') globalThis.__agShutdown('uncaughtException', 1);
+  else process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('⚠️ Unhandled Rejection caught:', reason);
@@ -333,10 +341,9 @@ app.put('/api/users/:userId', asyncRoute(async (req, res) => {
   const updated = await userService.updateProfile({
     userId: req.params.userId, patch: req.body ?? {}
   });
-  // Everyone connected receives this, so it carries only the public view —
-  // never the full server list or a private profile's bio.
-  io.except(`user-${updated.id}`).emit('user_updated', publicUserEvent(updated));
-  io.to(`user-${updated.id}`).emit('user_updated', updated);
+  // People who can know this user get the public view — never the full server
+  // list or a private profile's bio; the user's own devices get everything.
+  await emitToRelated(io, updated.id, 'user_updated', publicUserEvent(updated), updated);
   res.json(updated);
 }));
 
@@ -348,14 +355,11 @@ app.patch('/api/users/:userId/presence', asyncRoute(async (req, res) => {
     customStatus: req.body?.custom_status
   });
   // Others see "invisible" as offline, exactly as on the socket path.
-  io.except(`user-${updated.id}`).emit('presence_updated', {
+  await emitToRelated(io, updated.id, 'presence_updated', {
     userId: updated.id,
     status: updated.status === 'invisible' ? 'offline' : updated.status,
     custom_status: updated.custom_status
-  });
-  io.to(`user-${updated.id}`).emit('presence_updated', {
-    userId: updated.id, status: updated.status, custom_status: updated.custom_status
-  });
+  }, { userId: updated.id, status: updated.status, custom_status: updated.custom_status });
   res.json(updated);
 }));
 
@@ -1804,7 +1808,7 @@ app.post('/api/servers/:serverId/automod', writeRateLimit, asyncRoute(async (req
   res.json(rule);
 }));
 
-app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.patch('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -1813,7 +1817,7 @@ app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) 
   }));
 }));
 
-app.delete('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.delete('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -2151,7 +2155,7 @@ httpServer.listen(PORT, config.host, () => {
  */
 let shuttingDown = false;
 
-async function shutdown(signal) {
+async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n${signal} received — draining.`);
@@ -2176,7 +2180,7 @@ async function shutdown(signal) {
     await closeDB();
     clearTimeout(forceExit);
     console.log('   drained cleanly.');
-    process.exit(0);
+    process.exit(exitCode);
   } catch (err) {
     console.error('   shutdown error:', err.message);
     process.exit(1);
@@ -2186,6 +2190,7 @@ async function shutdown(signal) {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => shutdown(signal));
 }
+globalThis.__agShutdown = shutdown;
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
 

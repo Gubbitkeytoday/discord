@@ -125,7 +125,8 @@ export function registerRealtime(io) {
         const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
         const status = current?.status === 'invisible' ? 'invisible' : 'online';
         const user = await userService.setPresence({ userId, status });
-        io.emit('presence_updated', { userId, status: user.status === 'invisible' ? 'offline' : user.status });
+        await emitToRelated(io, userId, 'presence_updated',
+          { userId, status: user.status === 'invisible' ? 'offline' : user.status });
       }
       await userService.touchLastSeen(userId);
       socket.emit('identified', { userId, applicationId: socket.data.applicationId ?? null });
@@ -285,13 +286,10 @@ export function registerRealtime(io) {
         const user = await userService.setPresence({ userId, status, customStatus });
         // Others see an invisible user as offline; only the user's own devices
         // learn the real value.
-        io.except(`user-${userId}`).emit('presence_updated', {
+        await emitToRelated(io, userId, 'presence_updated', {
           userId, status: user.status === 'invisible' ? 'offline' : user.status,
           custom_status: user.custom_status
-        });
-        io.to(`user-${userId}`).emit('presence_updated', {
-          userId, status: user.status, custom_status: user.custom_status
-        });
+        }, { userId, status: user.status, custom_status: user.custom_status });
       } catch (err) {
         console.error('update_presence failed:', err.message);
       }
@@ -566,7 +564,7 @@ export function registerRealtime(io) {
         if (current?.status !== 'invisible') {
           await userService.setPresence({ userId, status: 'offline' });
         }
-        io.emit('presence_updated', { userId, status: 'offline' });
+        await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
       }
 
       for (const [channelId, users] of typing) {
@@ -662,6 +660,23 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
       await broadcastVoice(io, row.channel_id);
     }
   }
+}
+
+/**
+ * Emit `event` about `userId` to the people who can know that user — those
+ * sharing a server, a DM or a friendship (the same scope as GET /api/users) —
+ * rather than to every socket on the instance, which let anyone track
+ * everyone's presence and profile changes.
+ *
+ * `selfPayload`, when given, goes to the user's own devices instead (they may
+ * see fields others must not, such as their own "invisible" status).
+ */
+export async function emitToRelated(io, userId, event, payload, selfPayload = undefined) {
+  if (!io || !userId) return;
+  const related = await userService.listUsers(userId);
+  const rooms = related.map((u) => `user-${u.id}`).filter((room) => room !== `user-${userId}`);
+  if (rooms.length) io.to(rooms).emit(event, payload);
+  io.to(`user-${userId}`).emit(event, selfPayload === undefined ? payload : selfPayload);
 }
 
 /** Remove one socket from a voice room: state row, room, peers told. */

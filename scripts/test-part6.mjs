@@ -233,6 +233,26 @@ describe('directory and input hygiene', () => {
     assert.ok(member.body.every((u) => !u.id.startsWith('loner')));
   });
 
+  test('presence changes reach related users only, not every socket', async () => {
+    const stranger = await register('stranger');
+    const outsider = await connect({ token: stranger.token });
+    const friend = await connect({ userId: 'user-2' });   // shares server-1 with user-me
+    try {
+      const strangerHeard = waitFor(outsider, 'presence_updated', 1200);
+      const friendHeard = new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), 3000);
+        friend.on('presence_updated', (p) => { if (p.userId === 'user-me') { clearTimeout(t); resolve(p); } });
+      });
+      const res = await api('PATCH', '/api/users/user-me/presence', { status: 'idle' });
+      assert.equal(res.status, 200);
+      assert.equal((await friendHeard)?.status, 'idle');
+      assert.equal(await strangerHeard, null, 'an unrelated account learned user-me\'s presence');
+    } finally {
+      outsider.close(); friend.close();
+      await api('PATCH', '/api/users/user-me/presence', { status: 'online' });
+    }
+  });
+
   test('colours must be hex', async () => {
     const bad = await api('PUT', '/api/users/user-me', { accent_color: 'red;background:url(//evil)' });
     assert.equal(bad.status, 400);
