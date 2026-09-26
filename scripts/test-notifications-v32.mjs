@@ -582,6 +582,10 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
     const dm = await asSession(carol.token, 'POST', '/api/dms', { recipientId: 'user-me' });
     assert.equal(dm.status, 200, JSON.stringify(dm.body));
     dmId = dm.body.id;
+    // A DM from someone who is not a friend waits as a message request and
+    // does not notify (integration round); carol accepts it first.
+    const accepted = await asSession(carol.token, 'POST', `/api/message-requests/${dmId}/accept`, {});
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     device = makeSubscription('carol');
     const created = await asSession(carol.token, 'POST', '/api/push/subscriptions', device.subscription);
     assert.equal(created.status, 201, JSON.stringify(created.body));
@@ -650,6 +654,7 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
   test('a 410 from the push service deletes the subscription', async () => {
     const dave = await registerMember('pushd');
     const dm = await asSession(dave.token, 'POST', '/api/dms', { recipientId: 'user-me' });
+    await asSession(dave.token, 'POST', `/api/message-requests/${dm.body.id}/accept`, {});
     const dead = makeSubscription('gone').subscription;
     await asSession(dave.token, 'POST', '/api/push/subscriptions', dead);
     await send('are you there', { channel: dm.body.id });
@@ -661,6 +666,7 @@ describe('push delivery', { skip: !tlsReady && 'openssl not available for the lo
   test('pushes are rate-limited per user', async () => {
     const erin = await registerMember('pushe');
     const dm = await asSession(erin.token, 'POST', '/api/dms', { recipientId: 'user-me' });
+    await asSession(erin.token, 'POST', `/api/message-requests/${dm.body.id}/accept`, {});
     const sub = makeSubscription('erin');
     await asSession(erin.token, 'POST', '/api/push/subscriptions', sub.subscription);
     for (let i = 0; i < 10; i += 1) await send(`burst ${i}`, { channel: dm.body.id });

@@ -82,8 +82,10 @@ export function formatDateDivider(date, locale = localeTag()) {
 }
 
 export function formatTime(date, locale = localeTag(), use24Hour = true) {
+  // 12-hour: "3:05 PM" (no leading zero, as Discord writes it); 24-hour:
+  // "15:05" / "09:05". hourCycle rather than hour12, so midnight is never "24:00".
   return new Date(date).toLocaleTimeString(locale, {
-    hour: '2-digit', minute: '2-digit', hour12: !use24Hour
+    hour: use24Hour ? '2-digit' : 'numeric', minute: '2-digit', hourCycle: use24Hour ? 'h23' : 'h12'
   });
 }
 

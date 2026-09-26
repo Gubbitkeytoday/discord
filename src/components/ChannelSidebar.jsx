@@ -11,7 +11,7 @@ import UserStatusMenu from './UserStatusMenu';
 import InputModal from './InputModal';
 import ConfirmModal from './ConfirmModal';
 import TypeToConfirmDialog from './admin/TypeToConfirmDialog';
-import StatusIndicator from './admin/StatusIndicator';
+import StatusIndicator from './ui/StatusIndicator.jsx';
 import { setCreateChannelIntent, setChannelSettingsTab } from './admin/createChannelIntent';
 import { t, useLocaleCode } from '../i18n/index.jsx';
 import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
@@ -55,6 +55,8 @@ export default function ChannelSidebar({
   onSetStatus,
   currentVoiceChannel,
   activeVoiceParticipants,
+  voiceRosters = {},
+  onPrefetchChannel,
   onLeaveVoice,
   isMuted,
   onToggleMute,
@@ -417,7 +419,7 @@ export default function ChannelSidebar({
   const voiceChannels = channels.filter((c) => c.type === 'voice' || c.type === 'stage');
   const voiceMemberMenuItems = (participant) => {
     const userId = participant.userId ?? participant.user_id;
-    const channelId = currentVoiceChannel?.id;
+    const channelId = participant.channelId ?? currentVoiceChannel?.id;
     const base = `/api/voice/channels/${channelId}/members/${userId}`;
     const run = (fn, done) => async () => {
       try { await fn(); if (done) onToast?.(done, { type: 'success', ttl: 2000 }); } catch (err) { onToast?.(err.message, { type: 'error' }); }
@@ -622,6 +624,10 @@ export default function ChannelSidebar({
                       <button
                         id={`channel-row-${channel.id}`}
                         onClick={() => onSelectChannel(channel.id)}
+                        // Warm the history cache on intent (hover / keyboard
+                        // focus), so opening the channel paints at once.
+                        onPointerEnter={channel.type === 'voice' || channel.type === 'stage' ? undefined : () => onPrefetchChannel?.(channel.id)}
+                        onFocus={channel.type === 'voice' || channel.type === 'stage' ? undefined : () => onPrefetchChannel?.(channel.id)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           setChannelMenu({ channel, x: e.clientX, y: e.clientY });
@@ -733,16 +739,25 @@ export default function ChannelSidebar({
                         );
                       })}
 
-                      {isConnectedVoice && activeVoiceParticipants.length > 0 && (
+                      {(() => {
+                        // Occupants of every voice channel (Discord lists them
+                        // under each one): your own room from the live voice
+                        // roster, the others from the guild-wide one.
+                        if (channel.type !== 'voice' && channel.type !== 'stage') return null;
+                        const occupants = isConnectedVoice && activeVoiceParticipants?.length
+                          ? activeVoiceParticipants
+                          : (voiceRosters[channel.id] ?? []);
+                        if (!occupants.length) return null;
+                        return (
                         <ul className="pl-6 pr-1 py-1 space-y-0.5" aria-label={t('adm.inVoice', { name: channel.name })}>
-                          {activeVoiceParticipants.map((p) => {
+                          {occupants.map((p) => {
                             const pid = p.userId ?? p.user_id ?? p.id;
                             const moderatable = canModerateVoice && pid !== currentUser?.id;
                             return (
                               <li
                                 key={pid}
                                 className="group/vm flex items-center gap-2 py-0.5 px-1 rounded text-xs text-d-text hover:bg-d-hover/40"
-                                onContextMenu={moderatable ? (e) => { e.preventDefault(); setChannelMenu({ voiceMember: p, x: e.clientX, y: e.clientY }); } : undefined}
+                                onContextMenu={moderatable ? (e) => { e.preventDefault(); setChannelMenu({ voiceMember: { ...p, channelId: channel.id }, x: e.clientX, y: e.clientY }); } : undefined}
                               >
                                 <img
                                   src={proxiedImageUrl(p.avatar_url || defaultAvatar(pid))}
@@ -764,7 +779,7 @@ export default function ChannelSidebar({
                                     title={t('adm.voiceActionsFor', { name: p.username })}
                                     onClick={(e) => {
                                       const rect = e.currentTarget.getBoundingClientRect();
-                                      setChannelMenu({ voiceMember: p, x: rect.left, y: rect.bottom + 4 });
+                                      setChannelMenu({ voiceMember: { ...p, channelId: channel.id }, x: rect.left, y: rect.bottom + 4 });
                                     }}
                                     className="w-6 h-6 flex items-center justify-center rounded text-d-text3 hover:text-d-strong opacity-0 group-hover/vm:opacity-100 focus:opacity-100 max-md:opacity-100"
                                   >
@@ -775,7 +790,8 @@ export default function ChannelSidebar({
                             );
                           })}
                         </ul>
-                      )}
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -819,7 +835,7 @@ export default function ChannelSidebar({
       <div className="h-14 bg-d-panel px-2 flex items-center justify-between shrink-0 relative">
         <button
           onClick={() => setShowStatusMenu((v) => !v)}
-          aria-haspopup="menu"
+          aria-haspopup="dialog"
           aria-expanded={showStatusMenu}
           className="flex items-center gap-2 px-1 py-1 hover:bg-d-hover/60 rounded-md flex-1 min-w-0 transition-colors text-left"
         >
@@ -830,7 +846,7 @@ export default function ChannelSidebar({
               className="w-8 h-8 rounded-full object-cover"
             />
             <span className="absolute -bottom-0.5 -right-0.5">
-              <StatusIndicator status={currentUser?.status} size={12} ringColor="var(--color-d-panel)" />
+              <StatusIndicator status={currentUser?.status} size={10} ring="var(--color-d-panel)" />
             </span>
           </div>
           <div className="flex flex-col min-w-0">

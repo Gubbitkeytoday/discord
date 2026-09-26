@@ -3,7 +3,8 @@ import { t, useLocaleCode } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
 import { defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
-import StatusIndicator, { statusLabel } from './admin/StatusIndicator';
+import StatusIndicator, { statusLabel } from './ui/StatusIndicator.jsx';
+import { readableRoleColor, themeBackground } from '../utils/color';
 
 const LONG_PRESS_MS = 500;
 
@@ -52,6 +53,10 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
   // beside it as a dot, or is dropped entirely.
   const { prefs } = useUserSettings();
   const roleColorMode = prefs.accessibility.roleColors;
+  // Role colours are raised to 4.5:1 against the member list's own surface
+  // (theme, contrast and saturation settings included) before use as text.
+  const surface = themeBackground('--color-d-surface');
+  const readable = (colour) => readableRoleColor(colour, surface);
 
   // Touch has no right-click (iOS Safari never fires contextmenu), so a long
   // press opens the member menu — the same gesture messages already use.
@@ -120,7 +125,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                     />
                     {/* Shape as well as colour: dot, moon, bar, ring. */}
                     <span className="absolute -bottom-0.5 -right-0.5">
-                      <StatusIndicator status={member.status} size={12} />
+                      <StatusIndicator status={member.status} size={10} ring="var(--color-d-surface)" decorative />
                     </span>
                   </div>
 
@@ -139,17 +144,15 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                           // A role with two colours paints the name as a
                           // gradient; the text itself is clipped to the fill,
                           // so the colour has to be transparent for it to show.
-                          roleColorMode === 'names' && member.role_color && member.role_color_secondary
+                          roleColorMode === 'names' && readable(member.role_color) && readable(member.role_color_secondary)
                             ? {
-                              backgroundImage: `linear-gradient(90deg, ${member.role_color}, ${member.role_color_secondary})`,
+                              backgroundImage: `linear-gradient(90deg, ${readable(member.role_color)}, ${readable(member.role_color_secondary)})`,
                               WebkitBackgroundClip: 'text',
                               backgroundClip: 'text',
                               color: 'transparent'
                             }
                             : {
-                              color: roleColorMode === 'names' && member.role_color
-                                ? member.role_color
-                                : 'var(--color-d-text)'
+                              color: (roleColorMode === 'names' && readable(member.role_color)) || 'var(--color-d-text)'
                             }
                         }
                       >
@@ -178,10 +181,10 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                         <span className="text-[10px] shrink-0" role="img" title={t('members.timedOutBadge')} aria-label={t('members.timedOutBadge')}>⏳</span>
                       )}
                     </div>
-                    {(member.custom_status || member.bio) && (
-                      <span className="text-[11px] text-d-text2 truncate">
-                        {member.custom_status || member.bio}
-                      </span>
+                    {/* Custom status only: bios are not sent with the member
+                        list (visibility is applied on the profile). */}
+                    {Boolean(member.custom_status) && (
+                      <span className="text-[11px] text-d-text2 truncate">{member.custom_status}</span>
                     )}
                   </div>
                 </button>

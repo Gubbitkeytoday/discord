@@ -21,12 +21,12 @@ import ChannelGate from './components/ChannelGate';
 import { api, get, post, put, patch, del, upload, setApiIdentity, localizeError } from './api';
 import { maskOf } from './utils/permissionCatalog';
 import {
-  useUserSettings, loadPreferences, hydratePreferences, applyCategoryFromServer,
+  useUserSettings, loadPreferences, getPreferences, hydratePreferences, applyCategoryFromServer,
   updatePreferences, onPreferenceSaveError
 } from './hooks/useUserSettings';
 import { useKeybinds } from './hooks/useKeybinds';
 import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
-import { t, adoptAccountLocale } from './i18n/index.jsx';
+import { t, adoptAccountLocale, currentLocaleCode } from './i18n/index.jsx';
 import { lazyComponent, preloadWhenIdle } from './utils/lazyComponent';
 import LiveAnnouncer from './components/chat/LiveAnnouncer';
 import { RECONNECTED_EVENT } from './chat/events';
@@ -45,6 +45,7 @@ const VoiceRoom = lazyComponent(() => import('./components/VoiceRoom'));
 const ForumView = lazyComponent(() => import('./components/ForumView'));
 const OnboardingModal = lazyComponent(() => import('./components/OnboardingModal'));
 const FollowChannelModal = lazyComponent(() => import('./components/FollowChannelModal'));
+const ReportDialog = lazyComponent(() => import('./components/admin/ReportDialog'));
 const UserSettingsModal = lazyComponent(() => import('./components/UserSettingsModal'));
 const EventsPanel = lazyComponent(() => import('./components/EventsPanel'));
 const CreateServerModal = lazyComponent(() => import('./components/CreateServerModal'));
@@ -90,7 +91,16 @@ const SIDE_FALLBACK = 'w-60 shrink-0 bg-d-surface flex items-center justify-cent
 
 /** Initial-layout hint only; never throws where matchMedia is missing. */
 function isNarrowViewport(query) {
-  try { return typeof window !== 'undefined' && Boolean(window.matchMedia?.(query).matches); } catch { return false; }
+  try {
+    if (typeof window === 'undefined') return false;
+    if (window.matchMedia?.(query).matches) return true;
+    // App zoom scales rem, not media queries: 200% on a 1366px window is a
+    // 683px layout, so a max-width check uses the effective width.
+    const max = /max-width:\s*(\d+)px/.exec(query);
+    if (!max) return false;
+    const zoom = Math.max(0.5, (Number(getPreferences()?.appearance?.zoom) || 100) / 100);
+    return (window.innerWidth || 0) / zoom <= Number(max[1]);
+  } catch { return false; }
 }
 const LAST_SERVER_KEY = 'antigravity.lastServer';
 // The last channel opened in each server (and in DMs), so a boot, a rail
@@ -169,6 +179,14 @@ export default function App() {
   const [inviteCode, setInviteCode] = useState(() => parseLocation().invite ?? null);
   const [messages, setMessages] = useState([]);
   const [members, setMembers] = useState([]);
+  // The active guild's categories (server detail), so an empty category still
+  // shows without the sidebar refetching the whole guild.
+  const [serverCategories, setServerCategories] = useState(null);
+  // Guild-wide voice occupants: channelId -> participants (server detail +
+  // `voice_roster`), so the sidebar lists who is in every voice channel.
+  const [voiceRosters, setVoiceRosters] = useState({});
+  const [reportTarget, setReportTarget] = useState(null);   // ReportDialog props
+  const [sendBlockedChannelId, setSendBlockedChannelId] = useState(null);
   const [roles, setRoles] = useState([]);
   const [serverEmojis, setServerEmojis] = useState([]);
   const [externalEmojiGroups, setExternalEmojiGroups] = useState([]);   // emoji from every server I am in
@@ -414,7 +432,17 @@ export default function App() {
   const loadInitialData = useCallback(async (userId) => {
     try {
       const data = await get(`/api/initial-data/${userId}`);
-      setCurrentUser(data.currentUser);
+      // /api/initial-data does not carry the account flags /api/auth/me does
+      // (admin console, age group); keep them rather than blanking them.
+      setCurrentUser((prev) => {
+        const next = data.currentUser;
+        if (!next || !prev || prev.id !== next.id) return next;
+        const keep = {};
+        for (const key of ['is_instance_admin', 'age_group', 'birthdate_set']) {
+          if (next[key] === undefined && prev[key] !== undefined) keep[key] = prev[key];
+        }
+        return { ...next, ...keep };
+      });
       setServers(data.servers || []);
       setFriends(data.friends || []);
       setDmChannels(data.dms || []);
@@ -515,6 +543,17 @@ export default function App() {
       });
       setServerChannels((prev) => ({ ...prev, [serverId]: (data.channels || []).map((c) => ({ ...c, server_id: c.server_id ?? serverId })) }));
       setMembers(data.members || []);
+      setServerCategories(Array.isArray(data.categories) ? data.categories : null);
+      if (data.voice_states && typeof data.voice_states === 'object') {
+        const voiceIds = new Set((data.channels || []).filter((c) => c.type === 'voice' || c.type === 'stage').map((c) => c.id));
+        setVoiceRosters((prev) => {
+          const next = {};
+          // Keep other guilds' rosters; replace this guild's wholesale.
+          for (const [id, list] of Object.entries(prev)) if (!voiceIds.has(id)) next[id] = list;
+          for (const id of voiceIds) if (data.voice_states[id]?.length) next[id] = data.voice_states[id];
+          return next;
+        });
+      }
       setRoles(data.roles || []);
       setServerEmojis(data.emojis || []);
       setServerStickers(Array.isArray(stickers) ? stickers : []);
@@ -566,6 +605,8 @@ export default function App() {
   useEffect(() => {
     if (!currentUserId || !activeServerId) return;
     try { localStorage.setItem(LAST_SERVER_KEY, activeServerId); } catch { /* ignore */ }
+    // Never show the previous guild's categories while this one loads.
+    setServerCategories([]);
     if (activeServerId === 'home') {
       setViewerPermissions([]);
       setMembers([]);
@@ -579,6 +620,14 @@ export default function App() {
   // Guild channels and DM channels are the same thing server-side.
   const allChannels = useMemo(() => [...channels, ...dmChannels], [channels, dmChannels]);
   allChannelsRef.current = allChannels;
+  // Every channel we can name (the open guild, DMs, and other guilds' cached
+  // lists) for the inbox's Unreads tab.
+  const inboxChannels = useMemo(() => {
+    const byId = new Map();
+    for (const list of Object.values(serverChannels ?? {})) for (const c of list ?? []) byId.set(c.id, c);
+    for (const c of allChannels) byId.set(c.id, c);
+    return [...byId.values()];
+  }, [allChannels, serverChannels]);
 
   const markChannelRead = useCallback((channelId, messageId) => {
     if (!channelId) return;
@@ -901,12 +950,15 @@ export default function App() {
       if (messagesRef.current.length + mine.length > MAX_HISTORY) setHasMoreHistory(true);
     };
 
-    const bumpUnread = (channelId, messageId, { mention = false } = {}) =>
+    // `serverId` rides along so the rail can roll a channel it has not loaded
+    // (another guild) into the right server icon; null means a DM.
+    const bumpUnread = (channelId, messageId, { mention = false, serverId } = {}) =>
       setReadStates((prev) => ({
         ...prev,
         [channelId]: {
           ...prev[channelId],
           channel_id: channelId,
+          server_id: serverId !== undefined ? serverId : (prev[channelId]?.server_id ?? null),
           unread: 1,
           last_message_id: messageId ?? prev[channelId]?.last_message_id,
           mention_count: (prev[channelId]?.mention_count ?? 0) + (mention ? 1 : 0)
@@ -921,7 +973,7 @@ export default function App() {
         if (incoming.length === 0) frameQueue.push(flushIncoming);
         incoming.push(msg);
         if (document.visibilityState === 'visible') frameQueue.push(() => markChannelRead(msg.channel_id, msg.id));
-        else frameQueue.push(() => bumpUnread(msg.channel_id, msg.id));
+        else frameQueue.push(() => bumpUnread(msg.channel_id, msg.id, { serverId: msg.server_id ?? null }));
         const open = allChannelsRef.current.find((c) => c.id === msg.channel_id);
         announceMessage(msg, {
           channelName: open ? (open.server_id ? `#${open.name}` : `@${open.display_name ?? ''}`) : '',
@@ -929,7 +981,7 @@ export default function App() {
           mentionsMe: mentionsUser(msg, currentUserRef.current)
         });
       } else {
-        frameQueue.push(() => bumpUnread(msg.channel_id, msg.id));
+        frameQueue.push(() => bumpUnread(msg.channel_id, msg.id, { serverId: msg.server_id ?? null }));
         const muted = Boolean(
           channelSettingsRef.current[msg.channel_id]?.muted
           || (msg.server_id && serverSettingsRef.current[msg.server_id]?.muted)
@@ -963,10 +1015,10 @@ export default function App() {
     };
 
     // Lightweight ping for channels we are not looking at.
-    const onChannelActivity = ({ channel_id, message_id, author_id }) => {
+    const onChannelActivity = ({ channel_id, message_id, author_id, server_id }) => {
       if (channel_id === activeChannelIdRef.current) return;
       if (author_id === currentUserRef.current?.id) return;
-      bumpUnread(channel_id, message_id);
+      bumpUnread(channel_id, message_id, { serverId: server_id ?? null });
     };
 
     const onMessageDeleted = (id) => {
@@ -1037,7 +1089,7 @@ export default function App() {
           status: currentUserRef.current?.status,
           onClick: () => setActiveChannelId(channel_id)
         });
-        bumpUnread(channel_id, notification.message?.id, { mention: true });
+        bumpUnread(channel_id, notification.message?.id, { mention: true, serverId: notification.server_id ?? notification.message?.server_id ?? null });
       }
 
       speakMessage({
@@ -1069,6 +1121,18 @@ export default function App() {
       setActiveVoiceParticipants(list);
     };
 
+    // Who is in each voice channel of the guild (not only the one you are in).
+    const onVoiceRoster = ({ channelId, participants }) => {
+      if (!channelId) return;
+      setVoiceRosters((prev) => {
+        const list = Array.isArray(participants) ? participants : [];
+        if (!list.length && !prev[channelId]) return prev;
+        const next = { ...prev };
+        if (list.length) next[channelId] = list; else delete next[channelId];
+        return next;
+      });
+    };
+
     // The server moved us (AFK sweep). Point the client at the new channel so the
     // mesh re-forms there; the server has already updated the rosters.
     const onVoiceMoved = ({ to, reason }) => {
@@ -1095,9 +1159,15 @@ export default function App() {
       setChannels((prev) => (prev.some((c) => c.id === channel.id) ? prev : [...prev, channel]));
     const onChannelUpdated = (channel) => {
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, ...channel } : c)));
+      if (channel?.type === 'category') {
+        setServerCategories((prev) => (prev?.some((c) => c.id === channel.id)
+          ? prev.map((c) => (c.id === channel.id ? { ...c, name: channel.name ?? c.name, position: channel.position ?? c.position } : c))
+          : prev));
+      }
     };
     const onChannelDeleted = ({ id }) => {
       setChannels((prev) => prev.filter((c) => c.id !== id && c.parent_id !== id));
+      setServerCategories((prev) => (prev?.some((c) => c.id === id) ? prev.filter((c) => c.id !== id) : prev));
       if (activeChannelIdRef.current === id) setActiveChannelId(null);
     };
     const refreshServer = () => {
@@ -1229,6 +1299,7 @@ export default function App() {
       notification: onNotification,
       read_state_updated: later(onReadStateUpdated),
       voice_participants: onVoiceParticipants,
+      voice_roster: onVoiceRoster,
       voice_moved: onVoiceMoved,
       voice_speaking: onVoiceSpeaking,
       voice_error: onVoiceError,
@@ -1417,15 +1488,14 @@ export default function App() {
   const titleChannel = allChannels.find((c) => c.id === activeChannelId);
   const titleServer = servers.find((s) => s.id === activeServerId)?.name ?? '';
   useEffect(() => {
-    applyUnreadBadge(mentionTotal);
-    if (authState !== true) return;
+    if (authState !== true) { applyUnreadBadge(mentionTotal); return; }
     const isDmTitle = titleChannel && !titleChannel.server_id;
     const place = titleChannel
       ? (isDmTitle ? `@${titleChannel.display_name ?? ''}` : `#${titleChannel.name}`)
       : activeServerId === 'home' ? t('dm.friends') : '';
     const where = [place, activeServerId !== 'home' ? titleServer : ''].filter(Boolean).join(' | ');
-    const prefix = prefs.notifications.unreadBadge && mentionTotal > 0 ? `(${mentionTotal}) ` : '';
-    document.title = `${prefix}${where ? `${where} — ` : ''}Antigravity`;
+    // applyUnreadBadge adds the "(n) " prefix and the app-icon badge.
+    applyUnreadBadge(mentionTotal, `${where ? `${where} — ` : ''}Antigravity`);
   }, [mentionTotal, prefs.notifications.unreadBadge, titleChannel?.id, titleChannel?.name, titleChannel?.display_name, titleServer, activeServerId, authState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setMessageVerbosity(prefs.accessibility?.announceMessages ?? 'all'); }, [prefs.accessibility?.announceMessages]);
@@ -1559,6 +1629,7 @@ export default function App() {
       reactions: {},
       reaction_details: [],
       reply_to_id: reply_to_id ?? null,
+      mention_reply: extra.mentionReply !== false,
       username: currentUser.username,
       display_name: currentUser.display_name,
       avatar_url: currentUser.avatar_url,
@@ -1567,11 +1638,16 @@ export default function App() {
 
     socket.emit('send_message', {
       channel_id: activeChannelId, content, attachments, reply_to_id, nonce, sticker_id: sticker?.id ?? null,
-      ...(extra.tts ? { tts: true } : {})
+      ...(extra.tts ? { tts: true } : {}),
+      // Reply "@ ON/OFF": whether the author of the replied message is pinged.
+      ...(reply_to_id ? { allowed_mentions: { replied_user: extra.mentionReply !== false } } : {})
     }, (ack) => {
       if (ack && !ack.ok) {
+        // You blocked the person you are writing to: the composer turns into
+        // the "You blocked this user · Unblock" bar (ChatArea).
+        if (ack.code === 'YOU_BLOCKED_USER') setSendBlockedChannelId(activeChannelIdRef.current);
         setMessages((prev) => prev.map((m) =>
-          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack), errorCode: ack.code ?? null } : m
+          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack), errorCode: ack.code ?? null, errorStatus: ack.status ?? null } : m
         ));
       }
     });
@@ -1581,7 +1657,7 @@ export default function App() {
 
   const handleRetryMessage = (msg) => {
     setMessages((prev) => prev.filter((m) => m.id !== msg.id));
-    handleSendMessage(msg.content, msg.attachments, msg.reply_to_id, { sticker: msg.sticker });
+    handleSendMessage(msg.content, msg.attachments, msg.reply_to_id, { sticker: msg.sticker, mentionReply: msg.mention_reply !== false });
   };
 
   /**
@@ -1683,19 +1759,17 @@ export default function App() {
     setChannelReadMarker(previous);
   };
 
+  // Report a message with a reason category (and "also block" for the
+  // author), routed to the server's moderators or, for a DM, the instance.
   const handleReportMessage = (message) => {
-    setConfirm({
-      title: t('chat.reportMessage'),
-      body: t('chat.reportBody'),
-      confirmLabel: t('chat.report'),
-      withReason: true,
-      reasonLabel: t('chat.reportReason'),
-      onConfirm: async (reason) => {
-        await post('/api/reports', {
-          target_type: 'message', target_id: message.id, reason: 'other', details: reason
-        });
-        pushToast(t('chat.reported'), { type: 'success', ttl: 3000 });
-      }
+    if (!message?.id) return;
+    const author = message.user_id && message.user_id !== currentUserId
+      ? { id: message.user_id, username: message.username, display_name: message.display_name, avatar_url: message.avatar_url }
+      : null;
+    setReportTarget({
+      target: { type: 'message', id: message.id },
+      user: author,
+      where: message.server_id ? 'server' : 'dm'
     });
   };
 
@@ -1885,7 +1959,8 @@ export default function App() {
 
   const handleCreateServer = async (name, icon_url) => {
     try {
-      const newServer = await post('/api/servers', { name, icon_url });
+      // The server's default channels are named in the creator's language.
+      const newServer = await post('/api/servers', { name, icon_url, locale: currentLocaleCode() });
       setServers((prev) => [...prev, newServer]);
       setActiveServerId(newServer.id);
       // A new server is empty: offer the invite straight away, as Discord does.
@@ -1911,7 +1986,8 @@ export default function App() {
       setChannels((prev) => (prev.some((c) => c.id === newChannel.id) ? prev : [...prev, newChannel]));
       // Creating a voice or stage channel must not join it.
       if (newChannel.type !== 'voice' && newChannel.type !== 'stage') setActiveChannelId(newChannel.id);
-    } catch (err) { toastError(err); }
+      return newChannel;
+    } catch (err) { toastError(err); return null; }
   };
 
   // "Invite people": show the link with its expiry and use limit (it used
@@ -2128,6 +2204,21 @@ export default function App() {
 
   const blockedIds = useMemo(() => new Set(blocked.map((b) => b.id)), [blocked]);
 
+  // A block made anywhere else (the report dialog's "also block", a profile)
+  // announces itself; the blocked set here follows without a refetch.
+  useEffect(() => {
+    const onBlocked = (event) => {
+      const user = event?.detail;
+      if (!user?.id) return;
+      setBlocked((prev) => (prev.some((b) => b.id === user.id) ? prev : [...prev, {
+        id: user.id, username: user.username, display_name: user.display_name, avatar_url: user.avatar_url ?? null
+      }]));
+      setFriends((prev) => prev.filter((f) => f.id !== user.id));
+    };
+    window.addEventListener('antigravity:blocked', onBlocked);
+    return () => window.removeEventListener('antigravity:blocked', onBlocked);
+  }, []);
+
   // Mention autocomplete in a DM draws on friends, the people in this
   // conversation and yourself — de-duplicated, since those sets overlap.
   const homeMembers = useMemo(() => {
@@ -2312,6 +2403,12 @@ export default function App() {
       onFollowChannel={(channel) => setFollowSource(channel)}
       onMarkUnread={handleMarkUnread}
       onReport={handleReportMessage}
+      // 1:1 DM header "⋯" menu and the "You blocked this user" bar.
+      sendBlocked={sendBlockedChannelId === activeChannelId}
+      onBlockUser={handleBlockUser}
+      onUnblockUser={async (user) => { await handleUnblockUser(user); setSendBlockedChannelId(null); }}
+      onReportUser={(user) => setReportTarget({ target: { type: 'user', id: user.id }, user, where: 'dm' })}
+      onCloseDm={isDmConversation ? () => handleCloseDm(activeChannelId) : null}
       onOpenNotificationSettings={(x, y) => activeChannel && setNotifPopover({ kind: 'channel', id: activeChannel.id, x, y })}
       isUnknownSender={(userId) => !friends.some((f) => f.id === userId && f.friend_status === 'accepted')}
       channelSettings={channelSettings[activeChannelId]}
@@ -2622,6 +2719,21 @@ export default function App() {
       {/* Skip links (WCAG 2.4.1): straight to the composer or the channel
           list instead of tabbing through the rail and every message. */}
       {connection.showBanner && <ConnectionBanner status={connection.status} onRetry={connection.retry} />}
+      {prefs.streamerMode.enabled && (
+        // Streamer mode hides things; the bar makes sure you know it is on and
+        // can switch it off in one click (Discord's red strip).
+        <div role="status" className="fixed top-0 left-1/2 -translate-x-1/2 z-[85] flex items-center gap-2 px-3 py-0.5 rounded-b-md shadow bg-d-danger text-white text-xs font-semibold whitespace-nowrap">
+          <span>{t('streamer.turnedOn')}</span>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            onClick={() => updatePreferences('streamerMode', { enabled: false })}
+            className="underline underline-offset-2 hover:no-underline min-h-6 px-1 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+          >
+            {t('integration.turnOff')}
+          </button>
+        </div>
+      )}
       <nav aria-label={t('a11y.skipLinks')} className="contents">
         {/* Only when there is a composer to skip to (not on the friends page). */}
         {activeChannel && activeChannel.type !== 'forum' && <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>}
@@ -2655,6 +2767,7 @@ export default function App() {
           currentUser={currentUser}
           onSelectDm={pickChannel}
           onPrefetchChannel={prefetchChannel}
+          onToast={pushToast}
           mobileOpen={mobileSidebarOpen}
           onOpenMobile={() => setMobileSidebarOpen(true)}
           onCloseMobile={() => setMobileSidebarOpen(false)}
@@ -2708,6 +2821,8 @@ export default function App() {
               onPrefetchChannel={prefetchChannel}
               currentServer={currentServer}
               channels={channels}
+              categories={serverCategories}
+              voiceRosters={voiceRosters}
               activeChannelId={activeChannelId}
               onSelectChannel={pickChannel}
               onOpenCreateChannelModal={(type) => {
@@ -3032,24 +3147,17 @@ export default function App() {
           dms={dmChannels}
           servers={servers}
           onClose={() => setForwardMessage(null)}
+          maxDestinations={5}
           onForward={async (targetChannelId) => {
-            const body = forwardMessage.content ?? '';
+            // Forwarding v2: the server copies the source message (after
+            // checking you can read it) and records where it came from, so
+            // the copy says "Forwarded from #channel" and links back.
             await post('/api/messages', {
               channel_id: targetChannelId,
-              content: body,
-              attachments: forwardMessage.attachments ?? [],
-              sticker_id: forwardMessage.sticker?.id ?? null,
-              // Forwarding v2: where it came from, so the copy can say
-              // "Forwarded" and link back (needs server support to persist).
-              forwarded_from: {
-                message_id: forwardMessage.id,
-                channel_id: forwardMessage.channel_id,
-                guild_id: forwardMessage.server_id ?? null,
-                created_at: forwardMessage.created_at
-              }
+              forwarded_from: { message_id: forwardMessage.id }
             });
-            pushToast(t('chat.forwarded'), { type: 'success', ttl: 3000 });
           }}
+          onDone={() => pushToast(t('chat.forwarded'), { type: 'success', ttl: 3000 })}
         />
       )}
 
@@ -3075,7 +3183,14 @@ export default function App() {
           x={showInbox.x}
           y={showInbox.y}
           notifications={notifications}
-          channels={allChannels}
+          channels={inboxChannels}
+          readStates={readStates}
+          servers={servers}
+          onOpenChannel={(channel) => {
+            setShowInbox(false);
+            setActiveServerId(channel.server_id ?? 'home');
+            setActiveChannelId(channel.id);
+          }}
           onJump={(n) => {
             setShowInbox(false);
             const messageId = n.message_id ?? n.message?.id;
@@ -3091,6 +3206,15 @@ export default function App() {
       )}
 
       {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
+      {reportTarget && (
+        <ReportDialog
+          target={reportTarget.target}
+          user={reportTarget.user}
+          where={reportTarget.where}
+          onToast={pushToast}
+          onClose={() => setReportTarget(null)}
+        />
+      )}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
       </ErrorBoundary>
 

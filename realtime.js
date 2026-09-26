@@ -507,7 +507,9 @@ export async function registerRealtime(io) {
       } catch (err) {
         log.error({ err, socket_id: socket.id }, 'send_message failed');
         const { error, code } = clientError(err);
-        ack?.({ ok: false, error, code });
+        // The HTTP status tells the client whether a retry can help (a 403
+        // never will — no "Retry" button for it).
+        ack?.({ ok: false, error, code, status: publicError(err).status });
         socket.emit('message_error', { error, code, nonce: data?.nonce });
       }
     });

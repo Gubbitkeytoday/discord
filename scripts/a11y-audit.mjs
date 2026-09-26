@@ -319,24 +319,57 @@ function auditLayoutTraps() {
   }
 }
 
-/** Pull the theme token values straight out of index.css. */
+/**
+ * Pull the theme token values straight out of index.css.
+ *
+ * The legacy `--color-d-*` names are aliases (`var(--color-text-default)` →
+ * `var(--base-text-default)`), and the palette itself lives in `--base-*`
+ * per theme, written either as hex or as oklch() with the hex it resolves to
+ * in a trailing comment. So: collect every custom property of the default
+ * `:root` block and `@theme`, overlay a theme's own `:root[data-theme=…]`
+ * block, and follow var() chains down to a hex value.
+ */
 function readTokens() {
   const css = fs.readFileSync('src/index.css', 'utf8');
-  const parse = (block) => {
+  // The body of the first rule whose selector is exactly `head`.
+  const blockOf = (head) => {
+    const re = new RegExp(`(^|\\n)${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`);
+    const m = re.exec(css);
+    if (!m) return '';
+    const open = m.index + m[0].length;
+    const close = css.indexOf('\n}', open);
+    return css.slice(open, close === -1 ? undefined : close);
+  };
+  const declarations = (block) => {
+    const out = {};
+    for (const [, name, value] of block.matchAll(/--([\w-]+):\s*([^;]+);/g)) out[name] = value.trim();
+    return out;
+  };
+  const shared = { ...declarations(blockOf(':root')), ...declarations(blockOf('@theme')) };
+  const resolve = (decls, name, depth = 0) => {
+    const value = decls[name];
+    if (!value || depth > 8) return null;
+    const hex = /^#[0-9a-fA-F]{3,8}\b/.exec(value) ?? /\/\*\s*(#[0-9a-fA-F]{3,8})\s*\*\//.exec(value);
+    if (hex) return hex[1] ?? hex[0];
+    const ref = /^var\(--([\w-]+)\)$/.exec(value);
+    return ref ? resolve(decls, ref[1], depth + 1) : null;
+  };
+  const themeTokens = (overrides) => {
+    const decls = { ...shared, ...overrides };
     const tokens = {};
-    for (const [, name, value] of block.matchAll(/--color-(d-[\w-]+):\s*(#[0-9a-fA-F]{3,6})/g)) {
-      tokens[name] = value;
+    for (const name of Object.keys(decls)) {
+      if (!name.startsWith('color-d-')) continue;
+      const hex = resolve(decls, name);
+      if (hex) tokens[name.slice('color-'.length)] = hex;
     }
     return tokens;
   };
-  const themeBlock = css.slice(css.indexOf('@theme'), css.indexOf('[data-theme="light"]'));
-  // Stop at the closing brace of the light rule — other theme blocks follow it
-  // in the stylesheet and would otherwise overwrite the tokens we just read.
-  const lightStart = css.indexOf('[data-theme="light"]');
-  const lightEnd = css.indexOf('\n}', lightStart);
-  const lightBlock = css.slice(lightStart, lightEnd === -1 ? undefined : lightEnd);
-  const dark = parse(themeBlock);
-  return { dark, light: { ...dark, ...parse(lightBlock) } };
+  return {
+    dark: themeTokens({}),
+    light: themeTokens(declarations(blockOf(':root[data-theme="light"]'))),
+    ash: themeTokens(declarations(blockOf(':root[data-theme="ash"]'))),
+    onyx: themeTokens(declarations(blockOf(':root[data-theme="onyx"]')))
+  };
 }
 
 // Text/background pairs that actually occur in the UI.
@@ -349,7 +382,11 @@ const CONTRAST_PAIRS = [
   ['d-strong', 'd-canvas', 4.5, 'headings on chat background'],
   ['d-strong', 'd-surface', 4.5, 'headings on sidebar'],
   ['d-text4', 'd-surface', 3.0, 'faint text (large/decorative)'],
-  ['d-link', 'd-canvas', 3.0, 'links on chat background']
+  ['d-link', 'd-canvas', 3.0, 'links on chat background'],
+  ['d-dangertext', 'd-canvas', 4.5, 'error text on chat background'],
+  ['d-dangertext', 'd-surface', 4.5, 'error text on sidebar'],
+  ['d-brandtext', 'd-canvas', 4.5, 'brand-coloured text on chat background'],
+  ['d-onlinetext', 'd-surface', 4.5, 'positive text on sidebar']
 ];
 
 function auditContrast() {
