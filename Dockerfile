@@ -53,14 +53,22 @@ RUN npm ci \
  && node -e "require('sqlite3')"
 
 # After pruning: drop musl (Alpine) binaries npm installs alongside the glibc
-# ones (~35 MB, never loaded here), fail the build — not the first boot — if a
-# native module cannot load, and create the volume mount points for runtime.
+# ones (never loaded here), fail the build — not the first boot — if a native
+# module cannot load, and create the volume mount points for runtime.
+#
+# Client-only packages (react, lucide-react, tailwindcss and @tailwindcss/vite,
+# and through it vite/esbuild/rollup/lightningcss; livekit-client, fonts, …) are
+# devDependencies: only `npm run build` needs them, and the prune drops them.
+# That keeps ~110 MB, and the Go-built esbuild binary whose bundled Go standard
+# library container scanners flag, out of the runtime image. The `! test` line
+# fails the build if a future change drags them back into production deps.
 COPY . .
 RUN npm run build \
  && npm prune --omit=dev \
  && npm cache clean --force \
- && rm -rf node_modules/@img/*musl* node_modules/lightningcss-*-musl node_modules/@tailwindcss/oxide-*-musl \
+ && rm -rf node_modules/@img/*musl* \
  && node -e "require('sqlite3'); try { require('sharp') } catch (e) { console.warn('sharp unavailable:', e.message) }" \
+ && ! test -e node_modules/esbuild -o -e node_modules/vite -o -e node_modules/react \
  && mkdir -p /rootfs/data/uploads /rootfs/backups
 
 

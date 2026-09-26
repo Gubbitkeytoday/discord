@@ -1,0 +1,67 @@
+# ============================================================================
+#  `no-proxy` compose profile: plain-HTTP forwarder on one host port, no TLS.
+#
+#  For hosts where something else already owns 80/443 and terminates TLS —
+#  a Synology/QNAP NAS (DSM's reverse proxy + Let's Encrypt), Traefik, nginx
+#  Proxy Manager, Cloudflare Tunnel — or a LAN-only test box. Started with
+#
+#    docker compose --profile no-proxy up -d app-direct
+#
+#  which publishes ${APP_BIND:-127.0.0.1}:${APP_PORT:-3001} and does NOT start
+#  the TLS `caddy` service. See DEPLOYMENT.md, "NAS (Synology / QNAP)".
+#
+#  Why a forwarder and not a published app port: the app stays on the internal
+#  network exactly as in the default stack (one app instance, same volumes),
+#  and this adds the forwarded-for header the app's TRUST_PROXY expects.
+#
+#  X-Forwarded-For: Caddy appends the address it received the request from.
+#  Requests arriving from a private address (your NAS's own reverse proxy)
+#  are trusted to carry the real client address in their own X-Forwarded-For,
+#  so behind a NAS reverse proxy set TRUST_PROXY=2 in .env (NAS proxy + this);
+#  when browsers connect to this port directly, keep TRUST_PROXY=1.
+# ============================================================================
+
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:3001 {
+	request_body {
+		max_size 520MB
+	}
+
+	# WebSockets (Socket.IO) pass straight through; no buffering, no timeout.
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @websocket {
+		reverse_proxy app:3001
+	}
+
+	handle /metrics {
+		respond 404
+	}
+
+	# No `encode` here: the app compresses its own static assets, and anything
+	# in front (DSM's nginx) may compress the rest.
+	handle {
+		reverse_proxy app:3001 {
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	header -Server
+
+	log {
+		output stdout
+		format json
+	}
+}

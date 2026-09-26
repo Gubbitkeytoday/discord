@@ -40,6 +40,12 @@ jobs:
         run: npm run a11y
       - name: i18n audit
         run: npm run i18n:audit
+      # Every variable the code reads is in .env.example, and DEPLOYMENT.md's
+      # environment reference (generated from it) is current.
+      - name: Environment reference
+        run: npm run env:check
+      - name: Shell scripts parse
+        run: sh -n scripts/ops/docker-backup.sh
 
   build:
     name: Frontend build
@@ -185,6 +191,24 @@ jobs:
           path: dist
       - name: npm run e2e
         run: npm run e2e
+      # The narrower browser suites run even when an earlier one failed, so a
+      # single run reports every broken area. Each boots its own server on its
+      # own port against the same dist/.
+      - name: npm run e2e:integration (passkey sign-in, translate, reconnect catch-up)
+        if: success() || failure()
+        env:
+          E2E_INTEGRATION_PORT: '4552'
+        run: npm run e2e:integration
+      - name: npm run e2e:passkeys (virtual authenticator round-trip)
+        if: success() || failure()
+        env:
+          E2E_PASSKEY_PORT: '4551'
+        run: npm run e2e:passkeys
+      - name: npm run e2e:pwa (manifest, service worker, offline shell)
+        if: success() || failure()
+        env:
+          E2E_PWA_PORT: '4560'
+        run: npm run e2e:pwa
       - name: Upload screenshots
         if: failure()
         uses: actions/upload-artifact@v4
@@ -272,12 +296,31 @@ jobs:
           only-fixed: true
           fail-build: true
           output-format: sarif
+      # The SARIF above only lands in the Security tab. Print the same findings
+      # as a table in the log (and the run summary) so a failed gate says which
+      # package to bump without a trip to the Security tab.
+      - name: Vulnerability table (grype)
+        if: always()
+        id: grype-bin
+        uses: anchore/scan-action/download-grype@v6
+      - name: Print grype findings
+        if: always() && steps.grype-bin.outputs.cmd != ''
+        env:
+          GRYPE: ${{ steps.grype-bin.outputs.cmd }}
+        run: |
+          "$GRYPE" antigravity-discord:ci --only-fixed -o table | tee grype-table.txt || true
+          {
+            echo "### grype (fixable findings)"
+            echo '```'
+            cat grype-table.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scan results
         if: always() && steps.scan.outputs.sarif != ''
         # Pull requests from forks get a read-only token; the scan itself
         # still gates the build.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: container-image
@@ -339,3 +382,65 @@ jobs:
         run: npm audit || true
       - name: Fail on critical vulnerabilities in production dependencies
         run: npm audit --omit=dev --audit-level=critical
+
+  prod-deps:
+    name: Production dependencies boot (npm ci --omit=dev)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The Docker image prunes devDependencies after `npm run build`. This proves
+    # the server needs nothing from devDependencies (client-only packages such
+    # as react, vite or tailwindcss must stay there) without building an image.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: No build tooling in the production tree
+        run: |
+          for pkg in vite esbuild react react-dom tailwindcss; do
+            if [ -e "node_modules/$pkg" ]; then echo "::error::$pkg is in production dependencies"; exit 1; fi
+          done
+      - name: Boot in production mode and answer /api/live
+        run: |
+          mkdir -p dist && echo '<!doctype html><title>stub</title>' > dist/index.html
+          NODE_ENV=production PORT=3099 STORAGE_URL_SECRET="$(openssl rand -base64 32)" \
+            DB_PATH="$RUNNER_TEMP/ci.db" STORAGE_ROOT="$RUNNER_TEMP/uploads" \
+            node server.js > server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3099/api/live >/dev/null; then echo "live"; exit 0; fi
+            sleep 1
+          done
+          cat server.log; exit 1
+
+  compose:
+    name: docker compose config (every profile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuses to start without POSTGRES_PASSWORD
+        run: |
+          cp .env.example .env
+          if docker compose config -q 2>err.txt; then
+            echo "::error::compose accepted an empty POSTGRES_PASSWORD"; exit 1
+          fi
+          grep -q POSTGRES_PASSWORD err.txt
+      - name: Validate each profile
+        run: |
+          cp .env.example .env
+          {
+            echo "POSTGRES_PASSWORD=ci-postgres-password"
+            echo "STORAGE_URL_SECRET=ci-storage-url-secret-0123456789abcdef"
+            echo "TURN_SECRET=ci-turn-secret-0123456789abcdef"
+            echo "LIVEKIT_API_KEY=ci-livekit-key"
+            echo "LIVEKIT_API_SECRET=ci-livekit-secret-0123456789abcdef0123456789"
+            echo "DOMAIN=chat.example.com"
+          } >> .env
+          for profile in "" turn livekit scale translate observability no-proxy; do
+            echo "::group::profile '${profile:-default}'"
+            if [ -n "$profile" ]; then docker compose --profile "$profile" config -q; else docker compose config -q; fi
+            echo "::endgroup::"
+          done
+          docker compose --profile turn --profile livekit --profile scale --profile translate --profile observability config -q

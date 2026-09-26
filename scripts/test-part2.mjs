@@ -909,16 +909,23 @@ describe('gateway', () => {
     const socket = track(await connectAs('user-me'));
     await new Promise((resolve) => socket.emit('join_channel', 'chan-102', resolve));
 
-    let limited = false;
-    for (let i = 0; i < 45 && !limited; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const ack = await new Promise((resolve) => {
-        socket.emit('send_message', { channel_id: 'chan-102', content: `flood ${i}` }, resolve);
-        setTimeout(() => resolve({ ok: true }), 1500);
+    // The budget is 30 per 10 s, refilling at 3/s. Sending one at a time and
+    // waiting for each ack let the bucket refill whenever a send took over
+    // ~330 ms (a loaded CI host), so the test flaked. Emit the whole burst at
+    // once instead: the budget is checked before any database work, so 45
+    // back-to-back sends always overrun 30 tokens, however slow the host is.
+    const BURST = 45;
+    const acks = await Promise.all(Array.from({ length: BURST }, (_, i) => new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, code: 'NO_ACK' }), 20_000);
+      socket.emit('send_message', { channel_id: 'chan-102', content: `flood ${i}` }, (ack) => {
+        clearTimeout(timer);
+        resolve(ack);
       });
-      if (ack?.code === 'RATE_LIMITED') limited = true;
-    }
-    assert.ok(limited, 'the gateway accepted an unbounded burst of messages');
+    })));
+    const limited = acks.filter((ack) => ack?.code === 'RATE_LIMITED').length;
+    assert.ok(limited >= BURST - 30 - 3,
+      `the gateway accepted an unbounded burst of messages (${limited} of ${BURST} limited)`);
+    assert.equal(acks.filter((ack) => ack?.code === 'NO_ACK').length, 0, 'every send is acknowledged');
   });
 });
 

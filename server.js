@@ -30,6 +30,7 @@ import {
 } from './lib/httpUtils.js';
 import { resolveSession, pruneSessions } from './lib/auth.js';
 import { config } from './lib/config.js';
+import { staticAssets } from './lib/staticAssets.js';
 import { securityHeaders, metricsMiddleware } from './lib/middleware.js';
 import { pruneAccountTokens, assertReauthenticated } from './services/accountSecurity.js';
 import { sweepStaleThreads } from './services/threads.js';
@@ -2038,26 +2039,11 @@ if (config.serveStatic) {
     process.exit(1);
   }
 
-  // Hashed asset names are immutable; index.html must never be cached, or
-  // clients keep booting the previous bundle after a deploy.
-  app.use(express.static(staticRoot, {
-    index: false,
-    setHeaders(res, filePath) {
-      // Everything Vite emits under assets/ has a content hash in its name.
-      if (path.basename(path.dirname(filePath)) === 'assets') {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      } else {
-        res.setHeader('Cache-Control', 'no-cache');
-      }
-    }
-  }));
-
-  // Client-side routing: any non-API path returns the shell.
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
-    res.setHeader('Cache-Control', 'no-cache');
-    return res.sendFile(path.join(staticRoot, 'index.html'));
-  });
+  // Hashed assets (assets/*) immutable; index.html, sw.js and the manifest
+  // no-cache, or clients keep booting the previous bundle after a deploy.
+  // Text is brotli/gzip-compressed for installs without a compressing proxy
+  // in front, and any other non-API path returns the shell (client routing).
+  app.use(staticAssets({ root: staticRoot }));
 
   logger.info({ staticRoot }, 'serving SPA');
 }
