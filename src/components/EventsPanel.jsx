@@ -9,9 +9,11 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat
+  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat, ImagePlus, Trash2, Radio
 } from 'lucide-react';
-import { api, get } from '../api';
+import { api, get, upload } from '../api';
+import ImageCropDialog from './server/ImageCropDialog.jsx';
+import LiveEventBanner from './server/LiveEventBanner.jsx';
 import ConfirmModal from './ConfirmModal';
 import { useDialog } from './settings/primitives';
 import { t, localeTag } from '../i18n/index.jsx';
@@ -159,6 +161,16 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
             </div>
           )}
 
+          {sorted.filter((e) => e.status === 'active').slice(0, 1).map((event) => (
+            <LiveEventBanner
+              key={`live-${event.id}`}
+              compact
+              event={event}
+              onOpen={() => document.getElementById(`event-${event.id}`)?.scrollIntoView({ block: 'nearest' })}
+              onJoin={event.channel_id && onJoinVoice ? () => onJoinVoice(event.channel_id) : undefined}
+            />
+          ))}
+
           {sorted.map((event) => (
             <EventCard
               key={event.id}
@@ -226,10 +238,20 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
 
   return (
     <article
-      className={`rounded-lg border bg-d-surface p-4 ${
+      id={`event-${event.id}`}
+      className={`rounded-lg border bg-d-surface overflow-hidden ${
         live ? 'border-d-online' : over ? 'border-d-divider opacity-60' : 'border-d-divider'
       }`}
     >
+      {live && (
+        <div className="flex items-center gap-2 bg-d-online/15 px-4 py-1.5 text-xs font-bold uppercase text-d-onlinetext">
+          <Radio className="h-3.5 w-3.5" aria-hidden="true" /> {t('srv.liveNow')}
+        </div>
+      )}
+      {Boolean(event.image_url) && (
+        <img src={proxiedImageUrl(event.image_url)} alt="" className="w-full aspect-[5/2] object-cover" />
+      )}
+      <div className="p-4">
       <div className="flex items-start gap-4">
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold">
@@ -273,9 +295,6 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
           </div>
         </div>
 
-        {Boolean(event.image_url) && (
-          <img src={proxiedImageUrl(event.image_url)} alt="" className="h-20 w-32 shrink-0 rounded-md object-cover" />
-        )}
       </div>
 
       {!over && (
@@ -319,6 +338,7 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
           )}
         </div>
       )}
+      </div>
     </article>
   );
 }
@@ -345,9 +365,24 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
     ends_at: toLocalInput(event?.ends_at),
     recurrence: event?.recurrence ?? '',
     recurrence_until: event?.recurrence_until ? toLocalInput(event.recurrence_until).slice(0, 10) : '',
-    stage_topic: ''
+    stage_topic: '',
+    image_url: event?.image_url ?? ''
   });
   const [busy, setBusy] = useState(false);
+  const [coverFile, setCoverFile] = useState(null);
+  const [uploadingCover, setUploadingCover] = useState(false);
+  const coverInput = React.useRef(null);
+
+  const uploadCover = async (file) => {
+    setCoverFile(null);
+    setUploadingCover(true);
+    try {
+      const data = await upload('/api/upload/banner', 'banner', file);
+      if (data?.url) set({ image_url: data.url });
+    } catch (err) {
+      onToast?.(err.message ?? t('chat.uploadFailed'), { type: 'error' });
+    } finally { setUploadingCover(false); }
+  };
   const dialogRef = useDialog(onClose);
   const set = (patch) => setForm((c) => ({ ...c, ...patch }));
 
@@ -368,6 +403,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
       starts_at: new Date(form.starts_at).toISOString(),
       ends_at: form.ends_at ? new Date(form.ends_at).toISOString() : null,
       recurrence: form.recurrence || null,
+      image_url: form.image_url || null,
       // "Until" is a day: the series may run through the end of it.
       recurrence_until: form.recurrence && form.recurrence_until
         ? new Date(`${form.recurrence_until}T23:59:59`).toISOString() : null
@@ -408,6 +444,43 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
         </header>
 
         <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
+          <div>
+            <span className={label}>{t('srv.eventCover')}</span>
+            <div className="relative w-full aspect-[5/2] rounded-lg overflow-hidden border border-dashed border-d-divider bg-d-sunken">
+              {form.image_url ? (
+                <img src={proxiedImageUrl(form.image_url)} alt={t('srv.eventCover')} className="w-full h-full object-cover" />
+              ) : (
+                <button type="button" onClick={() => coverInput.current?.click()}
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-sm text-d-text2 hover:text-d-strong">
+                  <ImagePlus className="h-6 w-6" aria-hidden="true" /> {t('srv.eventCoverAdd')}
+                </button>
+              )}
+              {uploadingCover && (
+                <span className="absolute inset-0 flex items-center justify-center bg-black/50">
+                  <Loader2 className="h-5 w-5 animate-spin text-white" aria-label={t('common.uploading')} />
+                </span>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+              {form.image_url && (
+                <>
+                  <button type="button" onClick={() => coverInput.current?.click()} className="text-d-link hover:underline">{t('srv.changeImage')}</button>
+                  <button type="button" onClick={() => set({ image_url: '' })} className="inline-flex items-center gap-1 text-d-dangertext hover:underline">
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" /> {t('common.remove')}
+                  </button>
+                </>
+              )}
+              <span className="text-[11px] text-d-text2">{t('srv.eventCoverHint')}</span>
+            </div>
+            <input ref={coverInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+              aria-label={t('srv.eventCover')}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) setCoverFile(f); }} />
+            {coverFile && (
+              <ImageCropDialog file={coverFile} aspect={5 / 2} outputWidth={1600} title={t('srv.eventCover')}
+                onCancel={() => setCoverFile(null)} onConfirm={uploadCover} />
+            )}
+          </div>
+
           <label className="block">
             <span className={label}>{t('events.name')}</span>
             <input autoFocus value={form.name} maxLength={100} onChange={(e) => set({ name: e.target.value })}
@@ -505,7 +578,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
           <button type="button" onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-medium text-d-text2 hover:underline">
             {t('common.cancel')}
           </button>
-          <button type="submit" disabled={!valid || busy}
+          <button type="submit" disabled={!valid || busy || uploadingCover}
             className="flex items-center gap-2 rounded-lg bg-d-brand px-5 py-2 text-sm font-medium text-white
               hover:bg-d-brandhover disabled:cursor-not-allowed disabled:opacity-50">
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
