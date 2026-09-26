@@ -252,7 +252,7 @@ seed ตอนแรกใช้ `msg-1..4` จึงเกิดปัญหา
 
 ## 4. สิทธิ์ (Permissions)
 
-Bitfield 40 flag แบบ Discord เก็บเป็น decimal string (64-bit ปลอดภัย)
+Bitfield 36 flag (ตำแหน่งบิตตรงกับ Discord) เก็บเป็น decimal string (64-bit ปลอดภัย)
 ลำดับการคำนวณตรงตาม Discord:
 
 ```
@@ -554,7 +554,7 @@ MP4/MOV จาก atom `mvhd` · WebM/MKV จาก Segment Info · MP3 จา�
 ## 16. การทดสอบ
 
 ```bash
-npm test     # 256 integration tests, 3 ไฟล์รันขนานกัน
+npm test     # 281 integration tests (70 suites), 3 ไฟล์รันขนานกัน
 npm run a11y # ตรวจ accessibility แบบอัตโนมัติ
 ```
 
@@ -656,7 +656,7 @@ label/description มาจาก `perm.<NAME>` / `appearance.<key>` ตอน r
 | **ทดสอบกับ screen reader จริง** | NVDA (Windows) หรือ VoiceOver (macOS) และคนฟัง — `npm run a11y` ตรวจได้ทุกอย่างที่ตรวจอัตโนมัติได้แล้ว แต่แทนการฟังจริงไม่ได้ |
 | **DAST scan (hawkscan)** | `hawk` CLI + StackHawk API key — ติดตั้งด้วย `brew install stackhawk/cli/hawk && hawk init --browser` แล้วสแกนได้ทันที |
 | **build image จริงจาก `Dockerfile`** | Docker daemon — Docker Desktop ในเครื่องนี้ไม่ได้รัน (`npipe:////./pipe/dockerDesktopLinuxEngine` ต่อไม่ได้) ตัว `Dockerfile`/`docker-compose.yml`/`Caddyfile` เขียนครบและ review แล้ว แต่ **ยังไม่ได้ build ยืนยันด้วยตาตัวเอง** — เปิด Docker Desktop แล้วรัน `npm run docker:up` |
-| **`npm run build` ของ client** | รอบล่าสุดแก้ client ทั้งชุด ตรวจด้วย `npm run jsx:check` + `npm run a11y` + `npm run i18n:audit` ผ่านหมด และ integration test 193 ข้อผ่านหมด แต่ `vite build` ต้องรันบนเครื่องที่ลง native binary ของ esbuild/rollup ได้ — **รัน `npm run verify` หนึ่งครั้งก่อน deploy** |
+| ~~**`npm run build` ของ client**~~ | ยืนยันแล้ว: `npm ci && npm run build` และ `npm test` (281 ข้อ) ผ่านบน Linux/Node 22 — ข้อนี้ไม่ใช่ข้อจำกัดอีกต่อไป |
 
 รวมถึง **SFU** ในหัวข้อ 15 ที่เป็นข้อจำกัดเชิงสถาปัตยกรรม ไม่ใช่งานที่ค้าง
 
