@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Nhắn @{name}',
   'chat.welcomeToChannel': 'Chào mừng bạn đến với #{channel}!',
   'chat.welcomeToDm': 'Chào mừng đến với cuộc trò chuyện của bạn với @{name}!',
-  'chat.channelStart': 'Đây là khởi đầu của #{channel} — có thể dùng Markdown tại đây, bao gồm **in đậm**, ||spoiler|| và khối mã.',
+  'chat.channelStart': 'Đây là khởi đầu của kênh #{channel}.',
   'chat.dmStart': 'Đây là khởi đầu cuộc trò chuyện của bạn với @{name}.',
   'chat.newMessages': 'Tin nhắn mới',
   'chat.today': 'Hôm nay',

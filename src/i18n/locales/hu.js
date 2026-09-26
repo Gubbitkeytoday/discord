@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Üzenet küldése: @{name}',
   'chat.welcomeToChannel': 'Üdv a(z) #{channel} csatornán!',
   'chat.welcomeToDm': 'Üdv a(z) @{name} felhasználóval folytatott beszélgetésedben!',
-  'chat.channelStart': 'Ez a(z) #{channel} csatorna kezdete – itt működik a Markdown, többek között a **félkövér**, a ||spoiler|| és a kódblokkok.',
+  'chat.channelStart': 'Itt kezdődik a(z) #{channel} csatorna.',
   'chat.dmStart': 'Ez a(z) @{name} felhasználóval folytatott beszélgetésed kezdete.',
   'chat.newMessages': 'Új üzenetek',
   'chat.today': 'Ma',

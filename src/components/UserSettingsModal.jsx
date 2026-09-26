@@ -262,7 +262,7 @@ export default function UserSettingsModal({
             </button>
           </nav>
 
-          <p className="mt-6 px-2.5 pb-4 text-[11px] text-d-text4">
+          <p className="mt-6 px-2.5 pb-4 text-xs text-d-text4">
             {t('settings.version', { version: APP_VERSION })}
           </p>
         </div>
@@ -319,7 +319,7 @@ export default function UserSettingsModal({
             >
               <X className="h-4 w-4" strokeWidth={2.5} />
             </span>
-            <span className="text-[11px] font-bold text-d-text3 transition-colors group-hover:text-d-strong">
+            <span className="text-xs font-bold text-d-text3 transition-colors group-hover:text-d-strong">
               ESC
             </span>
           </button>

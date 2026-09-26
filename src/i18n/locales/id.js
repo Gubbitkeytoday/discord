@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Kirim pesan ke @{name}',
   'chat.welcomeToChannel': 'Selamat datang di #{channel}!',
   'chat.welcomeToDm': 'Selamat datang di percakapanmu dengan @{name}!',
-  'chat.channelStart': 'Ini adalah awal dari #{channel} — Markdown bisa dipakai di sini, termasuk **tebal**, ||spoiler|| dan blok kode.',
+  'chat.channelStart': 'Ini adalah awal dari kanal #{channel}.',
   'chat.dmStart': 'Ini adalah awal percakapanmu dengan @{name}.',
   'chat.newMessages': 'Pesan baru',
   'chat.today': 'Hari ini',

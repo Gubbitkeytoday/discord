@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Napsat @{name}',
   'chat.welcomeToChannel': 'Vítej v #{channel}!',
   'chat.welcomeToDm': 'Vítej v konverzaci s @{name}!',
-  'chat.channelStart': 'Tady začíná kanál #{channel} — funguje tu Markdown, včetně **tučného písma**, ||spoilerů|| a bloků kódu.',
+  'chat.channelStart': 'Tady začíná kanál #{channel}.',
   'chat.dmStart': 'Tady začíná tvoje konverzace s @{name}.',
   'chat.newMessages': 'Nové zprávy',
   'chat.today': 'Dnes',

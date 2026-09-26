@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Написати @{name}',
   'chat.welcomeToChannel': 'Ласкаво просимо до #{channel}!',
   'chat.welcomeToDm': 'Ласкаво просимо до розмови з @{name}!',
-  'chat.channelStart': 'Це початок каналу #{channel}. Тут працює Markdown, зокрема **жирний текст**, ||спойлери|| і блоки коду.',
+  'chat.channelStart': 'Це початок каналу #{channel}.',
   'chat.dmStart': 'Це початок вашої розмови з @{name}.',
   'chat.newMessages': 'Нові повідомлення',
   'chat.today': 'Сьогодні',

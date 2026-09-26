@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Send en besked til @{name}',
   'chat.welcomeToChannel': 'Velkommen til #{channel}!',
   'chat.welcomeToDm': 'Velkommen til din samtale med @{name}!',
-  'chat.channelStart': 'Dette er begyndelsen på #{channel} – Markdown virker her, inklusive **fed**, ||spoilere|| og kodeblokke.',
+  'chat.channelStart': 'Dette er starten på kanalen #{channel}.',
   'chat.dmStart': 'Dette er begyndelsen på din samtale med @{name}.',
   'chat.newMessages': 'Nye beskeder',
   'chat.today': 'I dag',

@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Poruka za @{name}',
   'chat.welcomeToChannel': 'Dobro došli na #{channel}!',
   'chat.welcomeToDm': 'Dobro došli u razgovor s korisnikom @{name}!',
-  'chat.channelStart': 'Ovo je početak kanala #{channel} — ovdje radi Markdown, uključujući **podebljano**, ||spojlere|| i blokove koda.',
+  'chat.channelStart': 'Ovo je početak kanala #{channel}.',
   'chat.dmStart': 'Ovo je početak tvog razgovora s korisnikom @{name}.',
   'chat.newMessages': 'Nove poruke',
   'chat.today': 'Danas',

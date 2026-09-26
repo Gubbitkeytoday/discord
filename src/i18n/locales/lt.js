@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Žinutė @{name}',
   'chat.welcomeToChannel': 'Sveiki atvykę į #{channel}!',
   'chat.welcomeToDm': 'Sveiki atvykę į pokalbį su @{name}!',
-  'chat.channelStart': 'Tai kanalo #{channel} pradžia – čia veikia Markdown, įskaitant **paryškinimą**, ||slepiamą turinį|| ir kodo blokus.',
+  'chat.channelStart': 'Tai kanalo #{channel} pradžia.',
   'chat.dmStart': 'Tai jūsų pokalbio su @{name} pradžia.',
   'chat.newMessages': 'Naujos žinutės',
   'chat.today': 'Šiandien',

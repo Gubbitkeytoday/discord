@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': '給 @{name} 發訊息',
   'chat.welcomeToChannel': '歡迎來到 #{channel}！',
   'chat.welcomeToDm': '歡迎開始與 @{name} 的對話！',
-  'chat.channelStart': '這是 #{channel} 的開端——此處支援 Markdown，包括 **粗體**、||暴雷|| 和程式碼區塊。',
+  'chat.channelStart': '這是 #{channel} 頻道的起點。',
   'chat.dmStart': '這是你與 @{name} 對話的開端。',
   'chat.newMessages': '新訊息',
   'chat.today': '今天',
@@ -556,7 +556,7 @@ export default {
   'server.addServer': '新增伺服器',
   'server.createTitle': '建立你的伺服器',
   'server.createHint': '伺服器是你和好友一起玩耍的地方。建立一個，開始聊天吧。',
-  'server.createOwn': '親自建立',
+  'server.createOwn': '自行建立',
   'server.haveInvite': '已經有邀請了？',
   'server.join': '加入伺服器',
   'server.joinTitle': '加入伺服器',
@@ -1145,8 +1145,8 @@ export default {
   // --- reaction viewer ---------------------------------------------------------
   'chat.you': '你',
   'chat.someone': '已離開的使用者',
-  'chat.reactedBy': '{names} 作出了反應',
-  'chat.reactedByMore': '{names} 和其他 {count} 人作出了反應',
+  'chat.reactedBy': '{names} 已回應',
+  'chat.reactedByMore': '{names} 和其他 {count} 人已回應',
 
 
   // --- soundboard --------------------------------------------------------------

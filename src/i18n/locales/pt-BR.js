@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Conversar com @{name}',
   'chat.welcomeToChannel': 'Boas-vindas a #{channel}!',
   'chat.welcomeToDm': 'Boas-vindas à sua conversa com @{name}!',
-  'chat.channelStart': 'Este é o começo de #{channel} — aqui dá para usar Markdown, incluindo **negrito**, ||spoilers|| e blocos de código.',
+  'chat.channelStart': 'Este é o começo do canal #{channel}.',
   'chat.dmStart': 'Este é o começo da sua conversa com @{name}.',
   'chat.newMessages': 'Novas mensagens',
   'chat.today': 'Hoje',

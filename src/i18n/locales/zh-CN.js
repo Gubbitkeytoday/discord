@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': '给 @{name} 发消息',
   'chat.welcomeToChannel': '欢迎来到 #{channel}！',
   'chat.welcomeToDm': '欢迎开始与 @{name} 的对话！',
-  'chat.channelStart': '这是 #{channel} 的开端——此处支持 Markdown，包括 **粗体**、||剧透|| 和代码块。',
+  'chat.channelStart': '这是 #{channel} 频道的起点。',
   'chat.dmStart': '这是你与 @{name} 对话的开端。',
   'chat.newMessages': '新消息',
   'chat.today': '今天',

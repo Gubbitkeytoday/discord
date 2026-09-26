@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': '@{name} kullanıcısına mesaj gönder',
   'chat.welcomeToChannel': '#{channel} kanalına hoş geldin!',
   'chat.welcomeToDm': '@{name} ile sohbetine hoş geldin!',
-  'chat.channelStart': 'Burası #{channel} kanalının başlangıcı — burada **kalın**, ||spoiler|| ve kod blokları dahil Markdown kullanabilirsin.',
+  'chat.channelStart': 'Burası #{channel} kanalının başlangıcı.',
   'chat.dmStart': 'Burası @{name} ile sohbetinin başlangıcı.',
   'chat.newMessages': 'Yeni mesajlar',
   'chat.today': 'Bugün',

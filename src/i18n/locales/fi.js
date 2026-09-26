@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Viesti käyttäjälle @{name}',
   'chat.welcomeToChannel': 'Tervetuloa kanavalle #{channel}!',
   'chat.welcomeToDm': 'Tervetuloa keskusteluusi käyttäjän @{name} kanssa!',
-  'chat.channelStart': 'Tästä alkaa kanava #{channel} – Markdown toimii täällä, mukaan lukien **lihavointi**, ||spoilerit|| ja koodilohkot.',
+  'chat.channelStart': 'Tästä alkaa kanava #{channel}.',
   'chat.dmStart': 'Tästä alkaa keskustelusi käyttäjän @{name} kanssa.',
   'chat.newMessages': 'Uudet viestit',
   'chat.today': 'Tänään',

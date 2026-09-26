@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': '@{name}에게 메시지 보내기',
   'chat.welcomeToChannel': '#{channel}에 오신 것을 환영합니다!',
   'chat.welcomeToDm': '@{name} 님과의 대화에 오신 것을 환영합니다!',
-  'chat.channelStart': '#{channel} 채널의 시작이에요 — **굵게**, ||스포일러||, 코드 블록 등 마크다운을 사용할 수 있어요.',
+  'chat.channelStart': '#{channel} 채널의 시작이에요.',
   'chat.dmStart': '@{name} 님과 나눈 대화의 시작이에요.',
   'chat.newMessages': '새로운 메시지',
   'chat.today': '오늘',

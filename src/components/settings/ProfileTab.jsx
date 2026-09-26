@@ -16,6 +16,7 @@ import { proxiedImageUrl, cssImageUrl } from '../../utils/media';
 import {
   PageHeader, Section, Field, Divider, inputClass, Button, Select, UnsavedBar, useReportDirty
 } from './primitives';
+import StatusIndicator from '../ui/StatusIndicator.jsx';
 
 const BLANK = {
   display_name: '', pronouns: '', bio: '',
@@ -198,7 +199,7 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
               maxLength={190}
               className={`${inputClass} resize-none`}
             />
-            <span className="mt-1 block text-right text-[11px] text-d-text4 tabular-nums">
+            <span className="mt-1 block text-right text-xs text-d-text4 tabular-nums">
               {form.bio.length}/190
             </span>
           </Field>
@@ -341,18 +342,26 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
               }}
             />
             <div className="relative px-4 pb-4">
-              <img
-                src={avatarSrc}
-                alt=""
-                className="relative -top-8 mb-[-1.75rem] h-[72px] w-[72px] rounded-full border-[6px]
-                  border-d-base object-cover"
-              />
+              <span className="relative -top-8 mb-[-1.75rem] block h-[72px] w-[72px]">
+                <img
+                  src={avatarSrc}
+                  alt=""
+                  width={72}
+                  height={72}
+                  className="h-[72px] w-[72px] rounded-full border-[6px] border-d-base object-cover"
+                />
+                <StatusIndicator
+                  status={currentUser?.status ?? 'online'}
+                  size={16}
+                  ring="var(--color-d-base)"
+                  className="absolute bottom-0 right-0"
+                />
+              </span>
               <h4 className="text-base font-bold leading-tight text-d-strong">
                 {form.display_name || currentUser?.username}
               </h4>
               <p className="text-xs text-d-text3">
                 @{currentUser?.username}
-                {currentUser?.discriminator ? `#${currentUser.discriminator}` : ''}
                 {form.pronouns ? ` · ${form.pronouns}` : ''}
               </p>
               {Boolean(form.bio) && (

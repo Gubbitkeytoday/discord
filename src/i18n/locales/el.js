@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Μήνυμα στον/στην @{name}',
   'chat.welcomeToChannel': 'Καλώς ήρθες στο #{channel}!',
   'chat.welcomeToDm': 'Καλώς ήρθες στη συνομιλία σου με τον/την @{name}!',
-  'chat.channelStart': 'Αυτή είναι η αρχή του #{channel} — εδώ υποστηρίζεται Markdown, όπως **έντονα**, ||spoilers|| και μπλοκ κώδικα.',
+  'chat.channelStart': 'Αυτή είναι η αρχή του καναλιού #{channel}.',
   'chat.dmStart': 'Αυτή είναι η αρχή της συνομιλίας σου με τον/την @{name}.',
   'chat.newMessages': 'Νέα μηνύματα',
   'chat.today': 'Σήμερα',

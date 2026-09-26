@@ -56,7 +56,7 @@ export default {
   'chat.messagePlaceholderDm': 'Trimite un mesaj către @{name}',
   'chat.welcomeToChannel': 'Bun venit în #{channel}!',
   'chat.welcomeToDm': 'Bun venit în conversația ta cu @{name}!',
-  'chat.channelStart': 'Acesta este începutul canalului #{channel}. Aici funcționează Markdown, inclusiv **aldin**, ||spoilere|| și blocuri de cod.',
+  'chat.channelStart': 'Acesta este începutul canalului #{channel}.',
   'chat.dmStart': 'Acesta este începutul conversației tale cu @{name}.',
   'chat.newMessages': 'Mesaje noi',
   'chat.today': 'Astăzi',
