@@ -1162,6 +1162,23 @@ export async function setServerVoiceState(io, { serverId, channelId, userId, mut
 }
 
 /**
+ * Server mute (or unmute) several members of one voice channel at once — the
+ * teacher's "Mute everyone". Same storage and enforcement as the single
+ * action above, but the roster is broadcast once at the end instead of once per
+ * member, so a class of thirty does not produce thirty roster refreshes.
+ */
+export async function setServerMuteMany(io, { serverId, channelId, userIds, mute, by }) {
+  const value = mute ? 1 : 0;
+  for (const userId of userIds) {
+    await runQuery(`UPDATE server_members SET is_mute = ? WHERE server_id = ? AND user_id = ?`, [value, serverId, userId]);
+    await runQuery(`UPDATE voice_states SET server_mute = ? WHERE user_id = ? AND channel_id = ?`, [value, userId, channelId]);
+    io.to(`user-${userId}`).emit('voice_server_state', { channelId, serverId, by, serverMute: Boolean(mute), bulk: true });
+    await livekit.syncParticipantGrants(channelId, userId);
+  }
+  await broadcastVoice(io, channelId);
+}
+
+/**
  * Sessions end (logout, revoke from another device, password change, account
  * deletion): sockets that authenticated with them must not keep receiving
  * events. Called through lib/sessionEvents.js so auth code needs no io handle.
