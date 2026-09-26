@@ -47,17 +47,37 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
     } finally { setBusy(null); }
   };
 
-  /** Deleting is permanent, so the first click only arms the second. */
-  const removeAccount = async () => {
-    if (!confirmDelete) { setConfirmDelete(true); return; }
+  /**
+   * Deleting is permanent, so the first click only arms the second, and the
+   * server wants the password again (plus a code when two-factor is on).
+   */
+  const [deleteAuth, setDeleteAuth] = useState({ password: '', code: '' });
+  const [deleteError, setDeleteError] = useState('');
+  const removeAccount = async (e) => {
+    e?.preventDefault?.();
+    if (!confirmDelete) { setConfirmDelete(true); setDeleteError(''); return; }
+    if (!deleteAuth.password) { setDeleteError(t('apiError.PASSWORD_REQUIRED')); return; }
+    if (mfa?.enabled && !deleteAuth.code.trim()) { setDeleteError(t('apiError.MFA_REQUIRED')); return; }
     setBusy('delete');
+    setDeleteError('');
     try {
-      await del('/api/users/@me');
+      await del('/api/users/@me', {
+        body: {
+          password: deleteAuth.password,
+          ...(mfa?.enabled ? { mfa_code: deleteAuth.code.trim() } : {})
+        }
+      });
       window.location.reload();
     } catch (err) {
-      onToast?.(err.message, { type: 'error' });
-      setConfirmDelete(false);
+      // Wrong password / code: keep the form open so they can correct it.
+      setDeleteError(err.message);
+      if (err.code === 'INVALID_MFA_CODE') setDeleteAuth((prev) => ({ ...prev, code: '' }));
     } finally { setBusy(null); }
+  };
+  const cancelDelete = () => {
+    setConfirmDelete(false);
+    setDeleteAuth({ password: '', code: '' });
+    setDeleteError('');
   };
   const [passwords, setPasswords] = useState({ current: '', next: '', confirm: '' });
   const [passwordDone, setPasswordDone] = useState(false);
@@ -105,15 +125,27 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
     });
   };
 
-  const disableMfa = (e) => {
+  // Turning two-factor off is step-up authenticated: password and a code.
+  const [disablePassword, setDisablePassword] = useState('');
+  const [mfaError, setMfaError] = useState('');
+  const disableMfa = async (e) => {
     e.preventDefault();
-    return run('mfa', async () => {
-      await post('/api/auth/mfa/disable', { code: code.trim() });
+    if (!disablePassword) { setMfaError(t('apiError.PASSWORD_REQUIRED')); return; }
+    setBusy('mfa');
+    setMfaError('');
+    try {
+      await post('/api/auth/mfa/disable', { code: code.trim(), password: disablePassword });
       setCode('');
+      setDisablePassword('');
       setRecoveryCodes(null);
       await load();
       onToast?.(t('security.mfaDisabled'), { type: 'success' });
-    });
+    } catch (err) {
+      setMfaError(err.message);
+      if (err.code === 'INVALID_MFA_CODE') setCode('');
+    } finally {
+      setBusy(null);
+    }
   };
 
   // Changing a password revokes every other session; if the server also drops
@@ -346,23 +378,40 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
           )}
 
           {Boolean(mfa?.enabled) && (
-            <form onSubmit={disableMfa} className="flex items-end gap-2 pt-2 border-t border-d-divider">
-              <label className="block">
-                <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
-                <input
-                  value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  inputMode="numeric"
-                  className="w-36 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand tracking-[0.3em] font-mono"
-                />
-              </label>
-              <button
-                type="submit"
-                disabled={code.length !== 6 || busy === 'mfa'}
-                className="bg-d-danger hover:bg-red-600 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded"
-              >
-                {t('security.disableMfa')}
-              </button>
+            <form onSubmit={disableMfa} className="pt-2 border-t border-d-divider space-y-2" aria-label={t('security.disableMfa')}>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="block">
+                  <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.currentPassword')}</span>
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    value={disablePassword}
+                    onChange={(e) => { setDisablePassword(e.target.value); setMfaError(''); }}
+                    aria-invalid={mfaError ? 'true' : undefined}
+                    className="w-48 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
+                  <input
+                    value={code}
+                    onChange={(e) => { setCode(e.target.value.replace(/\D/g, '').slice(0, 6)); setMfaError(''); }}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    aria-invalid={mfaError ? 'true' : undefined}
+                    className="w-36 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand tracking-[0.3em] font-mono"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={code.length !== 6 || !disablePassword || busy === 'mfa'}
+                  className="bg-d-danger hover:bg-red-600 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded flex items-center gap-2"
+                >
+                  {busy === 'mfa' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {t('security.disableMfa')}
+                </button>
+              </div>
+              {Boolean(mfaError) && <p role="alert" className="text-xs text-d-danger">{mfaError}</p>}
             </form>
           )}
         </div>
@@ -436,17 +485,60 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
           >
             {busy === 'export' ? t('common.loading') : t('security.requestExport')}
           </button>
-          <button
-            type="button"
-            onClick={removeAccount}
-            disabled={busy === 'delete'}
-            className="px-3 py-2 rounded-md bg-d-danger/90 hover:bg-d-danger text-sm font-semibold text-white"
-          >
-            {confirmDelete ? t('security.deleteConfirm') : t('security.deleteAccount')}
-          </button>
+          {!confirmDelete && (
+            <button
+              type="button"
+              onClick={removeAccount}
+              className="px-3 py-2 rounded-md bg-d-danger/90 hover:bg-d-danger text-sm font-semibold text-white"
+            >
+              {t('security.deleteAccount')}
+            </button>
+          )}
         </div>
         {confirmDelete && (
-          <p className="mt-2 text-xs text-d-danger">{t('security.deleteWarning')}</p>
+          <form onSubmit={removeAccount} className="mt-3 space-y-3 bg-d-base rounded-xl border border-d-danger/60 p-4" aria-label={t('security.deleteAccount')}>
+            <p className="text-xs text-d-danger">{t('security.deleteWarning')}</p>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="block">
+                <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.currentPassword')}</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={deleteAuth.password}
+                  onChange={(e) => { setDeleteAuth({ ...deleteAuth, password: e.target.value }); setDeleteError(''); }}
+                  aria-invalid={deleteError ? 'true' : undefined}
+                  className="w-48 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+                />
+              </label>
+              {Boolean(mfa?.enabled) && (
+                <label className="block">
+                  <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
+                  <input
+                    value={deleteAuth.code}
+                    onChange={(e) => { setDeleteAuth({ ...deleteAuth, code: e.target.value.replace(/\s/g, '').slice(0, 32) }); setDeleteError(''); }}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    aria-invalid={deleteError ? 'true' : undefined}
+                    className="w-40 bg-d-surface text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand tracking-[0.2em] font-mono"
+                  />
+                </label>
+              )}
+            </div>
+            {Boolean(deleteError) && <p role="alert" className="text-xs text-d-danger">{deleteError}</p>}
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={busy === 'delete' || !deleteAuth.password || (Boolean(mfa?.enabled) && !deleteAuth.code.trim())}
+                className="px-3 py-2 rounded-md bg-d-danger/90 hover:bg-d-danger disabled:opacity-50 text-sm font-semibold text-white flex items-center gap-2"
+              >
+                {busy === 'delete' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {t('security.deleteConfirm')}
+              </button>
+              <button type="button" onClick={cancelDelete} className="text-xs text-d-text3 hover:underline">
+                {t('common.cancel')}
+              </button>
+            </div>
+          </form>
         )}
       </section>
     </div>

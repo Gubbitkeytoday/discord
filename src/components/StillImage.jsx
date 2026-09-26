@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { proxiedImageUrl } from '../utils/media';
 
 // url -> data URL of the first frame, or null when it cannot be captured
 // (a cross-origin image without CORS taints the canvas).
@@ -40,7 +41,9 @@ export function isAnimatedImage({ url = '', mimetype = '', filename = '', animat
  * so layout is untouched. If the first frame cannot be captured, it falls
  * back to a neutral placeholder rather than autoplaying against the setting.
  */
-export default function StillImage({ src, alt = '', animate = true, playOnHover = true, className = '', style, ...rest }) {
+export default function StillImage({ src: rawSrc, alt = '', animate = true, playOnHover = true, className = '', style, ...rest }) {
+  // Remote images must come through our origin (CSP img-src 'self').
+  const src = proxiedImageUrl(rawSrc);
   const [still, setStill] = useState(() => (frames.has(src) ? frames.get(src) : undefined));
   const [active, setActive] = useState(false);
 

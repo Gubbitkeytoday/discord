@@ -185,7 +185,6 @@ export default {
   'dm.openFailed': 'เปิดการสนทนาไม่ได้: {error}',
 
   // --- search ----------------------------------------------------------------
-  'search.noResults': 'ไม่พบข้อความที่ตรงกัน',
   'search.jumpFailed': 'ไปที่ข้อความนั้นไม่ได้: {error}',
 
   // --- quick switcher --------------------------------------------------------
@@ -260,7 +259,6 @@ export default {
   'settings.allMessages': 'ทุกข้อความ',
   'settings.onlyMentions': 'เฉพาะเมื่อถูก @mention',
   'settings.type': 'ประเภท',
-  'settings.userSettings': 'ตั้งค่าผู้ใช้',
   'settings.saved': 'บันทึกแล้ว',
 
   // --- roles -----------------------------------------------------------------
@@ -1646,6 +1644,15 @@ export default {
   'apiError.VERIFICATION_EMAIL': 'เซิร์ฟเวอร์นี้ต้องยืนยันอีเมลก่อน',
   'apiError.VERIFICATION_AGE': 'บัญชีของคุณยังใหม่เกินไปที่จะพูดคุยในเซิร์ฟเวอร์นี้',
   'apiError.VERIFICATION_MFA': 'เซิร์ฟเวอร์นี้ต้องเปิดการยืนยันตัวตนสองชั้น',
+  'apiError.PASSWORD_REQUIRED': 'ใส่รหัสผ่านเพื่อดำเนินการต่อ',
+  'apiError.MAIL_NOT_CONFIGURED': 'เว็บไซต์นี้ยังไม่ได้ตั้งค่าอีเมล จึงใช้ฟีเจอร์นี้ไม่ได้',
+  'apiError.INVALID_COLOR': 'ใช้รหัสสีแบบฐานสิบหก เช่น #5865f2',
+  'apiError.REFERENCE_CONFLICT': 'รายการที่เกี่ยวข้องไม่มีอยู่แล้วหรือยังถูกใช้งานอยู่',
+  'apiError.BUSY': 'ระบบกำลังยุ่ง ลองอีกครั้งในอีกสักครู่',
+  'apiError.TIMEOUT': 'ใช้เวลานานเกินไป โปรดลองอีกครั้ง',
+  'apiError.INVALID_URL': 'ลิงก์ไม่ถูกต้อง ใช้ที่อยู่ http(s) แบบเต็ม',
+  'apiError.URL_NOT_ALLOWED': 'ไม่อนุญาตที่อยู่นี้',
+  'apiError.NOT_AN_IMAGE': 'ลิงก์นี้ไม่ได้ชี้ไปที่รูปภาพ',
   'chat.attachmentCount_one': 'ไฟล์แนบ {count} รายการ',
   'dm.members_one': 'สมาชิก {count} คน',
   'invites.usesOption_one': '{count} ครั้ง',
@@ -1728,4 +1735,6 @@ export default {
   'shortcuts.replyKeys': 'Enter',
   'shortcuts.newline': 'ขึ้นบรรทัดใหม่ในข้อความ',
   'shortcuts.customize': 'เปลี่ยนแป้นพิมพ์ลัดได้ที่ การตั้งค่า › ปุ่มลัด',
+  'auth.sessionRevoked': 'คุณถูกออกจากระบบบนอุปกรณ์นี้แล้ว',
+  'voice.disconnected': 'คุณถูกตัดการเชื่อมต่อจากช่องเสียง',
 };

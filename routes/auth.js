@@ -23,7 +23,16 @@ import { verifyMfaChallenge } from '../services/accountSecurity.js';
 const router = express.Router();
 
 const USERNAME = /^[a-zA-Z0-9_.฀-๿-]{2,32}$/;
-const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// Linear-time check (no backtracking regex on user input): one '@', no
+// whitespace, a dotted domain, and the RFC 5321 length cap.
+function isValidEmail(value) {
+  if (value.length > 254 || /\s/.test(value)) return false;
+  const at = value.indexOf('@');
+  if (at < 1 || at !== value.lastIndexOf('@')) return false;
+  const domain = value.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  return dot > 0 && dot < domain.length - 1;
+}
 
 const PUBLIC_USER = `
   id, username, discriminator, display_name, email, avatar_url, banner_url,
@@ -67,7 +76,7 @@ router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => 
     throw new ApiError('Usernames are 2-32 characters: letters, digits, Thai, _ . -',
       { code: 'INVALID_USERNAME' });
   }
-  if (requestedEmail && !EMAIL.test(requestedEmail)) {
+  if (requestedEmail && !isValidEmail(requestedEmail)) {
     throw new ApiError('That e-mail address is not valid', { code: 'INVALID_EMAIL' });
   }
   // Usernames are public (they are shown everywhere), so saying one is taken
