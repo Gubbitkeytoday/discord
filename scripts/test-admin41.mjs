@@ -383,6 +383,48 @@ describe('raid tools', () => {
   });
 });
 
+describe('membership counter under concurrency', () => {
+  test('16 people accepting one invite at once all get in, and the count is exact', async () => {
+    const owner = await makeUser('cc');
+    const serverId = await makeServer(owner);
+    await api('PATCH', `/api/servers/${serverId}/raid`, { enabled: false }, as(owner));
+    const invite = await api('POST', `/api/servers/${serverId}/invites`, { maxAge: 0 }, as(owner));
+    const users = [];
+    for (let i = 0; i < 16; i += 1) users.push(await makeUser('rush'));
+    const results = await Promise.all(users.map((u) => api('POST', `/api/invites/${invite.body.code}/accept`, undefined, as(u))));
+    assert.deepEqual(results.map((r) => r.status), users.map(() => 200), JSON.stringify(results.find((r) => r.status !== 200)?.body));
+    const { getQuery } = await db();
+    const row = await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId]);
+    assert.equal(Number(row.member_count), 17);
+    const inviteRow = await getQuery(`SELECT uses FROM invites WHERE code = ?`, [invite.body.code]);
+    assert.equal(Number(inviteRow.uses), 16);
+
+    // Accepting again as an existing member changes nothing.
+    assert.equal((await api('POST', `/api/invites/${invite.body.code}/accept`, undefined, as(users[0]))).status, 200);
+    assert.equal(Number((await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId])).member_count), 17);
+
+    // Half of them leave at once; a double leave does not double-count.
+    const leaving = users.slice(0, 8);
+    const left = await Promise.all([...leaving, users[0]].map((u) => api('POST', `/api/servers/${serverId}/leave`, undefined, as(u))));
+    assert.ok(left.every((r) => r.status === 200), JSON.stringify(left.map((r) => r.status)));
+    assert.equal(Number((await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId])).member_count), 9);
+    const { recountMembers } = await import('../services/guilds.js');
+    assert.equal(Number(await recountMembers(serverId)), 9);
+  });
+
+  test('a limited invite is never over-claimed by a burst', async () => {
+    const owner = await makeUser('lim');
+    const serverId = await makeServer(owner);
+    const invite = await api('POST', `/api/servers/${serverId}/invites`, { maxAge: 0, maxUses: 3 }, as(owner));
+    const users = [];
+    for (let i = 0; i < 8; i += 1) users.push(await makeUser('burst'));
+    const results = await Promise.all(users.map((u) => api('POST', `/api/invites/${invite.body.code}/accept`, undefined, as(u))));
+    assert.equal(results.filter((r) => r.status === 200).length, 3);
+    const { getQuery } = await db();
+    assert.equal(Number((await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId])).member_count), 4);
+  });
+});
+
 describe('recurring events', () => {
   test('next-occurrence arithmetic (monthly clamps to the month end)', async () => {
     const { nextOccurrence } = await import('../services/events.js');

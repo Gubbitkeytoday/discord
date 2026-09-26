@@ -661,22 +661,33 @@ export async function joinServer({ serverId, userId, claim = null }) {
   const { guardJoin } = await import('./insights.js');
   await guardJoin(serverId);
 
+  // READ COMMITTED, with every write atomic on its own: a burst of people
+  // accepting the same invite must not serialise on (and fail over) the
+  // guild row. The invite claim is a conditional UPDATE and the member count
+  // moves by exactly the rows this join changed, so no read-then-write is left.
   await transaction(async () => {
     if (claim) await claim();
     // One statement for join and re-join, so two concurrent joins by the same
     // person cannot both take the INSERT path and collide on the primary key.
-    await runQuery(
+    // It changes a row only when the person was not already an active member.
+    const joined = await runQuery(
       `INSERT INTO server_members (server_id, user_id) VALUES (?, ?)
-       ON CONFLICT (server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = ${sql.now}`,
+       ON CONFLICT (server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = ${sql.now}
+       WHERE server_members.left_at IS NOT NULL`,
       [serverId, userId]
     );
+    const isNew = Number(joined?.changes ?? 0) > 0;
     // Membership screening: the new member is pending until they accept the
-    // rules / finish onboarding. Rejoining members are screened again.
-    const gate = await getQuery(`SELECT screening_enabled FROM servers WHERE id = ?`, [serverId]);
-    await runQuery(
-      `UPDATE server_members SET pending = ? WHERE server_id = ? AND user_id = ?`,
-      [gate?.screening_enabled ? 1 : 0, serverId, userId]
-    );
+    // rules / finish onboarding. Rejoining members are screened again; an
+    // active member following another invite keeps their state.
+    if (isNew) {
+      const gate = await getQuery(`SELECT screening_enabled FROM servers WHERE id = ?`, [serverId]);
+      await runQuery(
+        `UPDATE server_members SET pending = ? WHERE server_id = ? AND user_id = ?`,
+        [gate?.screening_enabled ? 1 : 0, serverId, userId]
+      );
+      await runQuery(`UPDATE servers SET member_count = member_count + 1 WHERE id = ?`, [serverId]);
+    }
     await runQuery(
       `INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [serverId, userId, serverId]
@@ -684,13 +695,7 @@ export async function joinServer({ serverId, userId, claim = null }) {
     await runQuery(
       `INSERT INTO server_settings (user_id, server_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [userId, serverId]
     );
-    await runQuery(
-      `UPDATE servers SET member_count = (
-         SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
-       ) WHERE id = ?`,
-      [serverId, serverId]
-    );
-  });
+  }, { isolation: 'read committed' });
 
   return getServerDetail(serverId, userId);
 }
@@ -702,19 +707,8 @@ export async function leaveServer({ serverId, userId }) {
     throw ApiError.conflict('Transfer ownership before leaving your own server');
   }
   await transaction(async () => {
-    await runQuery(
-      `UPDATE server_members SET left_at = ${sql.now}
-        WHERE server_id = ? AND user_id = ?`,
-      [serverId, userId]
-    );
-    await runQuery(`DELETE FROM member_roles WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
-    await runQuery(
-      `UPDATE servers SET member_count = (
-         SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
-       ) WHERE id = ?`,
-      [serverId, serverId]
-    );
-  });
+    await endMembership(serverId, userId);
+  }, { isolation: 'read committed' });
   return { success: true };
 }
 
@@ -1182,18 +1176,41 @@ export async function assertMemberHierarchy({ serverId, actorId, targetId, actio
  * is cleared with them, and the member count is recomputed.
  */
 async function removeMembership(serverId, userId) {
-  await runQuery(
+  await endMembership(serverId, userId);
+}
+
+/**
+ * Mark a membership ended and drop its roles. The member count moves only if
+ * this call actually ended an active membership, atomically, so concurrent
+ * leaves/kicks never conflict on (or double-count against) the guild row.
+ */
+async function endMembership(serverId, userId) {
+  const left = await runQuery(
     `UPDATE server_members SET left_at = ${sql.now}
       WHERE server_id = ? AND user_id = ? AND left_at IS NULL`,
     [serverId, userId]
   );
   await runQuery(`DELETE FROM member_roles WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
+  if (Number(left?.changes ?? 0) > 0) {
+    await runQuery(
+      `UPDATE servers SET member_count = CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END WHERE id = ?`,
+      [serverId]
+    );
+  }
+}
+
+/**
+ * Recompute a guild's member count from the membership rows — for an
+ * operator repairing a count, not for the hot paths above.
+ */
+export async function recountMembers(serverId) {
   await runQuery(
     `UPDATE servers SET member_count = (
        SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
      ) WHERE id = ?`,
     [serverId, serverId]
   );
+  return (await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId]))?.member_count ?? 0;
 }
 
 export async function banMember({ serverId, userId: targetId, moderatorId, reason = null, deleteMessageSeconds = 0 }) {
