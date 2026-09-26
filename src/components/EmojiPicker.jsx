@@ -4,11 +4,11 @@ import { Search, Clock, Star, X } from 'lucide-react';
 import { t, useLocaleCode } from '../i18n/index.jsx';
 import { proxiedImageUrl } from '../utils/media';
 import { searchShortcodes, shortcodeLabel } from '../chat/emojiShortcodes.js';
+import { loadRecentEmoji as loadRecent, saveRecentEmoji as saveRecent } from '../chat/recentEmoji.js';
 
 const COLUMNS = 9;
 
-const RECENT_KEY = 'antigravity.recentEmojis';
-const RECENT_LIMIT = 24;
+
 
 /**
  * Unicode emoji grouped the way Discord groups them. Not the full 3,600-entry
@@ -53,20 +53,6 @@ export const emojiCategories = () => [
     emojis: '🏳️ 🏴 🏁 🚩 🏳️‍🌈 🏳️‍⚧️ 🏴‍☠️ 🇹🇭 🇯🇵 🇰🇷 🇨🇳 🇺🇸 🇬🇧 🇫🇷 🇩🇪 🇮🇹 🇪🇸 🇷🇺 🇧🇷 🇮🇳 🇦🇺 🇨🇦 🇸🇬 🇲🇾 🇻🇳 🇵🇭 🇮🇩 🇹🇼 🇭🇰 🇳🇿 🇲🇽 🇦🇷 🇳🇱 🇸🇪 🇳🇴 🇩🇰 🇫🇮 🇵🇱 🇹🇷 🇦🇪 🇸🇦 🇿🇦 🇪🇬'.split(' ')
   }
 ];
-
-function loadRecent() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
-    return Array.isArray(parsed) ? parsed.slice(0, RECENT_LIMIT) : [];
-  } catch { return []; }
-}
-
-function saveRecent(entry) {
-  try {
-    const current = loadRecent().filter((e) => JSON.stringify(e) !== JSON.stringify(entry));
-    localStorage.setItem(RECENT_KEY, JSON.stringify([entry, ...current].slice(0, RECENT_LIMIT)));
-  } catch { /* private mode — recents simply do not persist */ }
-}
 
 /**
  * Full emoji picker: categories, search, recents and server emoji.

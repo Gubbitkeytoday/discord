@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBackClose } from '../../chat/useBackClose';
-import { QUICK_EMOJIS } from './MessageActions';
+import { quickReactions } from '../../chat/recentEmoji.js';
 import { t } from '../../i18n/index.jsx';
 
 /**
@@ -51,7 +51,7 @@ export default function ActionSheet({
       >
         <div className="w-10 h-1 rounded-full bg-d-divider mx-auto mt-2 mb-3" aria-hidden="true" />
         <div className="flex justify-between gap-1 px-3 pb-3 border-b border-d-divider" role="group" aria-label={t('chat.quickReactions')}>
-          {[...QUICK_EMOJIS.slice(0, 6), '🙏'].map((emoji) => (
+          {quickReactions(7).map((emoji) => (
             <button
               key={emoji}
               type="button"

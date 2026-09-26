@@ -15,6 +15,7 @@ import SuperReaction from '../SuperReaction';
 import StillImage from '../StillImage';
 import { TranslatedText } from '../../translation';
 import Attachment from './Attachment';
+import ImageGallery from './ImageGallery';
 import ReactionChip from './ReactionChip';
 import MessageActions from './MessageActions';
 import SystemMessage, { SYSTEM_TYPES } from './SystemMessage';
@@ -141,6 +142,14 @@ function MessageRow({
     time: `msg-time-${msg.id}`
   };
   const finalError = msg.failed && FINAL_ERRORS.has(msg.errorCode);
+  // Two or more plain images (no spoilers, previews on, not held for safety)
+  // become one mosaic; everything else renders one by one.
+  const attachments = msg.attachments ?? [];
+  const imageList = attachments.filter((a) => a.file_type === 'image' && !a.waveform && !a.is_spoiler);
+  const useGallery = imageList.length >= 2 && chatPrefs.inlineAttachmentMedia !== false
+    && chatPrefs.showImagePreviews !== false && !ctx.safetyHold(msg);
+  const galleryImages = useGallery ? imageList : null;
+  const otherAttachments = useGallery ? attachments.filter((a) => !imageList.includes(a)) : attachments;
 
   return (
     <>
@@ -203,7 +212,7 @@ function MessageRow({
             aria-label={authorName}
             onClick={() => actions.openProfile(msg.user_id)}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); actions.userMenu(msg.user_id, e.clientX, e.clientY); }}
-            className="w-10 h-10 shrink-0 mt-0.5 rounded-full overflow-hidden hover:opacity-80 transition-opacity"
+            className={`w-10 h-10 shrink-0 ${msg.reply_to_id ? 'mt-6' : 'mt-0.5'} rounded-full overflow-hidden hover:opacity-80 transition-opacity`}
           >
             <img
               src={proxiedImageUrl(msg.avatar_url || defaultAvatar(msg.user_id))}
@@ -219,8 +228,11 @@ function MessageRow({
 
         <div className="flex-1 min-w-0">
           {Boolean(msg.reply_to_id) && (
-            <div className="flex items-center gap-1.5 text-xs text-d-text3 mb-1 min-w-0">
-              <Reply className="w-3.5 h-3.5 shrink-0 rotate-180 text-d-text3" aria-hidden="true" />
+            <div className="relative flex items-center gap-1.5 text-xs text-d-text3 mb-1 min-w-0">
+              {/* Discord's reply spine: a curved line from the avatar column up
+                  to the quoted message. */}
+              <span className="absolute -left-9 top-2 w-8 h-3 border-l-2 border-t-2 border-d-divider rounded-tl-md max-sm:-left-8 max-sm:w-7" aria-hidden="true" />
+              <Reply className="w-3.5 h-3.5 shrink-0 rotate-180 text-d-text3 sr-only" aria-hidden="true" />
               {msg.replyToMsg ? (
                 <>
                   <span className="font-semibold text-d-mention shrink-0">@{msg.replyToMsg.display_name}</span>
@@ -363,9 +375,14 @@ function MessageRow({
 
           {msg.components?.length > 0 && <MessageComponents message={msg} onToast={actions.toast} />}
 
-          {msg.attachments?.length > 0 && (
+          {galleryImages && (
+            <div className="mt-2">
+              <ImageGallery images={galleryImages} onOpenImage={actions.openImage} autoplayGifs={a11yPrefs.autoplayGifs} />
+            </div>
+          )}
+          {otherAttachments.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-2">
-              {msg.attachments.map((att, i) => (
+              {otherAttachments.map((att, i) => (
                 att.waveform ? (
                   <VoiceNotePlayer key={att.id ?? i} attachment={att} />
                 ) : (

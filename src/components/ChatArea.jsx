@@ -19,6 +19,7 @@ import ActionSheet from './chat/ActionSheet';
 import AnchoredPopover from './chat/AnchoredPopover';
 import MobileSearchSheet from './chat/MobileSearchSheet';
 import { isGifAttachment } from './chat/GifPicker';
+import { saveRecentEmoji } from '../chat/recentEmoji.js';
 
 // Pickers and dialogs load on first use.
 const ImageLightboxModal = lazyComponent(() => import('./ImageLightboxModal'));
@@ -168,6 +169,7 @@ export default function ChatArea(props) {
       focusComposer,
       react: (msg, emoji, isSuper) => {
         h().onToggleReaction?.(msg.id, emoji);
+        saveRecentEmoji({ char: emoji });
         listRef.current?.clearTouch();
         if (!isSuper) return;
         h().onSuperReact?.(msg.id, emoji);
@@ -225,7 +227,7 @@ export default function ChatArea(props) {
         // Not loaded (older than what we hold): let the app fetch around it.
         h().onJumpToMessage?.({ id: messageId, channel_id: h().channel?.id });
       },
-      openImage: (url, alt) => setLightbox({ url, alt }),
+      openImage: (url, alt, gallery) => setLightbox({ url, alt, images: gallery?.images ?? null, index: gallery?.index ?? 0 }),
       showEditHistory: (msg) => h().onShowEditHistory?.(msg),
       retry: (msg) => h().onRetryMessage?.(msg),
       discard: (msg) => h().onDiscardMessage?.(msg),
@@ -344,6 +346,10 @@ export default function ChatArea(props) {
       }
       return Boolean(listRef.current?.focusLast());
     },
+    onLoadMore: () => handlers.current.onLoadMore?.(),
+    onLoadNewer: () => handlers.current.onLoadNewer?.(),
+    onJumpToPresent: () => handlers.current.onJumpToPresent?.(),
+    onClearReadMarker: () => handlers.current.onClearReadMarker?.(),
     getRecentGifs: () => {
       const seen = new Set();
       const out = [];
@@ -355,6 +361,33 @@ export default function ChatArea(props) {
       return out;
     }
   }), []);
+
+  // The welcome header, memoised so the (memoised) list sees equal props.
+  const introAvatar = channel?.avatar_url || defaultAvatar(channel?.recipients?.[0]?.id ?? channel?.id);
+  const introTitle = isDM ? channel?.display_name : channel?.name;
+  const introType = channel?.type;
+  const intro = useMemo(() => {
+    if (!introType) return null;
+    const IntroIcon = INTRO_ICONS[introType] ?? Hash;
+    return (
+      <div className="my-6">
+        {isDM ? (
+          <img src={proxiedImageUrl(introAvatar)} alt="" width={80} height={80} className="w-20 h-20 rounded-full object-cover mb-3" />
+        ) : (
+          <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3" aria-hidden="true">
+            <IntroIcon className="w-10 h-10 text-d-strong" />
+          </div>
+        )}
+        <h2 className="text-3xl max-sm:text-2xl font-extrabold text-d-strong mb-1 break-words">
+          {isDM ? t('chat.welcomeToDm', { name: introTitle }) : t('chat.welcomeToChannel', { channel: introTitle })}
+        </h2>
+        <p className="text-sm text-d-text2">
+          {isDM ? t('chat.dmStart', { name: introTitle }) : t('chat.channelStartSimple', { channel: introTitle })}
+        </p>
+        <div className="w-full h-px bg-d-divider mt-4" />
+      </div>
+    );
+  }, [isDM, introAvatar, introTitle, introType]);
 
   if (!channel) {
     return (
@@ -374,26 +407,6 @@ export default function ChatArea(props) {
     : isArchived
       ? t('chat.threadArchived')
       : isDM ? t('chat.messagePlaceholderDm', { name: title }) : t('chat.messagePlaceholder', { channel: title });
-  const IntroIcon = INTRO_ICONS[channel.type] ?? Hash;
-
-  const intro = (
-    <div className="my-6">
-      {isDM ? (
-        <img src={proxiedImageUrl(channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id))} alt="" width={80} height={80} className="w-20 h-20 rounded-full object-cover mb-3" />
-      ) : (
-        <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3" aria-hidden="true">
-          <IntroIcon className="w-10 h-10 text-d-strong" />
-        </div>
-      )}
-      <h2 className="text-3xl max-sm:text-2xl font-extrabold text-d-strong mb-1 break-words">
-        {isDM ? t('chat.welcomeToDm', { name: title }) : t('chat.welcomeToChannel', { channel: title })}
-      </h2>
-      <p className="text-sm text-d-text2">
-        {isDM ? t('chat.dmStart', { name: title }) : t('chat.channelStartSimple', { channel: title })}
-      </p>
-      <div className="w-full h-px bg-d-divider mt-4" />
-    </div>
-  );
 
   const onDragOver = (e) => { if (canAttach && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); } };
   const onDrop = (e) => {
@@ -459,10 +472,10 @@ export default function ChatArea(props) {
         hasNewerHistory={hasNewerHistory}
         isLoadingHistory={isLoadingHistory}
         isLoadingMessages={isLoadingMessages}
-        onLoadMore={props.onLoadMore}
-        onLoadNewer={props.onLoadNewer}
-        onJumpToPresent={props.onJumpToPresent}
-        onClearReadMarker={props.onClearReadMarker}
+        onLoadMore={composerCallbacks.onLoadMore}
+        onLoadNewer={composerCallbacks.onLoadNewer}
+        onJumpToPresent={composerCallbacks.onJumpToPresent}
+        onClearReadMarker={composerCallbacks.onClearReadMarker}
         editingId={editingId}
         bursts={bursts}
         revealed={revealed}
@@ -492,7 +505,15 @@ export default function ChatArea(props) {
         showSendButton={prefs.appearance.showSendButton}
         onSendVoiceNote={onSendVoiceNote ? composerCallbacks.onSendVoiceNote : null}
         onOpenPoll={onCreatePoll ? composerCallbacks.onOpenPoll : null}
-        {...composerCallbacks}
+        onCancelReply={composerCallbacks.onCancelReply}
+        onSend={composerCallbacks.onSend}
+        onSlashAction={composerCallbacks.onSlashAction}
+        onRunBotCommand={composerCallbacks.onRunBotCommand}
+        onTypingStart={composerCallbacks.onTypingStart}
+        onTypingStop={composerCallbacks.onTypingStop}
+        onToast={composerCallbacks.onToast}
+        onArrowUpEmpty={composerCallbacks.onArrowUpEmpty}
+        getRecentGifs={composerCallbacks.getRecentGifs}
       />
 
       {/* Typing indicator in the composer's gutter, as in Discord. The live
@@ -505,7 +526,8 @@ export default function ChatArea(props) {
           <>
             <span className="flex gap-0.5">
               {[0, 150, 300].map((delay) => (
-                <span key={delay} className="w-1 h-1 bg-d-text rounded-full animate-bounce" style={{ animationDelay: `${delay}ms` }} />
+                // A soft pulse, not a bounce; still under reduced motion.
+                <span key={delay} className="w-1.5 h-1.5 bg-d-text2 rounded-full motion-safe:animate-pulse" style={{ animationDelay: `${delay}ms` }} />
               ))}
             </span>
             <span className="truncate">{typingText}</span>
@@ -592,7 +614,15 @@ export default function ChatArea(props) {
         />
       )}
 
-      {lightbox && <ImageLightboxModal imageUrl={lightbox.url} altText={lightbox.alt} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <ImageLightboxModal
+          imageUrl={lightbox.url}
+          altText={lightbox.alt}
+          images={lightbox.images}
+          startIndex={lightbox.index}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </div>
   );
 }

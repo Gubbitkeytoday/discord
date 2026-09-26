@@ -1953,6 +1953,8 @@ export default {
   'gif.unfavorite': 'นำออกจากรายการโปรด',
   'chat.attachmentCount_other': 'ไฟล์แนบ {count} ไฟล์',
   'voice.inRoom_one': '1 คนในห้องนี้',
+  'files.previousImage': 'รูปก่อนหน้า',
+  'files.nextImage': 'รูปถัดไป',
   // --- voice (polish round) ---
   'voice.callControls': 'ปุ่มควบคุมการโทร',
   'voice.ctlMute': 'ปิดไมค์',

@@ -1953,6 +1953,8 @@ export default {
   'gif.unfavorite': 'Remove from favorites',
   'chat.attachmentCount_other': '{count} attachments',
   'voice.inRoom_one': '1 in this room',
+  'files.previousImage': 'Previous image',
+  'files.nextImage': 'Next image',
   // --- voice (polish round) ---
   'voice.callControls': 'Call controls',
   'voice.ctlMute': 'Mute',

@@ -3,7 +3,9 @@ import { SmilePlus, Reply, Pencil, Trash2, MoreHorizontal, MessagesSquare } from
 import { TranslateButton } from '../../translation';
 import { t } from '../../i18n/index.jsx';
 
-export const QUICK_EMOJIS = ['❤️', '🔥', '👍', '😂', '🎉', '🚀', '💯', '💩', '✨'];
+import { quickReactions, DEFAULT_QUICK_REACTIONS } from '../../chat/recentEmoji.js';
+
+export const QUICK_EMOJIS = DEFAULT_QUICK_REACTIONS;
 
 const BUTTON = 'p-1.5 pointer-coarse:p-2.5 min-w-8 min-h-8 pointer-coarse:min-w-11 pointer-coarse:min-h-11 inline-flex items-center justify-center rounded transition-colors';
 const ICON_BUTTON = `${BUTTON} hover:bg-d-hover focus-visible:bg-d-hover text-d-text2 hover:text-d-strong`;
@@ -57,7 +59,7 @@ export default function MessageActions({ msg, isOwn, canReply, canDelete, canThr
       onKeyDown={onKeyDown}
       className="message-actions absolute right-4 max-sm:right-2 -top-4 flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-0.5 z-10"
     >
-      {QUICK_EMOJIS.slice(0, 3).map((emoji) => (
+      {quickReactions(3).map((emoji) => (
         <button
           key={emoji}
           type="button"

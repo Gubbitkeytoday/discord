@@ -53,7 +53,8 @@ const ChatHeader = forwardRef(function ChatHeader({
   }, []);
 
   const wide = width >= 700;          // everything inline, search box included
-  const medium = width >= 460;        // pins + members + search icon inline
+  const medium = width >= 460;        // pins + members inline
+  const compact = width >= 330;       // a search icon at least (phones)
 
   useImperativeHandle(ref, () => ({
     /** Ctrl+F: the search box when it is on screen, else the search sheet. */
@@ -71,7 +72,7 @@ const ChatHeader = forwardRef(function ChatHeader({
   };
 
   const overflow = [
-    !medium && { icon: Search, label: t('chat.searchMessages'), action: () => onOpenMobileSearch?.() },
+    !compact && { icon: Search, label: t('chat.searchMessages'), action: () => onOpenMobileSearch?.() },
     !medium && { icon: Pin, label: pinsCount ? `${t('chat.pinnedMessages')} (${pinsCount})` : t('chat.pinnedMessages'), action: onTogglePins },
     !medium && !isDM && onToggleMemberList && { icon: Users, label: t('chat.memberList'), checked: showMemberList, action: onToggleMemberList },
     !wide && onOpenInbox && {
@@ -115,7 +116,7 @@ const ChatHeader = forwardRef(function ChatHeader({
             <ChevronRight className="w-4 h-4 text-d-text3 shrink-0 max-sm:hidden" aria-hidden="true" />
           </>
         )}
-        <h1 id="channel-title" tabIndex={-1} className="font-bold text-d-strong text-[15px] truncate min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-d-brand rounded">
+        <h1 id="channel-title" tabIndex={-1} className="font-bold text-d-strong text-[15px] truncate min-w-0 outline-none">
           <span className="sr-only">{isDM ? t('a11y.conversationWith') : t('a11y.channelPrefix')} </span>
           {title}
         </h1>
@@ -216,7 +217,7 @@ const ChatHeader = forwardRef(function ChatHeader({
             <Badge count={inboxCount} />
           </button>
         )}
-        {medium && !wide && (
+        {compact && !wide && (
           <button type="button" onClick={onOpenMobileSearch} className={BTN} title={t('chat.searchMessages')} aria-label={t('chat.searchMessages')} aria-keyshortcuts="Control+F">
             <Search className="w-5 h-5" aria-hidden="true" />
           </button>
