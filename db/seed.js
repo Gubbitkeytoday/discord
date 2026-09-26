@@ -7,6 +7,9 @@
 import { generateId, snowflakeForDate } from '../lib/snowflake.js';
 import { hashPassword } from '../lib/auth.js';
 import { DEFAULT_PERMISSIONS, ALL_PERMISSIONS, fromNames } from '../lib/permissions.js';
+import { isPostgres } from './dialect.js';
+// Remote images are stored as same-origin proxy URLs, as the services do.
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 
 const now = () => new Date().toISOString();
 
@@ -128,7 +131,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
                             created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         [u.id, u.username, String(1000 + SEED_USERS.indexOf(u)), u.display_name,
-         u.avatar_url, u.banner_url, u.bio, u.status, u.is_bot,
+         proxiedImageUrl(u.avatar_url), proxiedImageUrl(u.banner_url), u.bio, u.status, u.is_bot,
          `${u.username.toLowerCase()}@example.dev`, devPasswordHash, now(), now()]
       );
     }
@@ -137,7 +140,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
       await runQuery(
         `INSERT INTO servers (id, name, description, icon_url, owner_id, system_channel_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-        [s.id, s.name, s.description, s.icon_url, s.owner_id, now(), now()]
+        [s.id, s.name, s.description, proxiedImageUrl(s.icon_url), s.owner_id, now(), now()]
       );
 
       // Every guild gets an @everyone role whose id equals the guild id, matching
@@ -218,10 +221,14 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
          VALUES (?, ?, ?, ?, ?, 'default', ?)`,
         [msg.id, msg.channel_id, msg.server_id, msg.user_id, msg.content, createdAt]
       );
-      await runQuery(
-        `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-        [msg.content, msg.id, msg.channel_id]
-      );
+      // SQLite's search index is a separate FTS5 table; Postgres indexes
+      // messages.content itself (pg_trgm), so there is nothing to add there.
+      if (!isPostgres) {
+        await runQuery(
+          `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
+          [msg.content, msg.id, msg.channel_id]
+        );
+      }
       for (const [emoji, userIds] of Object.entries(msg.reactions ?? {})) {
         for (const userId of userIds) {
           await runQuery(
@@ -248,7 +255,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
     for (const e of SEED_EMOJIS) {
       await runQuery(
         `INSERT INTO emojis (id, server_id, name, url, creator_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [e.id, e.server_id, e.name, e.url, e.creator_id, now()]
+        [e.id, e.server_id, e.name, proxiedImageUrl(e.url), e.creator_id, now()]
       );
     }
 

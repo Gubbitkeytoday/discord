@@ -10,7 +10,7 @@
 //  is preserved rather than dropped.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { ApiError } from '../lib/httpUtils.js';
 
 /**
@@ -207,7 +207,7 @@ export async function updateCategory(userId, category, patch) {
      VALUES (?, ?, ?)
      ON CONFLICT(user_id, category) DO UPDATE SET
        data = excluded.data,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+       updated_at = ${sql.now}`,
     [userId, category, JSON.stringify(next)]
   );
   return next;

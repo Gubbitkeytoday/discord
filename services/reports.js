@@ -2,7 +2,7 @@
 //  Reports — user-submitted reports on messages, users, servers and files.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 
@@ -13,12 +13,12 @@ const STATUSES = ['open', 'reviewing', 'resolved', 'dismissed'];
 export async function createReport({ reporterId, targetType, targetId, reason, details = null }) {
   if (!reporterId) throw ApiError.unauthorized();
   if (!TARGETS.includes(targetType)) {
-    throw new ApiError(`target_type ต้องเป็นหนึ่งใน ${TARGETS.join(', ')}`, { code: 'INVALID_TARGET' });
+    throw new ApiError(`target_type must be one of ${TARGETS.join(', ')}`, { code: 'INVALID_TARGET' });
   }
   if (!REASONS.includes(reason)) {
-    throw new ApiError(`reason ต้องเป็นหนึ่งใน ${REASONS.join(', ')}`, { code: 'INVALID_REASON' });
+    throw new ApiError(`reason must be one of ${REASONS.join(', ')}`, { code: 'INVALID_REASON' });
   }
-  if (!targetId) throw new ApiError('ต้องระบุ target_id', { code: 'MISSING_TARGET' });
+  if (!targetId) throw new ApiError('target_id is required', { code: 'MISSING_TARGET' });
 
   // One open report per reporter per target: repeat submissions are noise, not
   // extra signal.
@@ -28,7 +28,7 @@ export async function createReport({ reporterId, targetType, targetId, reason, d
     [reporterId, targetType, targetId]
   );
   if (existing) {
-    throw ApiError.conflict('คุณรายงานสิ่งนี้ไว้แล้ว และกำลังรอการตรวจสอบ');
+    throw new ApiError('You already reported this; it is awaiting review', { status: 409, code: 'ALREADY_REPORTED' });
   }
 
   // Resolve the guild so the server's own moderators can triage it, rather
@@ -60,7 +60,7 @@ export async function createReport({ reporterId, targetType, targetId, reason, d
  */
 export async function listReports({ status = 'open', limit = 50, serverId = null } = {}) {
   if (status !== 'all' && !STATUSES.includes(status)) {
-    throw new ApiError(`status ต้องเป็นหนึ่งใน ${STATUSES.join(', ')} หรือ all`, { code: 'INVALID_STATUS' });
+    throw new ApiError(`status must be one of ${STATUSES.join(', ')} or all`, { code: 'INVALID_STATUS' });
   }
 
   const where = [];
@@ -122,7 +122,7 @@ async function describeTarget(type, id) {
 
 export async function resolveReport({ reportId, resolverId, status, action = null }) {
   if (!['resolved', 'dismissed', 'reviewing'].includes(status)) {
-    throw new ApiError('status ต้องเป็น reviewing, resolved หรือ dismissed', { code: 'INVALID_STATUS' });
+    throw new ApiError('status must be reviewing, resolved or dismissed', { code: 'INVALID_STATUS' });
   }
   const report = await getQuery(`SELECT * FROM reports WHERE id = ?`, [reportId]);
   if (!report) throw ApiError.notFound('Report');
@@ -130,17 +130,17 @@ export async function resolveReport({ reportId, resolverId, status, action = nul
   await runQuery(
     `UPDATE reports SET status = ?, resolved_by = ?,
        resolved_at = CASE WHEN ? = 'reviewing' THEN NULL
-                          ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END,
-       details = CASE WHEN ? IS NULL THEN details
-                      ELSE COALESCE(details, '') || char(10) || '[action] ' || ? END
+                          ELSE ${sql.now} END,
+       details = CASE WHEN ${sql.text('?')} IS NULL THEN details
+                      ELSE COALESCE(details, '') || ? END
       WHERE id = ?`,
-    [status, resolverId, status, action, action, reportId]
+    [status, resolverId, status, action, action == null ? null : `\n[action] ${action}`, reportId]
   );
 
   // Acting on a reported message deletes it, which is the common outcome.
   if (status === 'resolved' && action === 'delete_message' && report.target_type === 'message') {
     await runQuery(
-      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE messages SET deleted_at = ${sql.now} WHERE id = ?`,
       [report.target_id]
     );
   }

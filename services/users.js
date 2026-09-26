@@ -2,9 +2,11 @@
 //  User service — profiles, presence, friends, blocks, per-user settings.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import {
   addReference, releaseReference, getStorageUsage, findFileByPublicUrl
 } from '../storageService.js';
@@ -16,9 +18,33 @@ const PUBLIC_COLUMNS = `
   profile_visibility
 `;
 
-export function listUsers() {
+/**
+ * The people `viewerId` can legitimately know about: themselves, anyone who
+ * shares a server with them, anyone in a DM or group DM with them, and anyone
+ * in a friend relationship (including pending requests) with them. Never the
+ * whole instance — that would let any single account scrape every member and
+ * track everyone's presence.
+ */
+export function listUsers(viewerId) {
+  if (!viewerId) return Promise.resolve([]);
   return allQuery(
-    `SELECT ${PUBLIC_COLUMNS} FROM users WHERE deleted_at IS NULL ORDER BY display_name`
+    `SELECT ${PUBLIC_COLUMNS} FROM users u
+      WHERE u.deleted_at IS NULL
+        AND (
+          u.id = ?
+          OR u.id IN (
+            SELECT them.user_id FROM server_members them
+              JOIN server_members me ON me.server_id = them.server_id
+             WHERE me.user_id = ? AND me.left_at IS NULL AND them.left_at IS NULL)
+          OR u.id IN (
+            SELECT them.user_id FROM channel_recipients them
+              JOIN channel_recipients me ON me.channel_id = them.channel_id
+             WHERE me.user_id = ?)
+          OR u.id IN (SELECT friend_id FROM friends WHERE user_id = ?)
+          OR u.id IN (SELECT user_id FROM friends WHERE friend_id = ?)
+        )
+      ORDER BY u.display_name`,
+    [viewerId, viewerId, viewerId, viewerId, viewerId]
   );
 }
 
@@ -113,7 +139,7 @@ export async function setNote({ authorId, subjectId, note }) {
   }
   await runQuery(
     `INSERT INTO user_notes (author_id, subject_id, note, updated_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, ${sql.now})
      ON CONFLICT(author_id, subject_id) DO UPDATE SET
        note = excluded.note, updated_at = excluded.updated_at`,
     [authorId, subjectId, text]
@@ -165,6 +191,12 @@ export async function updateProfile({ userId, patch }) {
   }
 
   const resolved = { ...patch };
+  if (patch.accent_color !== undefined) resolved.accent_color = normaliseColor(patch.accent_color, 'accent_color');
+  // A remote avatar/banner is stored as its same-origin proxy URL, so viewers'
+  // browsers never contact the third-party host (see services/mediaProxy.js).
+  for (const field of ['avatar_url', 'banner_url']) {
+    if (typeof resolved[field] === 'string') resolved[field] = proxiedImageUrl(resolved[field]);
+  }
   for (const [urlField, idField] of [['avatar_url', 'avatar_file_id'], ['banner_url', 'banner_file_id']]) {
     if (resolved[urlField] === undefined || resolved[idField] !== undefined) continue;
     const file = await findFileByPublicUrl(resolved[urlField]);
@@ -180,7 +212,7 @@ export async function updateProfile({ userId, patch }) {
   }
   if (!sets.length) return getUser(userId);
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(userId);
 
   await transaction(async () => {
@@ -203,7 +235,7 @@ export async function setPresence({ userId, status, customStatus = undefined }) 
   if (!valid.includes(status)) {
     throw new ApiError(`Invalid status '${status}'`, { code: 'INVALID_STATUS' });
   }
-  const sets = [`status = ?`, `presence_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`];
+  const sets = [`status = ?`, `presence_updated_at = ${sql.now}`];
   const params = [status];
   if (customStatus !== undefined) { sets.push('custom_status = ?'); params.push(customStatus); }
   params.push(userId);
@@ -213,7 +245,7 @@ export async function setPresence({ userId, status, customStatus = undefined }) 
 
 export async function touchLastSeen(userId) {
   await runQuery(
-    `UPDATE users SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [userId]
+    `UPDATE users SET last_seen_at = ${sql.now} WHERE id = ?`, [userId]
   );
 }
 
@@ -344,7 +376,7 @@ export async function acceptFriendRequest({ userId, requestId }) {
     throw ApiError.forbidden('Only the recipient can accept this request');
   }
   await runQuery(
-    `UPDATE friends SET status = 'accepted', accepted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE friends SET status = 'accepted', accepted_at = ${sql.now}
       WHERE id = ?`,
     [requestId]
   );
@@ -362,7 +394,7 @@ export async function removeFriend({ userId, otherId }) {
 export async function blockUser({ userId, targetId }) {
   await transaction(async () => {
     await runQuery(
-      `INSERT OR IGNORE INTO blocks (user_id, blocked_id) VALUES (?, ?)`, [userId, targetId]
+      `INSERT INTO blocks (user_id, blocked_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [userId, targetId]
     );
     await runQuery(
       `DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,
@@ -389,6 +421,16 @@ export function listBlocked(userId) {
 // --- settings ----------------------------------------------------------------
 
 export async function updateChannelSettings({ userId, channelId, patch }) {
+  // Stored as a timestamp and compared against "now", so it must be a real
+  // instant — normalised to ISO so both database engines store the same thing.
+  let mutedUntil = null;
+  if (patch.mutedUntil !== undefined && patch.mutedUntil !== null && patch.mutedUntil !== '') {
+    const at = new Date(patch.mutedUntil);
+    if (Number.isNaN(at.getTime())) {
+      throw new ApiError('mutedUntil must be a valid date', { code: 'INVALID_MUTED_UNTIL' });
+    }
+    mutedUntil = at.toISOString();
+  }
   await runQuery(
     `INSERT INTO channel_settings (user_id, channel_id, muted, muted_until, notification_level, collapsed)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -397,7 +439,7 @@ export async function updateChannelSettings({ userId, channelId, patch }) {
        muted_until = excluded.muted_until,
        notification_level = COALESCE(excluded.notification_level, channel_settings.notification_level),
        collapsed = COALESCE(excluded.collapsed, channel_settings.collapsed)`,
-    [userId, channelId, patch.muted ? 1 : 0, patch.mutedUntil ?? null,
+    [userId, channelId, patch.muted ? 1 : 0, mutedUntil,
      patch.notificationLevel ?? 'inherit', patch.collapsed ? 1 : 0]
   );
   return getQuery(

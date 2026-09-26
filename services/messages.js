@@ -6,7 +6,7 @@
 //  what a chat client needs to render a row without extra round trips.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql, isPostgres } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { getFile, addReference, releaseReference, formatBytes } from '../storageService.js';
 import { validateEmbeds, validateComponents } from './applications.js';
@@ -347,10 +347,10 @@ export async function createMessage({
     throw new ApiError('Create a post instead of sending a message in a forum', { code: 'FORUM_NEEDS_POST' });
   }
   if (channel.locked) {
-    throw new ApiError('ห้องนี้ถูกล็อก ส่งข้อความไม่ได้', { status: 403, code: 'CHANNEL_LOCKED' });
+    throw new ApiError('This channel is locked', { status: 403, code: 'CHANNEL_LOCKED' });
   }
   if (channel.archived) {
-    throw new ApiError('เธรดนี้ถูกเก็บถาวรแล้ว', { status: 403, code: 'THREAD_ARCHIVED' });
+    throw new ApiError('This thread is archived', { status: 403, code: 'THREAD_ARCHIVED' });
   }
 
   // Webhooks and system messages skip moderation and carry no user; every real
@@ -445,7 +445,7 @@ export async function createMessage({
         serverId: channel.server_id, userId, channelId,
         rule: verdict.rule, reason: verdict.reason, content: trimmed
       });
-      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
         status: 403, code: 'AUTOMOD_BLOCKED',
         details: { rule: verdict.rule?.name, reason: verdict.reason }
       });
@@ -477,10 +477,7 @@ export async function createMessage({
        applicationId, ephemeralUserId]
     );
 
-    await runQuery(
-      `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-      [trimmed, messageId, channelId]
-    );
+    await indexForSearch(messageId, channelId, trimmed);
 
     let position = 0;
     for (const descriptor of attachments) {
@@ -524,25 +521,30 @@ export async function createMessage({
     for (const [targetType, list] of [['user', mentions.users], ['role', mentions.roles], ['channel', mentions.channels]]) {
       for (const targetId of list) {
         await runQuery(
-          `INSERT OR IGNORE INTO mentions (message_id, target_type, target_id) VALUES (?, ?, ?)`,
+          `INSERT INTO mentions (message_id, target_type, target_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
           [messageId, targetType, targetId]
         );
       }
     }
 
+    // Monotonic: when two sends commit out of order, the pointer still ends
+    // on the newest id (ids are same-length snowflakes, so text order is
+    // numeric order).
     await runQuery(
       `UPDATE channels
-          SET last_message_id = ?, message_count = message_count + 1,
-              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          SET last_message_id = CASE WHEN last_message_id IS NULL OR last_message_id < ?
+                                     THEN ? ELSE last_message_id END,
+              message_count = message_count + 1,
+              updated_at = ${sql.now}
         WHERE id = ?`,
-      [messageId, channelId]
+      [messageId, messageId, channelId]
     );
 
     // Posting in a thread joins it, so you receive its later messages —
     // Discord does the same.
     if (channel.channel_type === 'thread' && userId) {
       await runQuery(
-        `INSERT OR IGNORE INTO channel_recipients (channel_id, user_id) VALUES (?, ?)`,
+        `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
         [channelId, userId]
       );
       await runQuery(
@@ -564,14 +566,18 @@ export async function createMessage({
     if (userId) {
       await runQuery(
         `INSERT INTO read_states (user_id, channel_id, last_read_message_id, mention_count, last_viewed_at)
-         VALUES (?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         VALUES (?, ?, ?, 0, ${sql.now})
          ON CONFLICT(user_id, channel_id)
          DO UPDATE SET last_read_message_id = excluded.last_read_message_id,
                        last_viewed_at = excluded.last_viewed_at`,
         [userId, channelId, messageId]
       );
     }
-  });
+    // The hot path. Every statement above is an insert, an upsert or an atomic
+    // update of a counter/pointer, so READ COMMITTED is enough; SERIALIZABLE
+    // would make every concurrent send in a busy channel conflict on the
+    // channel row and retry.
+  }, { isolation: 'read committed' });
 
   // Everyone else in the channel gains an unread, and a mention if named.
   //
@@ -669,7 +675,7 @@ async function bumpUnreadCounters({
       `INSERT INTO read_states (user_id, channel_id, mention_count)
        VALUES (?, ?, ?)
        ON CONFLICT(user_id, channel_id)
-       DO UPDATE SET mention_count = mention_count + ?`,
+       DO UPDATE SET mention_count = read_states.mention_count + ?`,
       [uid, channelId, isMention ? 1 : 0, isMention ? 1 : 0]
     );
 
@@ -679,7 +685,7 @@ async function bumpUnreadCounters({
     const muted = await getQuery(
       `SELECT 1 FROM channel_settings
         WHERE user_id = ? AND channel_id = ? AND muted = 1
-          AND (muted_until IS NULL OR muted_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+          AND (muted_until IS NULL OR muted_until > ${sql.now})`,
       [uid, channelId]
     );
     if (muted) continue;
@@ -747,7 +753,7 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
         serverId: message.server_id, userId, channelId: message.channel_id,
         rule: verdict.rule, reason: verdict.reason, content: trimmed
       });
-      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
         status: 403, code: 'AUTOMOD_BLOCKED',
         details: { rule: verdict.rule?.name, reason: verdict.reason }
       });
@@ -764,15 +770,12 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
       `UPDATE messages
           SET content = ?, mention_everyone = ?,
               embeds = COALESCE(?, embeds), components = COALESCE(?, components),
-              edited_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+              edited_at = ${sql.now}
         WHERE id = ?`,
       [trimmed, mentions.everyone ? 1 : 0, nextEmbeds, nextComponents, messageId]
     );
-    await runQuery(`DELETE FROM messages_fts WHERE message_id = ?`, [messageId]);
-    await runQuery(
-      `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-      [trimmed, messageId, message.channel_id]
-    );
+    await unindexForSearch([messageId]);
+    await indexForSearch(messageId, message.channel_id, trimmed);
   });
 
   return getMessage(messageId, userId);
@@ -806,12 +809,12 @@ export async function deleteMessage({ messageId, userId, canManageMessages = fal
     for (const a of attachments) await releaseReference(a.file_id);
 
     await runQuery(
-      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE messages SET deleted_at = ${sql.now} WHERE id = ?`,
       [messageId]
     );
-    await runQuery(`DELETE FROM messages_fts WHERE message_id = ?`, [messageId]);
+    await unindexForSearch([messageId]);
     await runQuery(
-      `UPDATE channels SET message_count = MAX(0, message_count - 1) WHERE id = ?`,
+      `UPDATE channels SET message_count = ${sql.greatest(0, 'message_count - 1')} WHERE id = ?`,
       [message.channel_id]
     );
   });
@@ -919,17 +922,17 @@ export async function setPinned({ messageId, channelId, userId, pinned }) {
   }
   if (pinned) {
     const { n } = await getQuery(`SELECT count(*) AS n FROM pins WHERE channel_id = ?`, [channelId]);
-    if (n >= 50) throw new ApiError('ปักหมุดได้สูงสุด 50 ข้อความต่อห้อง', { code: 'MAX_PINS' });
+    if (n >= 50) throw new ApiError('A channel can have at most 50 pinned messages', { code: 'MAX_PINS' });
   }
   await transaction(async () => {
     await runQuery(`UPDATE messages SET pinned = ? WHERE id = ?`, [pinned ? 1 : 0, messageId]);
     if (pinned) {
       await runQuery(
-        `INSERT OR IGNORE INTO pins (channel_id, message_id, pinned_by) VALUES (?, ?, ?)`,
+        `INSERT INTO pins (channel_id, message_id, pinned_by) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
         [channelId, messageId, userId]
       );
       await runQuery(
-        `UPDATE channels SET last_pin_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+        `UPDATE channels SET last_pin_at = ${sql.now} WHERE id = ?`,
         [channelId]
       );
     } else {
@@ -954,6 +957,32 @@ export async function listPins(channelId, viewerId = null) {
   );
   return hydrate(rows, viewerId);
 }
+
+// --- search index ------------------------------------------------------------
+//
+// SQLite searches through messages_fts, an FTS5 trigram table that has to be
+// kept in step with messages by hand. Postgres searches messages.content
+// directly through a pg_trgm GIN index that the database maintains itself, so
+// both helpers are no-ops there.
+
+async function indexForSearch(messageId, channelId, content) {
+  if (isPostgres) return;
+  await runQuery(
+    `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
+    [content, messageId, channelId]
+  );
+}
+
+async function unindexForSearch(messageIds) {
+  if (isPostgres || !messageIds.length) return;
+  await runQuery(
+    `DELETE FROM messages_fts WHERE message_id IN (${messageIds.map(() => '?').join(',')})`,
+    messageIds
+  );
+}
+
+/** Escape LIKE wildcards so user text matches literally (with ESCAPE '\'). */
+const escapeLike = (text) => text.replace(/[\\%_]/g, '\\$&');
 
 /** Full-text search, optionally scoped to a channel or a server. */
 export async function searchMessages({
@@ -1024,7 +1053,7 @@ export async function searchMessages({
   for (const kind of parsed.filters.has) {
     if (kind === 'link' || kind === 'embed') {
       where.push(kind === 'link'
-        ? `m.content LIKE '%http%'`
+        ? `m.content ${sql.like} '%http%'`
         : `(m.embeds IS NOT NULL AND m.embeds <> '[]')`);
     } else if (kind === 'poll') {
       where.push(`EXISTS (SELECT 1 FROM polls p WHERE p.message_id = m.id)`);
@@ -1033,7 +1062,7 @@ export async function searchMessages({
     } else if (kind === 'image' || kind === 'video' || kind === 'sound') {
       const prefix = kind === 'sound' ? 'audio/' : `${kind}/`;
       where.push(`EXISTS (SELECT 1 FROM attachments a JOIN files f ON f.id = a.file_id
-                           WHERE a.message_id = m.id AND f.mime_type LIKE ?)`);
+                           WHERE a.message_id = m.id AND f.mime_type ${sql.like} ?)`);
       filterParams.push(`${prefix}%`);
     } else {
       where.push(`EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)`);
@@ -1072,8 +1101,20 @@ export async function searchMessages({
         WHERE ${where.join(' AND ')} ORDER BY m.id DESC LIMIT ?`,
       [...filterParams, cap]
     );
+  } else if (isPostgres) {
+    // Postgres: one path for every length. The pg_trgm GIN index on
+    // messages.content serves ILIKE '%term%' once the term has three
+    // characters; shorter terms are a scan bounded by the same filters.
+    rows = await allQuery(
+      `${projection}
+         FROM messages m
+         ${joins}
+        WHERE m.content ILIKE ? ESCAPE '\\' AND ${where.join(' AND ')}
+        ORDER BY m.id DESC LIMIT ?`,
+      [`%${escapeLike(term)}%`, ...filterParams, cap]
+    );
   } else if (term.length >= 3) {
-    // The trigram tokenizer treats a double-quoted string as a literal
+    // SQLite: the trigram tokenizer treats a double-quoted string as a literal
     // substring, so no FTS operators can leak in from user input.
     const ftsQuery = `"${term.replace(/"/g, '""')}"`;
     rows = await allQuery(
@@ -1094,7 +1135,7 @@ export async function searchMessages({
          ${joins}
         WHERE m.content LIKE ? ESCAPE '\\' AND ${where.join(' AND ')}
         ORDER BY m.id DESC LIMIT ?`,
-      [`%${term.replace(/[\\%_]/g, '\\$&')}%`, ...filterParams, cap]
+      [`%${escapeLike(term)}%`, ...filterParams, cap]
     );
   }
   // Results are filtered to channels the viewer can actually see — a search
@@ -1144,7 +1185,7 @@ export async function markRead({ userId, channelId, messageId }) {
   }
   await runQuery(
     `INSERT INTO read_states (user_id, channel_id, last_read_message_id, mention_count, last_viewed_at)
-     VALUES (?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, 0, ${sql.now})
      ON CONFLICT(user_id, channel_id)
      DO UPDATE SET last_read_message_id = COALESCE(excluded.last_read_message_id, read_states.last_read_message_id),
                    mention_count = 0,
@@ -1159,7 +1200,7 @@ export async function markUnread({ userId, channelId, beforeMessageId = null }) 
   if (userId) await assertChannelAccess({ channelId, userId });
   await runQuery(
     `INSERT INTO read_states (user_id, channel_id, last_read_message_id, last_viewed_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, ${sql.now})
      ON CONFLICT(user_id, channel_id)
      DO UPDATE SET last_read_message_id = excluded.last_read_message_id`,
     [userId, channelId, beforeMessageId]
@@ -1289,13 +1330,13 @@ export async function bulkDeleteMessages({ channelId, messageIds, userId }) {
     );
     for (const a of attachments) await releaseReference(a.file_id);
     await runQuery(
-      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE messages SET deleted_at = ${sql.now}
         WHERE id IN (${marks})`,
       deletable
     );
-    await runQuery(`DELETE FROM messages_fts WHERE message_id IN (${marks})`, deletable);
+    await unindexForSearch(deletable);
     await runQuery(
-      `UPDATE channels SET message_count = MAX(0, message_count - ?) WHERE id = ?`,
+      `UPDATE channels SET message_count = ${sql.greatest(0, 'message_count - ?')} WHERE id = ?`,
       [deletable.length, channelId]
     );
   });

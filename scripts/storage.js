@@ -6,7 +6,7 @@
 //   node scripts/storage.js verify
 //   node scripts/storage.js reindex        # rebuild the message search index
 
-import { initDB, closeDB, allQuery, getQuery, runQuery } from '../db.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, isPostgres } from '../db.js';
 import {
   initStorage, collectGarbage, verifyIntegrity, formatBytes, STORAGE_ROOT
 } from '../storageService.js';
@@ -56,7 +56,7 @@ async function stats() {
        FROM files WHERE deleted_at IS NOT NULL`
   );
   const dedupe = await getQuery(
-    `SELECT count(*) AS unique_hashes FROM (SELECT DISTINCT hash FROM files WHERE deleted_at IS NULL)`
+    `SELECT count(*) AS unique_hashes FROM (SELECT DISTINCT hash FROM files WHERE deleted_at IS NULL) AS h`
   );
 
   console.log(`\nStorage root: ${STORAGE_ROOT}\n`);
@@ -108,6 +108,17 @@ async function verify() {
 }
 
 async function reindex() {
+  if (isPostgres) {
+    // Postgres searches messages.content through a pg_trgm GIN index that the
+    // database keeps current on every write — there is no shadow table to
+    // rebuild. Refresh planner statistics so the index keeps being chosen.
+    await runQuery(`ANALYZE messages`);
+    const { c } = await getQuery(
+      `SELECT count(*) AS c FROM messages WHERE deleted_at IS NULL AND content IS NOT NULL AND content <> ''`
+    );
+    console.log(`PostgreSQL: search uses the pg_trgm index on messages.content (${c} searchable messages); nothing to rebuild.`);
+    return;
+  }
   await runQuery(`DELETE FROM messages_fts`);
   await runQuery(
     `INSERT INTO messages_fts (content, message_id, channel_id)

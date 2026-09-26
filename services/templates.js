@@ -8,7 +8,8 @@
 //  the new server's role ids at creation time.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import crypto from 'crypto';
@@ -86,7 +87,7 @@ export async function createTemplate({ serverId, userId, name, description = nul
   const existing = await getQuery(`SELECT code FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (existing) {
     await runQuery(
-      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = ${sql.now} WHERE code = ?`,
       [clean, desc, data, existing.code]
     );
     return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [existing.code]));
@@ -106,7 +107,7 @@ export async function syncTemplate({ serverId, userId }) {
   const row = await getQuery(`SELECT * FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (!row) throw ApiError.notFound('Template');
   await runQuery(
-    `UPDATE server_templates SET data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+    `UPDATE server_templates SET data = ?, updated_at = ${sql.now} WHERE code = ?`,
     [JSON.stringify(await snapshot(serverId)), row.code]
   );
   return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [row.code]));
@@ -160,7 +161,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       `INSERT INTO servers (id, name, icon_url, owner_id, member_count, description, verification_level,
                             default_notifications, explicit_content_filter, afk_timeout)
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-      [serverId, serverName, iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`, userId,
+      [serverId, serverName, proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`), userId,
        data.server?.description ?? null, Math.min(4, Math.max(0, Number(data.server?.verification_level) || 0)),
        ['all_messages', 'only_mentions'].includes(data.server?.default_notifications) ? data.server.default_notifications : 'all_messages',
        Number(data.server?.explicit_content_filter) || 0,
@@ -212,7 +213,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       let pos = 0;
       for (const tag of (c.tags ?? []).slice(0, 20)) {
         await runQuery(
-          `INSERT OR IGNORE INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           [generateId(), id, String(tag.name).slice(0, 20), tag.emoji ?? null, tag.moderated ? 1 : 0, pos++]
         );
       }

@@ -7,7 +7,7 @@
 //  variable that dies with the process.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from './db.js';
+import { runQuery, getQuery, allQuery, sql } from './db.js';
 import { generateId } from './lib/snowflake.js';
 import * as messageService from './services/messages.js';
 import * as userService from './services/users.js';
@@ -18,6 +18,11 @@ import { assertChannelAccess, canInChannel } from './services/access.js';
 import { resolveBotToken } from './services/applications.js';
 import { checkSocketLimit } from './lib/rateLimit.js';
 import { resolvePermissions } from './services/guilds.js';
+import { ApiError, publicError } from './lib/httpUtils.js';
+import { sessionEvents } from './lib/sessionEvents.js';
+
+/** What a socket client may see of an error: never raw database text. */
+const clientError = (err) => publicError(err).body;
 
 // Ephemeral state: typing indicators and the socket↔user mapping. These are
 // intentionally in-memory — they are meaningless after a restart.
@@ -66,7 +71,11 @@ async function authenticateSocket(socket, { userId, token, botToken }) {
   const candidate = token || cookieToken(socket);
   if (candidate) {
     const session = await resolveSession(candidate);
-    if (session) return session.userId;
+    if (session) {
+      // Remembered so ending the session (logout, revoke) can drop this socket.
+      socket.data.sessionId = session.sessionId;
+      return session.userId;
+    }
   }
   if (config.allowDevIdentity && userId) return userId;
   return null;
@@ -78,6 +87,12 @@ async function authenticateSocket(socket, { userId, token, botToken }) {
 const MESH_LIMIT = Number(process.env.VOICE_MESH_LIMIT) || 8;
 
 export function registerRealtime(io) {
+  // Sessions ended elsewhere (logout, revoke, password change) take their
+  // sockets with them.
+  sessionEvents.on('revoked', (payload) => {
+    disconnectSessions(io, payload).catch((err) => console.error('session disconnect failed:', err.message));
+  });
+
   io.on('connection', (socket) => {
     // --- identity ------------------------------------------------------------
     // The client announces who it is; replace with session-token validation
@@ -110,7 +125,8 @@ export function registerRealtime(io) {
         const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
         const status = current?.status === 'invisible' ? 'invisible' : 'online';
         const user = await userService.setPresence({ userId, status });
-        io.emit('presence_updated', { userId, status: user.status === 'invisible' ? 'offline' : user.status });
+        await emitToRelated(io, userId, 'presence_updated',
+          { userId, status: user.status === 'invisible' ? 'offline' : user.status });
       }
       await userService.touchLastSeen(userId);
       socket.emit('identified', { userId, applicationId: socket.data.applicationId ?? null });
@@ -162,7 +178,7 @@ export function registerRealtime(io) {
         if (!budget.allowed) {
           ack?.({
             ok: false, code: 'RATE_LIMITED',
-            error: `ส่งเร็วเกินไป ลองใหม่ในอีก ${Math.ceil(budget.retryAfterMs / 1000)} วินาที`
+            error: `Sending too fast — try again in ${Math.ceil(budget.retryAfterMs / 1000)} s`
           });
           return;
         }
@@ -176,39 +192,40 @@ export function registerRealtime(io) {
         fanOutMessage(io, message);
       } catch (err) {
         console.error('send_message failed:', err.message);
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('message_error', { error: err.message, code: err.code, nonce: data?.nonce });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('message_error', { error, code, nonce: data?.nonce });
       }
     });
 
     socket.on('edit_message', async ({ messageId, content }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const message = await messageService.editMessage({ messageId, userId, content });
         io.to(message.channel_id).emit('message_updated', message);
         ack?.({ ok: true, message });
       } catch (err) {
-        ack?.({ ok: false, error: err.message });
+        ack?.({ ok: false, ...clientError(err) });
       }
     });
 
     socket.on('delete_message', async ({ messageId }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const result = await messageService.deleteMessage({ messageId, userId });
         if (result) io.to(result.channel_id).emit('message_deleted', messageId);
         ack?.({ ok: true });
       } catch (err) {
-        ack?.({ ok: false, error: err.message });
+        ack?.({ ok: false, ...clientError(err) });
       }
     });
 
     socket.on('toggle_reaction', async ({ messageId, channelId, emoji }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const result = await messageService.toggleReaction({ messageId, userId, emoji });
         io.to(result.channelId ?? channelId).emit('reaction_updated', {
           messageId: result.messageId,
@@ -217,8 +234,9 @@ export function registerRealtime(io) {
         });
         ack?.({ ok: true });
       } catch (err) {
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('action_error', { action: 'toggle_reaction', error: err.message, code: err.code });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('action_error', { action: 'toggle_reaction', error, code });
       }
     });
 
@@ -268,13 +286,10 @@ export function registerRealtime(io) {
         const user = await userService.setPresence({ userId, status, customStatus });
         // Others see an invisible user as offline; only the user's own devices
         // learn the real value.
-        io.except(`user-${userId}`).emit('presence_updated', {
+        await emitToRelated(io, userId, 'presence_updated', {
           userId, status: user.status === 'invisible' ? 'offline' : user.status,
           custom_status: user.custom_status
-        });
-        io.to(`user-${userId}`).emit('presence_updated', {
-          userId, status: user.status, custom_status: user.custom_status
-        });
+        }, { userId, status: user.status, custom_status: user.custom_status });
       } catch (err) {
         console.error('update_presence failed:', err.message);
       }
@@ -289,8 +304,9 @@ export function registerRealtime(io) {
       try {
         await assertChannelAccess({ channelId, userId, permission: 'CONNECT' });
       } catch (err) {
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('voice_error', { channelId, code: err.code ?? 'FORBIDDEN', error: err.message });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('voice_error', { channelId, code, error });
         return;
       }
       // One voice channel per user: joining another leaves the old one first.
@@ -313,11 +329,11 @@ export function registerRealtime(io) {
       );
       const limit = Number(channel?.user_limit) || MESH_LIMIT;
       if (occupants.length + 1 > Math.min(limit, MESH_LIMIT)) {
-        ack?.({ ok: false, error: `ห้องเสียงนี้เต็ม (สูงสุด ${Math.min(limit, MESH_LIMIT)} คน)`, code: 'VOICE_FULL' });
+        ack?.({ ok: false, error: `This voice channel is full (${Math.min(limit, MESH_LIMIT)} max)`, code: 'VOICE_FULL' });
         socket.emit('voice_error', {
           channelId,
           code: 'VOICE_FULL',
-          error: `ห้องเสียงนี้รับได้สูงสุด ${Math.min(limit, MESH_LIMIT)} คน`
+          error: `This voice channel holds at most ${Math.min(limit, MESH_LIMIT)} people`
         });
         return;
       }
@@ -327,7 +343,7 @@ export function registerRealtime(io) {
 
       await runQuery(
         `INSERT INTO voice_states (user_id, channel_id, server_id, session_id, socket_id, joined_at)
-         VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         VALUES (?, ?, ?, ?, ?, ${sql.now})
          ON CONFLICT(user_id) DO UPDATE SET
            channel_id = excluded.channel_id, server_id = excluded.server_id,
            session_id = excluded.session_id, socket_id = excluded.socket_id,
@@ -548,7 +564,7 @@ export function registerRealtime(io) {
         if (current?.status !== 'invisible') {
           await userService.setPresence({ userId, status: 'offline' });
         }
-        io.emit('presence_updated', { userId, status: 'offline' });
+        await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
       }
 
       for (const [channelId, users] of typing) {
@@ -608,7 +624,18 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
         if (!member) sock.leave(room);
         continue;
       }
-      if (room.startsWith('voice-')) continue;
+      if (room.startsWith('voice-')) {
+        // Voice is an access decision too: someone kicked, banned or stripped
+        // of CONNECT must drop out of the call, not keep relaying media until
+        // they hang up themselves.
+        const voiceChannel = room.slice('voice-'.length);
+        if (channelIds && !channelIds.includes(voiceChannel)) continue;
+        if (serverChannels && !channelIds && !serverChannels.has(voiceChannel)) continue;
+        const mayStay = await check(userId, room, () =>
+          canInChannel({ channelId: voiceChannel, userId, permission: 'CONNECT' }));
+        if (!mayStay) await evictFromVoice(io, sock, voiceChannel);
+        continue;
+      }
       if (channelIds && !channelIds.includes(room)) continue;
       if (serverChannels && !channelIds && !serverChannels.has(room)) continue;
       const allowed = await check(userId, room, () =>
@@ -616,6 +643,75 @@ export async function revalidateRooms(io, { userIds = null, serverId = null, cha
       if (!allowed) sock.leave(room);
     }
   }
+
+  // A voice_states row can outlive its socket's room (a reconnect in flight,
+  // another process's socket). For explicitly named users who are no longer
+  // members of the guild, clear their voice presence there regardless.
+  if (serverId && userIds?.length) {
+    for (const uid of userIds) {
+      const stillMember = await check(uid, serverId, async () =>
+        (await resolvePermissions({ userId: uid, serverId })).isMember);
+      if (stillMember) continue;
+      const row = await getQuery(
+        `SELECT channel_id FROM voice_states WHERE user_id = ? AND server_id = ?`, [uid, serverId]
+      );
+      if (!row) continue;
+      await runQuery(`DELETE FROM voice_states WHERE user_id = ? AND server_id = ?`, [uid, serverId]);
+      await broadcastVoice(io, row.channel_id);
+    }
+  }
+}
+
+/**
+ * Emit `event` about `userId` to the people who can know that user — those
+ * sharing a server, a DM or a friendship (the same scope as GET /api/users) —
+ * rather than to every socket on the instance, which let anyone track
+ * everyone's presence and profile changes.
+ *
+ * `selfPayload`, when given, goes to the user's own devices instead (they may
+ * see fields others must not, such as their own "invisible" status).
+ */
+export async function emitToRelated(io, userId, event, payload, selfPayload = undefined) {
+  if (!io || !userId) return;
+  const related = await userService.listUsers(userId);
+  const rooms = related.map((u) => `user-${u.id}`).filter((room) => room !== `user-${userId}`);
+  if (rooms.length) io.to(rooms).emit(event, payload);
+  io.to(`user-${userId}`).emit(event, selfPayload === undefined ? payload : selfPayload);
+}
+
+/** Remove one socket from a voice room: state row, room, peers told. */
+async function evictFromVoice(io, sock, channelId) {
+  sock.leave(`voice-${channelId}`);
+  if (sock.data.voiceChannelId === channelId) sock.data.voiceChannelId = null;
+  await runQuery(
+    `DELETE FROM voice_states WHERE user_id = ? AND channel_id = ?`, [sock.data.userId, channelId]
+  );
+  // The client tears down its peer connections on this; the others see the
+  // roster change through broadcastVoice.
+  sock.emit('voice_disconnected', { channelId, reason: 'removed' });
+  await broadcastVoice(io, channelId);
+}
+
+/**
+ * Sessions end (logout, revoke from another device, password change, account
+ * deletion): sockets that authenticated with them must not keep receiving
+ * events. Called through lib/sessionEvents.js so auth code needs no io handle.
+ */
+export async function disconnectSessions(io, { sessionIds = null, userId = null, exceptSessionId = null } = {}) {
+  if (!io) return 0;
+  const targets = userId
+    ? await io.in(`user-${userId}`).fetchSockets()
+    : await io.fetchSockets();
+  let dropped = 0;
+  for (const sock of targets) {
+    const sid = sock.data?.sessionId;
+    if (!sid || sid === exceptSessionId) continue;
+    if (sessionIds && !sessionIds.includes(sid)) continue;
+    sock.emit('session_revoked', { reason: 'session_ended' });
+    sock.disconnect(true);
+    dropped += 1;
+  }
+  return dropped;
 }
 
 /**
@@ -652,8 +748,8 @@ function clearTyping(io, channelId, userId) {
 
 async function broadcastVoice(io, channelId) {
   const participants = await allQuery(
-    `SELECT vs.user_id AS userId, vs.socket_id AS socketId,
-            vs.self_mute AS isMuted, vs.self_deaf AS isDeafened,
+    `SELECT vs.user_id AS "userId", vs.socket_id AS "socketId",
+            vs.self_mute AS "isMuted", vs.self_deaf AS "isDeafened",
             vs.self_video, vs.self_stream, vs.joined_at, vs.suppress, vs.request_to_speak_at,
             COALESCE(u.display_name, u.username) AS username, u.avatar_url
        FROM voice_states vs JOIN users u ON u.id = vs.user_id

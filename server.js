@@ -16,7 +16,7 @@ import fs from 'fs';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
 
-import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION } from './db.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION, sql, dbHealth } from './db.js';
 import {
   initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError
 } from './storageService.js';
@@ -28,11 +28,12 @@ import { config } from './lib/config.js';
 import {
   securityHeaders, requestLogger, metricsMiddleware, renderMetrics, metricsSnapshot
 } from './lib/middleware.js';
-import { pruneAccountTokens } from './services/accountSecurity.js';
+import { pruneAccountTokens, assertReauthenticated } from './services/accountSecurity.js';
 import { sweepStaleThreads } from './services/threads.js';
 import {
-  writeRateLimit, uploadRateLimit, readRateLimit
+  writeRateLimit, uploadRateLimit, readRateLimit, rateLimit
 } from './lib/rateLimit.js';
+import { proxyHandler as mediaProxyHandler } from './services/mediaProxy.js';
 import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
@@ -62,15 +63,23 @@ import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
-  revalidateRooms, emitToChannelViewers
+  revalidateRooms, emitToChannelViewers, emitToRelated
 } from './realtime.js';
 import { requireUser } from './lib/httpUtils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// After an uncaught exception the process is in an unknown state (a half-
+// finished write, a leaked lock or connection). Log it, then drain and exit so
+// the supervisor (Docker restart policy / systemd) starts a clean process —
+// the documented Node guidance, rather than limping on.
 process.on('uncaughtException', (err) => {
   if (err?.code === 'EPIPE') return;
-  console.error('⚠️ Uncaught Exception caught:', err);
+  console.error('💥 Uncaught exception — shutting down:', err);
+  process.exitCode = 1;
+  // `shutdown` is defined below; by the time anything can throw, it exists.
+  if (typeof globalThis.__agShutdown === 'function') globalThis.__agShutdown('uncaughtException', 1);
+  else process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('⚠️ Unhandled Rejection caught:', reason);
@@ -104,7 +113,19 @@ const io = new Server(httpServer, {
 app.set('trust proxy', config.trustProxy);
 app.disable('x-powered-by');
 
-app.use(securityHeaders({ isProduction: config.isProduction, publicUrl: config.publicUrl }));
+app.use(securityHeaders({
+  isProduction: config.isProduction,
+  publicUrl: config.publicUrl,
+  // Uploads served from a CDN / bucket origin (STORAGE_PUBLIC_BASE=https://…),
+  // plus any origins an operator explicitly allows (CSP_IMG_SOURCES).
+  imageSources: [
+    ...(() => {
+      try { return /^https?:\/\//i.test(process.env.STORAGE_PUBLIC_BASE ?? '') ? [new URL(process.env.STORAGE_PUBLIC_BASE).origin] : []; }
+      catch { return []; }
+    })(),
+    ...String(process.env.CSP_IMG_SOURCES ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  ]
+}));
 app.use(requestLogger({ format: config.logFormat, level: config.logLevel }));
 app.use(metricsMiddleware());
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
@@ -150,19 +171,27 @@ app.get('/api/ready', asyncRoute(async (req, res) => {
     res.status(503).json({ status: 'draining' });
     return;
   }
-  try {
-    await getQuery('SELECT 1 AS ok');
-    res.json({ status: 'ready', ...metricsSnapshot() });
-  } catch (err) {
-    res.status(503).json({ status: 'not_ready', error: err.message });
+  const database = await dbHealth();
+  if (!database.reachable) {
+    res.status(503).json({ status: 'not_ready', database });
+    return;
   }
+  res.json({ status: 'ready', database, ...metricsSnapshot() });
 }));
 
-if (config.enableMetrics) {
+/** Constant-time bearer check: hashing first gives equal-length buffers. */
+function bearerMatches(header, secret) {
+  const digest = (v) => crypto.createHash('sha256').update(String(v ?? '')).digest();
+  return crypto.timingSafeEqual(digest(header), digest(`Bearer ${secret}`));
+}
+
+// Metrics are operational data (routes, volumes, latency, memory). In
+// production they are served only behind METRICS_TOKEN; without a token the
+// endpoint does not exist (lib/config.js warns at boot). Development keeps the
+// old convenience of an open endpoint.
+if (config.enableMetrics && (config.metricsToken || !config.isProduction)) {
   app.get('/metrics', (req, res) => {
-    // With METRICS_TOKEN set the endpoint is private; without it, open — which
-    // is normal when the metrics port is only reachable inside the network.
-    if (config.metricsToken && req.get('authorization') !== `Bearer ${config.metricsToken}`) {
+    if (config.metricsToken && !bearerMatches(req.get('authorization'), config.metricsToken)) {
       res.status(401).type('text/plain').send('unauthorized\n');
       return;
     }
@@ -172,11 +201,19 @@ if (config.enableMetrics) {
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
+  // Which driver is in use and whether it answers. An unreachable database
+  // is a 503 with the reason, rather than an opaque 500 from the query below.
+  const database = await dbHealth();
+  if (!database.reachable) {
+    res.status(503).json({ status: 'error', database, code_schema_version: SCHEMA_VERSION });
+    return;
+  }
   const { version } = await getQuery(
     `SELECT MAX(version) AS version FROM schema_migrations`
   );
   res.json({
     status: 'ok',
+    database,
     schema_version: version,
     // What *this process* was built against. A client that expects more than
     // this is talking to a server that was started before the code changed —
@@ -203,10 +240,18 @@ app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
 
+// Same-origin image proxy: every remote image (avatars, icons, link previews)
+// is fetched by the server, so viewers' browsers never contact third-party
+// hosts. Signed-in users only (an <img> sends the session cookie), with its
+// own rate bucket. See services/mediaProxy.js.
+const mediaProxyLimit = rateLimit({ name: 'media-proxy', limit: 600, windowMs: 60_000 });
+app.get('/api/media/proxy', requireUser, mediaProxyLimit, asyncRoute(mediaProxyHandler));
+
 // --- users -------------------------------------------------------------------
 
-app.get('/api/users', requireUser, asyncRoute(async (_req, res) => {
-  res.json((await userService.listUsers()).map(publicUserEvent));
+app.get('/api/users', requireUser, asyncRoute(async (req, res) => {
+  // Scoped to people the caller shares a server, a DM or a friendship with.
+  res.json((await userService.listUsers(req.userId)).map(publicUserEvent));
 }));
 
 // Every custom emoji the viewer may use, grouped by server — the picker's
@@ -296,10 +341,9 @@ app.put('/api/users/:userId', asyncRoute(async (req, res) => {
   const updated = await userService.updateProfile({
     userId: req.params.userId, patch: req.body ?? {}
   });
-  // Everyone connected receives this, so it carries only the public view —
-  // never the full server list or a private profile's bio.
-  io.except(`user-${updated.id}`).emit('user_updated', publicUserEvent(updated));
-  io.to(`user-${updated.id}`).emit('user_updated', updated);
+  // People who can know this user get the public view — never the full server
+  // list or a private profile's bio; the user's own devices get everything.
+  await emitToRelated(io, updated.id, 'user_updated', publicUserEvent(updated), updated);
   res.json(updated);
 }));
 
@@ -311,14 +355,11 @@ app.patch('/api/users/:userId/presence', asyncRoute(async (req, res) => {
     customStatus: req.body?.custom_status
   });
   // Others see "invisible" as offline, exactly as on the socket path.
-  io.except(`user-${updated.id}`).emit('presence_updated', {
+  await emitToRelated(io, updated.id, 'presence_updated', {
     userId: updated.id,
     status: updated.status === 'invisible' ? 'offline' : updated.status,
     custom_status: updated.custom_status
-  });
-  io.to(`user-${updated.id}`).emit('presence_updated', {
-    userId: updated.id, status: updated.status, custom_status: updated.custom_status
-  });
+  }, { userId: updated.id, status: updated.status, custom_status: updated.custom_status });
   res.json(updated);
 }));
 
@@ -928,13 +969,13 @@ app.post('/api/notifications/read', requireUser, asyncRoute(async (req, res) => 
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
   if (ids && ids.length) {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
       [req.userId, ...ids]
     );
   } else {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL`,
       [req.userId]
     );
@@ -1435,7 +1476,12 @@ app.get('/api/users/@me/export', requireUser, asyncRoute(async (req, res) => {
   res.type('application/json').send(JSON.stringify(data, null, 2));
 }));
 
-app.delete('/api/users/@me', requireUser, asyncRoute(async (req, res) => {
+app.delete('/api/users/@me', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // Irreversible, so a session alone is not enough: the password again, and
+  // the second factor when the account has one.
+  await assertReauthenticated({
+    userId: req.userId, password: req.body?.password, code: req.body?.mfa_code ?? req.body?.code
+  });
   const result = await dataRights.deleteAccount({ userId: req.userId });
   io.to(`user-${req.userId}`).emit('identify_error', { error: 'ACCOUNT_DELETED' });
   // A deleted account must stop receiving anything at all.
@@ -1762,7 +1808,7 @@ app.post('/api/servers/:serverId/automod', writeRateLimit, asyncRoute(async (req
   res.json(rule);
 }));
 
-app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.patch('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -1771,7 +1817,7 @@ app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) 
   }));
 }));
 
-app.delete('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.delete('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -1837,7 +1883,7 @@ app.get('/api/reports', asyncRoute(async (req, res) => {
   const serverId = req.query.serverId ?? null;
   const isAdmin = process.env.ADMIN_TOKEN && req.get('x-admin-token') === process.env.ADMIN_TOKEN;
   if (!isAdmin) {
-    if (!serverId) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN หรือระบุ serverId');
+    if (!serverId) throw new ApiError('ADMIN_TOKEN or a serverId is required', { status: 403, code: 'FORBIDDEN' });
     await guildService.assertPermission({
       userId: req.userId, serverId, permission: 'MANAGE_MESSAGES'
     });
@@ -1855,7 +1901,7 @@ app.patch('/api/reports/:reportId', requireUser, asyncRoute(async (req, res) => 
     // A guild moderator may only close reports raised inside their own guild.
     const report = await getQuery(`SELECT server_id FROM reports WHERE id = ?`, [req.params.reportId]);
     if (!report) throw ApiError.notFound('Report');
-    if (!report.server_id) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN');
+    if (!report.server_id) throw new ApiError('ADMIN_TOKEN is required', { status: 403, code: 'FORBIDDEN' });
     await guildService.assertPermission({
       userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
     });
@@ -2109,7 +2155,7 @@ httpServer.listen(PORT, config.host, () => {
  */
 let shuttingDown = false;
 
-async function shutdown(signal) {
+async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n${signal} received — draining.`);
@@ -2127,12 +2173,14 @@ async function shutdown(signal) {
   try {
     stopGC();
     clearInterval(housekeeping);
+    clearInterval(afkSweep);
+    clearInterval(eventReminders);
     await new Promise((resolve) => io.close(resolve));
     await new Promise((resolve) => httpServer.close(resolve));
     await closeDB();
     clearTimeout(forceExit);
     console.log('   drained cleanly.');
-    process.exit(0);
+    process.exit(exitCode);
   } catch (err) {
     console.error('   shutdown error:', err.message);
     process.exit(1);
@@ -2142,6 +2190,7 @@ async function shutdown(signal) {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => shutdown(signal));
 }
+globalThis.__agShutdown = shutdown;
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
 

@@ -10,9 +10,11 @@
 
 import crypto from 'crypto';
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
@@ -323,7 +325,9 @@ export async function createServer({ name, iconUrl = null, iconFileId = null, ow
   if (!trimmed) throw new ApiError('Server name is required', { code: 'INVALID_NAME' });
 
   const serverId = generateId();
-  const icon = iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`;
+  // Remote icons (including the generated default) are served through the
+  // same-origin image proxy.
+  const icon = proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`);
 
   await transaction(async () => {
     await runQuery(
@@ -409,7 +413,7 @@ export async function createChannel({
     } else {
       resolvedParent = generateId();
       const { maxPos } = await getQuery(
-        `SELECT COALESCE(MAX(position), -1) AS maxPos FROM channels WHERE server_id = ?`, [serverId]
+        `SELECT COALESCE(MAX(position), -1) AS "maxPos" FROM channels WHERE server_id = ?`, [serverId]
       );
       await runQuery(
         `INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', ?)`,
@@ -419,7 +423,7 @@ export async function createChannel({
   }
 
   const { maxPos } = await getQuery(
-    `SELECT COALESCE(MAX(position), -1) AS maxPos FROM channels WHERE server_id = ?`, [serverId]
+    `SELECT COALESCE(MAX(position), -1) AS "maxPos" FROM channels WHERE server_id = ?`, [serverId]
   );
   const channelId = generateId();
 
@@ -487,7 +491,7 @@ export async function updateChannel({ channelId, patch, userId }) {
   }
   if (!sets.length) return channel;
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(channelId);
   await runQuery(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`, params);
 
@@ -519,12 +523,12 @@ export async function deleteChannel({ channelId, userId }) {
   }
   // Threads die with their parent, as on Discord.
   await runQuery(
-    `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE channels SET deleted_at = ${sql.now}
       WHERE parent_id = ? AND type = 'thread' AND deleted_at IS NULL`,
     [channelId]
   );
   await runQuery(
-    `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE channels SET deleted_at = ${sql.now} WHERE id = ?`,
     [channelId]
   );
   if (channel.server_id) {
@@ -577,7 +581,11 @@ export async function assertVerificationLevel(serverId, userId) {
   }
 }
 
-export async function joinServer({ serverId, userId }) {
+/**
+ * `claim` (optional) runs first inside the membership transaction — the
+ * invite-use counter — so it commits or rolls back with the join itself.
+ */
+export async function joinServer({ serverId, userId, claim = null }) {
   const banned = await getQuery(
     `SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?`, [serverId, userId]
   );
@@ -588,20 +596,15 @@ export async function joinServer({ serverId, userId }) {
   const { guardJoin } = await import('./insights.js');
   await guardJoin(serverId);
 
-  const existing = await getQuery(
-    `SELECT * FROM server_members WHERE server_id = ? AND user_id = ?`, [serverId, userId]
-  );
-
   await transaction(async () => {
-    if (existing) {
-      await runQuery(
-        `UPDATE server_members SET left_at = NULL, joined_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          WHERE server_id = ? AND user_id = ?`,
-        [serverId, userId]
-      );
-    } else {
-      await runQuery(`INSERT INTO server_members (server_id, user_id) VALUES (?, ?)`, [serverId, userId]);
-    }
+    if (claim) await claim();
+    // One statement for join and re-join, so two concurrent joins by the same
+    // person cannot both take the INSERT path and collide on the primary key.
+    await runQuery(
+      `INSERT INTO server_members (server_id, user_id) VALUES (?, ?)
+       ON CONFLICT (server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = ${sql.now}`,
+      [serverId, userId]
+    );
     // Membership screening: the new member is pending until they accept the
     // rules / finish onboarding. Rejoining members are screened again.
     const gate = await getQuery(`SELECT screening_enabled FROM servers WHERE id = ?`, [serverId]);
@@ -610,11 +613,11 @@ export async function joinServer({ serverId, userId }) {
       [gate?.screening_enabled ? 1 : 0, serverId, userId]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)`,
+      `INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [serverId, userId, serverId]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO server_settings (user_id, server_id) VALUES (?, ?)`, [userId, serverId]
+      `INSERT INTO server_settings (user_id, server_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [userId, serverId]
     );
     await runQuery(
       `UPDATE servers SET member_count = (
@@ -635,7 +638,7 @@ export async function leaveServer({ serverId, userId }) {
   }
   await transaction(async () => {
     await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE server_members SET left_at = ${sql.now}
         WHERE server_id = ? AND user_id = ?`,
       [serverId, userId]
     );
@@ -693,8 +696,9 @@ export async function createRole({ serverId, name, color = null, permissions = '
   }
   await assertCanManageRole({ serverId, actorId: userId, permissions });
   name = trimmed;
+  color = normaliseColor(color, 'color') ?? null;
   const { maxPos } = await getQuery(
-    `SELECT COALESCE(MAX(position), 0) AS maxPos FROM roles WHERE server_id = ?`, [serverId]
+    `SELECT COALESCE(MAX(position), 0) AS "maxPos" FROM roles WHERE server_id = ?`, [serverId]
   );
   const roleId = generateId();
   await runQuery(
@@ -717,7 +721,7 @@ export async function assignRole({ serverId, userId: targetId, roleId, actorId }
   );
   if (!member) throw ApiError.notFound('Member');
   await runQuery(
-    `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id, assigned_by) VALUES (?, ?, ?, ?)`,
+    `INSERT INTO member_roles (server_id, user_id, role_id, assigned_by) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [serverId, targetId, roleId, actorId]
   );
   await writeAuditLog({
@@ -792,7 +796,7 @@ export async function openDirectMessage({ userId, recipientId }) {
 export async function createGroupDM({ userId, recipientIds = [], name = null }) {
   const unique = [...new Set(recipientIds.filter((id) => id && id !== userId))];
   if (unique.length === 0) throw new ApiError('A group needs at least one other person', { code: 'INVALID_RECIPIENTS' });
-  if (unique.length > 9) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  if (unique.length > 9) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
 
   // A block works both ways here too — you cannot pull someone who blocked you
   // into a group, and you cannot be pulled into one with someone you blocked.
@@ -988,7 +992,7 @@ export async function addGroupRecipients({ channelId, userId, recipientIds = [] 
     `SELECT count(*) AS n FROM channel_recipients WHERE channel_id = ?`, [channelId]
   );
   recipientIds = [...new Set(recipientIds.filter((id) => id && id !== userId))];
-  if (n + recipientIds.length > 10) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  if (n + recipientIds.length > 10) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
   // The same consent rules as starting a group: nobody can be pulled into a
   // conversation with someone they blocked (or who blocked them), or against
   // their DM privacy setting.
@@ -1005,7 +1009,7 @@ export async function addGroupRecipients({ channelId, userId, recipientIds = [] 
   }
   for (const rid of recipientIds) {
     await runQuery(
-      `INSERT OR IGNORE INTO channel_recipients (channel_id, user_id) VALUES (?, ?)`, [channelId, rid]
+      `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [channelId, rid]
     );
   }
   return getDirectMessageChannel(channelId, userId);
@@ -1026,7 +1030,7 @@ export async function removeGroupRecipient({ channelId, userId, targetId }) {
   // An empty group is dead weight; Discord deletes it once the last person leaves.
   if ((remaining?.n ?? 0) === 0) {
     await runQuery(
-      `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [channelId]
+      `UPDATE channels SET deleted_at = ${sql.now} WHERE id = ?`, [channelId]
     );
   }
   return { success: true, channel_id: channelId, user_id: targetId };
@@ -1052,16 +1056,21 @@ export async function acceptInvite({ code, userId }) {
   );
   if (banned) throw ApiError.forbidden('You are banned from this server');
   // Check-and-increment in one statement, so two concurrent accepts cannot
-  // both squeeze through the last use of a limited invite.
-  const claimed = await runQuery(
-    `UPDATE invites SET uses = uses + 1
-      WHERE code = ? AND (max_uses = 0 OR uses < max_uses)`,
-    [code]
-  );
-  if (!claimed.changes) {
-    throw new ApiError('This invite has been used up', { status: 410, code: 'INVITE_EXHAUSTED' });
-  }
-  return joinServer({ serverId: invite.server_id, userId });
+  // both squeeze through the last use of a limited invite (on Postgres the
+  // row lock the UPDATE takes serialises them). It runs inside the join's own
+  // write transaction, after every refusal check, so a refused join never
+  // burns a use and a use is never claimed without the membership it paid for.
+  const claim = async () => {
+    const claimed = await runQuery(
+      `UPDATE invites SET uses = uses + 1
+        WHERE code = ? AND revoked_at IS NULL AND (max_uses = 0 OR uses < max_uses)`,
+      [code]
+    );
+    if (!claimed.changes) {
+      throw new ApiError('This invite has been used up', { status: 410, code: 'INVITE_EXHAUSTED' });
+    }
+  };
+  return joinServer({ serverId: invite.server_id, userId, claim });
 }
 
 // --- moderation --------------------------------------------------------------
@@ -1104,7 +1113,7 @@ export async function assertMemberHierarchy({ serverId, actorId, targetId, actio
  */
 async function removeMembership(serverId, userId) {
   await runQuery(
-    `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE server_members SET left_at = ${sql.now}
       WHERE server_id = ? AND user_id = ? AND left_at IS NULL`,
     [serverId, userId]
   );
@@ -1123,15 +1132,19 @@ export async function banMember({ serverId, userId: targetId, moderatorId, reaso
   }
   await transaction(async () => {
     await runQuery(
-      `INSERT OR REPLACE INTO bans (server_id, user_id, moderator_id, reason, delete_message_seconds)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO bans (server_id, user_id, moderator_id, reason, delete_message_seconds)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (server_id, user_id) DO UPDATE SET
+         moderator_id = excluded.moderator_id, reason = excluded.reason,
+         delete_message_seconds = excluded.delete_message_seconds,
+         expires_at = NULL, created_at = ${sql.now}`,
       [serverId, targetId, moderatorId, reason, deleteMessageSeconds]
     );
     await removeMembership(serverId, targetId);
     if (deleteMessageSeconds > 0) {
       const cutoff = new Date(Date.now() - deleteMessageSeconds * 1000).toISOString();
       await runQuery(
-        `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        `UPDATE messages SET deleted_at = ${sql.now}
           WHERE server_id = ? AND user_id = ? AND created_at > ?`,
         [serverId, targetId, cutoff]
       );
@@ -1250,7 +1263,7 @@ export async function reorderChannels({ serverId, userId, order }) {
     for (const [index, entry] of order.entries()) {
       await runQuery(
         `UPDATE channels SET position = ?, parent_id = ?,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                updated_at = ${sql.now}
           WHERE id = ? AND server_id = ?`,
         [entry.position ?? index, entry.parent_id ?? null, entry.id, serverId]
       );

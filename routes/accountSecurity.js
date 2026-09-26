@@ -34,7 +34,10 @@ router.post('/auth/mfa/confirm', mfaLimit, asyncRoute(async (req, res) => {
 }));
 
 router.post('/auth/mfa/disable', mfaLimit, asyncRoute(async (req, res) => {
-  res.json(await security.disableMfa({ userId: requireUser(req), code: req.body?.code }));
+  // Step-up: the account password as well as a current code / recovery code.
+  res.json(await security.disableMfa({
+    userId: requireUser(req), code: req.body?.code, password: req.body?.password
+  }));
 }));
 
 router.get('/auth/mfa/status', asyncRoute(async (req, res) => {

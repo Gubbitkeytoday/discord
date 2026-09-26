@@ -64,14 +64,14 @@ const ACTIONS = ['block', 'alert', 'timeout'];
 
 export async function createRule({ serverId, actorId, rule }) {
   if (!TRIGGERS.includes(rule?.trigger_type)) {
-    throw new ApiError(`trigger_type ต้องเป็นหนึ่งใน ${TRIGGERS.join(', ')}`, { code: 'INVALID_TRIGGER' });
+    throw new ApiError(`trigger_type must be one of ${TRIGGERS.join(', ')}`, { code: 'INVALID_TRIGGER' });
   }
   const actions = (rule.actions ?? ['block']).filter((a) => ACTIONS.includes(a));
   if (actions.length === 0) {
-    throw new ApiError(`actions ต้องมีอย่างน้อยหนึ่งใน ${ACTIONS.join(', ')}`, { code: 'INVALID_ACTION' });
+    throw new ApiError(`actions must include at least one of ${ACTIONS.join(', ')}`, { code: 'INVALID_ACTION' });
   }
   if (rule.trigger_type === 'regex' && !safeRegex(rule.trigger_metadata?.pattern)) {
-    throw new ApiError('regex ไม่ปลอดภัยหรือไม่ถูกต้อง', { code: 'INVALID_REGEX' });
+    throw new ApiError('That regex is invalid or unsafe', { code: 'INVALID_REGEX' });
   }
 
   const id = generateId();
@@ -80,7 +80,7 @@ export async function createRule({ serverId, actorId, rule }) {
                                 trigger_metadata, actions, enabled,
                                 exempt_roles, exempt_channels, creator_id)
      VALUES (?, ?, ?, 'message_send', ?, ?, ?, ?, ?, ?, ?)`,
-    [id, serverId, String(rule.name ?? 'กฎใหม่').slice(0, 100), rule.trigger_type,
+    [id, serverId, String(rule.name ?? 'New rule').slice(0, 100), rule.trigger_type,
      JSON.stringify(rule.trigger_metadata ?? {}), JSON.stringify(actions),
      rule.enabled === false ? 0 : 1,
      JSON.stringify(rule.exempt_roles ?? []), JSON.stringify(rule.exempt_channels ?? []),
@@ -96,7 +96,7 @@ export async function updateRule({ serverId, ruleId, patch }) {
   if (!existing) throw ApiError.notFound('Rule');
 
   if (patch.trigger_type === 'regex' && !safeRegex(patch.trigger_metadata?.pattern)) {
-    throw new ApiError('regex ไม่ปลอดภัยหรือไม่ถูกต้อง', { code: 'INVALID_REGEX' });
+    throw new ApiError('That regex is invalid or unsafe', { code: 'INVALID_REGEX' });
   }
 
   const fields = {
@@ -184,36 +184,36 @@ function matches(rule, { content, lowered, history }) {
     case 'keyword': {
       const words = (meta.keywords ?? []).map((k) => String(k).toLowerCase()).filter(Boolean);
       const found = words.find((word) => lowered.includes(word));
-      return found ? `คำที่ถูกกรอง: "${found}"` : null;
+      return found ? `Blocked word: "${found}"` : null;
     }
     case 'regex': {
       const pattern = safeRegex(meta.pattern);
-      return pattern?.test(content) ? `ตรงกับรูปแบบที่ถูกกรอง` : null;
+      return pattern?.test(content) ? 'Matches a blocked pattern' : null;
     }
     case 'link': {
       const links = content.match(LINK) ?? [];
       if (links.length === 0) return null;
       const allow = (meta.allowed_domains ?? []).map((d) => String(d).toLowerCase());
-      if (allow.length === 0) return 'ห้ามส่งลิงก์ในเซิร์ฟเวอร์นี้';
+      if (allow.length === 0) return 'Links are not allowed in this server';
       const bad = links.find((link) => {
         try {
           const host = new URL(link).hostname.toLowerCase();
           return !allow.some((d) => host === d || host.endsWith(`.${d}`));
         } catch { return true; }
       });
-      return bad ? `ลิงก์ที่ไม่อนุญาต: ${bad}` : null;
+      return bad ? `Link not allowed: ${bad}` : null;
     }
     case 'mention_spam': {
       const limit = Number(meta.max_mentions) || 5;
       const count = (content.match(MENTION) ?? []).length;
-      return count > limit ? `พูดถึงคนอื่นมากเกินไป (${count} > ${limit})` : null;
+      return count > limit ? `Too many mentions (${count} > ${limit})` : null;
     }
     case 'spam': {
       const limit = Number(meta.max_messages) || 5;
-      if (history.length > limit) return `ส่งข้อความถี่เกินไป (${history.length} ใน 10 วินาที)`;
+      if (history.length > limit) return `Sending too fast (${history.length} in 10 s)`;
       // Repeating the identical message is spam even under the rate limit.
       const duplicates = history.filter((e) => e.content === content).length;
-      return duplicates >= 3 ? 'ส่งข้อความซ้ำเดิมหลายครั้ง' : null;
+      return duplicates >= 3 ? 'Repeated the same message' : null;
     }
     default:
       return null;
@@ -248,7 +248,7 @@ export async function assertCanSpeak({ serverId, channelId, userId, permissions 
     );
     // Parsed, not string-compared: an offset like +07:00 sorts wrong as text.
     if (isActiveTimeout(member?.timeout_until)) {
-      throw new ApiError('คุณถูกพักการใช้งานชั่วคราว ยังส่งข้อความไม่ได้', {
+      throw new ApiError('You are timed out and cannot send messages yet', {
         status: 403, code: 'TIMED_OUT',
         details: { until: member.timeout_until }
       });
@@ -278,7 +278,7 @@ export async function assertCanSpeak({ serverId, channelId, userId, permissions 
   const waitMs = slowmode * 1000 - elapsedMs;
   if (waitMs > 0) {
     const seconds = Math.ceil(waitMs / 1000);
-    throw new ApiError(`โหมดช้าเปิดอยู่ รออีก ${seconds} วินาที`, {
+    throw new ApiError(`Slowmode is on — wait ${seconds} s`, {
       status: 429, code: 'SLOWMODE',
       details: { retry_after_seconds: seconds, slowmode_seconds: slowmode }
     });
