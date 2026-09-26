@@ -16,6 +16,7 @@ import crypto from 'crypto';
 import { assertPermission, getServerDetail, writeAuditLog, applyNewServerSafetyDefaults } from './guilds.js';
 import { parseBuiltinCode, builtinTemplateData, resolveLang, BUILTIN_TEMPLATE_KEYS } from './admin/defaults.js';
 import { DEFAULT_PERMISSIONS } from '../lib/permissions.js';
+import { validateRoleStyle, validateUnicodeEmoji } from './serverAppearance.js'; // servers
 
 export const TEMPLATE_VERSION = 1;
 export const TEMPLATE_LIMITS = Object.freeze({ perServer: 1, name: 100, description: 120 });
@@ -23,6 +24,27 @@ export const TEMPLATE_LIMITS = Object.freeze({ perServer: 1, name: 100, descript
 const CHANNEL_FIELDS = ['name', 'type', 'topic', 'position', 'nsfw', 'rate_limit_per_user', 'bitrate', 'user_limit',
   'default_sort_order', 'default_reaction_emoji', 'require_tag', 'default_layout', 'auto_archive_duration'];
 const SERVER_FIELDS = ['description', 'verification_level', 'default_notifications', 'explicit_content_filter', 'afk_timeout'];
+
+/**
+ * A template role's style, validated as a live edit would be (a template is
+ * user-supplied data). null when there is nothing beyond the default.
+ */
+function templateRoleStyle(r) {
+  try {
+    const style = validateRoleStyle({
+      style: r.style ?? 'solid',
+      gradient_angle: r.gradient_angle ?? 90,
+      color_secondary: r.color_secondary ?? null,
+      unicode_emoji: r.unicode_emoji ?? null
+    });
+    if (style.style !== 'solid' && !r.color) style.style = 'solid';
+    if (style.style === 'gradient' && !style.color_secondary) style.style = 'solid';
+    if (style.style === 'solid' && !style.unicode_emoji) return null;
+    return style;
+  } catch {
+    return null;
+  }
+}
 
 /** Build the snapshot object from a live server. */
 export async function snapshot(serverId) {
@@ -55,12 +77,17 @@ export async function snapshot(serverId) {
     afk_channel: chanKey.get(server.afk_channel_id) ?? null,
     roles: roles.map((r) => ({
       key: roleKey.get(r.id), name: r.name, color: r.color ?? null, position: r.position,
-      permissions: String(r.permissions), hoist: Boolean(r.hoist), mentionable: Boolean(r.mentionable), everyone: Boolean(r.is_everyone)
+      permissions: String(r.permissions), hoist: Boolean(r.hoist), mentionable: Boolean(r.mentionable), everyone: Boolean(r.is_everyone),
+      // servers: role style travels with the template; uploaded icons do not.
+      style: r.style ?? 'solid', color_secondary: r.color_secondary ?? null,
+      gradient_angle: r.gradient_angle ?? 90, unicode_emoji: r.unicode_emoji ?? null
     })),
     channels: channels.map((c) => ({
       key: chanKey.get(c.id),
       parent: chanKey.get(c.parent_id) ?? null,
       ...Object.fromEntries(CHANNEL_FIELDS.map((f) => [f, c[f] ?? null])),
+      // A custom-emoji icon names this server's emoji, so only unicode travels.
+      icon_emoji: c.icon_emoji && !c.icon_emoji.startsWith('<') ? c.icon_emoji : null,
       overwrites: overwrites.filter((o) => o.channel_id === c.id).map((o) => ({
         role: roleKey.get(o.target_id), allow: String(o.allow), deny: String(o.deny)
       })).filter((o) => o.role),
@@ -206,6 +233,13 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
         `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, serverId, String(r.name).slice(0, 100), r.color ?? null, Number(r.position) || 1, String(r.permissions ?? '0'), r.hoist ? 1 : 0, r.mentionable ? 1 : 0]
       );
+      const style = templateRoleStyle(r);
+      if (style) {
+        await runQuery(
+          `UPDATE roles SET style = ?, color_secondary = ?, gradient_angle = ?, unicode_emoji = ? WHERE id = ?`,
+          [style.style, style.color_secondary, style.gradient_angle, style.unicode_emoji, id]
+        );
+      }
     }
 
     await runQuery(`INSERT INTO server_members (server_id, user_id) VALUES (?, ?)`, [serverId, userId]);
@@ -227,6 +261,11 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
          c.default_reaction_emoji ?? null, c.require_tag ? 1 : 0,
          ['list', 'gallery'].includes(c.default_layout) ? c.default_layout : 'list', Number(c.auto_archive_duration) || 1440]
       );
+      if (c.icon_emoji) {
+        let emoji = null;
+        try { emoji = validateUnicodeEmoji(c.icon_emoji); } catch { emoji = null; }
+        if (emoji) await runQuery(`UPDATE channels SET icon_emoji = ? WHERE id = ?`, [emoji, id]);
+      }
       for (const o of c.overwrites ?? []) {
         const roleId = roleIds.get(o.role);
         if (!roleId) continue;

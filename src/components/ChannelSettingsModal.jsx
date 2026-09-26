@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Hash, Volume2, Trash2, X, Loader2, Megaphone, Check, Folder, Settings, KeyRound } from 'lucide-react';
+import { Hash, Volume2, Trash2, X, Loader2, Megaphone, Check, Folder, Settings, KeyRound, Smile } from 'lucide-react';
 import { useDialog } from './settings/primitives';
 import ChannelPermissionsTab from './settings/ChannelPermissionsTab';
 import { takeChannelSettingsTab } from './admin/createChannelIntent';
 import { t } from '../i18n/index.jsx';
-import { get, put, del } from '../api';
+import { get, put, del, patch as apiPatch } from '../api';
+import EmojiPicker from './EmojiPicker';
 import { maskOf } from '../utils/permissionCatalog';
 
 // Discord's slowmode presets, in seconds.
@@ -30,6 +31,9 @@ export default function ChannelSettingsModal({ channel, canManage, onSave, onDel
   const [slowmode, setSlowmode] = useState(Number(channel.rate_limit_per_user) || 0);
   const [nsfw, setNsfw] = useState(Boolean(channel.nsfw));
   const [userLimit, setUserLimit] = useState(Number(channel.user_limit) || 0);
+  // Channel emoji: shown in place of the # / speaker glyph in the channel list.
+  const [iconEmoji, setIconEmoji] = useState(channel.icon_emoji ?? '');
+  const [pickingEmoji, setPickingEmoji] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [permsDirty, setPermsDirty] = useState(false);
@@ -80,12 +84,17 @@ export default function ChannelSettingsModal({ channel, canManage, onSave, onDel
     || topic !== (channel.topic ?? '')
     || slowmode !== (Number(channel.rate_limit_per_user) || 0)
     || nsfw !== Boolean(channel.nsfw)
-    || userLimit !== (Number(channel.user_limit) || 0);
+    || userLimit !== (Number(channel.user_limit) || 0)
+    || iconEmoji !== (channel.icon_emoji ?? '');
+  const canHaveEmoji = !isCategory && channel.type !== 'thread' && Boolean(serverId);
 
   const save = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
+      if (canHaveEmoji && iconEmoji !== (channel.icon_emoji ?? '')) {
+        await apiPatch(`/api/channels/${channel.id}/icon-emoji`, { icon_emoji: iconEmoji || null });
+      }
       await onSave(isCategory ? { name } : {
         name,
         topic: topic || null,
@@ -179,6 +188,46 @@ export default function ChannelSettingsModal({ channel, canManage, onSave, onDel
                 </span>
                 <input value={name} onChange={(e) => setName(e.target.value)} disabled={!canManage} maxLength={100} className={field} />
               </label>
+
+              {canHaveEmoji && (
+                <div className="relative">
+                  <span id="chs-emoji-label" className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('srv.channelEmoji')}</span>
+                  <div className="flex items-center gap-2" role="group" aria-labelledby="chs-emoji-label">
+                    <button
+                      type="button"
+                      onClick={() => setPickingEmoji((v) => !v)}
+                      disabled={!canManage}
+                      aria-expanded={pickingEmoji}
+                      aria-label={iconEmoji ? t('srv.channelEmojiChange', { emoji: iconEmoji }) : t('srv.channelEmojiPick')}
+                      className="w-11 h-11 rounded border border-d-edge bg-d-base flex items-center justify-center text-xl hover:border-d-brand disabled:opacity-60"
+                    >
+                      {iconEmoji && !iconEmoji.startsWith('<') ? <span aria-hidden="true">{iconEmoji}</span> : <Smile className="w-5 h-5 text-d-text3" aria-hidden="true" />}
+                    </button>
+                    <input
+                      value={iconEmoji}
+                      onChange={(e) => setIconEmoji(e.target.value.trim())}
+                      disabled={!canManage}
+                      maxLength={32}
+                      aria-label={t('srv.channelEmoji')}
+                      placeholder="🎮"
+                      className={`${field.replace('w-full', '')} w-28`}
+                    />
+                    {Boolean(iconEmoji) && canManage && (
+                      <button type="button" onClick={() => setIconEmoji('')} className="text-xs text-d-text2 hover:text-d-strong hover:underline min-h-8 px-1">
+                        {t('common.remove')}
+                      </button>
+                    )}
+                  </div>
+                  <span className="block text-[11px] text-d-text3 mt-1">{t('srv.channelEmojiHint')}</span>
+                  {pickingEmoji && (
+                    <EmojiPicker
+                      anchorClass="absolute left-0 top-full mt-1 z-30"
+                      onClose={() => setPickingEmoji(false)}
+                      onPick={(entry) => { if (entry.char) setIconEmoji(entry.char); setPickingEmoji(false); }}
+                    />
+                  )}
+                </div>
+              )}
 
               {isTextish && (
                 <label className="block">

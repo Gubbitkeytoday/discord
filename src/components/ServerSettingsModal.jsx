@@ -21,9 +21,13 @@ import { t, localeTag, useLocaleCode, formatDate, formatRelative } from '../i18n
 import { api as httpApi, upload as httpUpload } from '../api';
 import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
-  permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS, ROLE_PRESETS
+  permissionGroups, hasBit, toggleBit, countPermissions, ROLE_PRESETS
 } from '../utils/permissionCatalog';
 import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
+import RoleStyleEditor from './server/RoleStyleEditor.jsx';
+import RoleIcon from './server/RoleIcon.jsx';
+import { styleOf } from './server/roleStyle';
+import ServerAppearanceSettings from './server/ServerAppearanceSettings.jsx';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -284,7 +288,7 @@ export default function ServerSettingsModal({
           />
         )}
         {tab === 'roles' && (
-          <RolesTab roles={roles} api={api} reload={() => load('roles')} onToast={onToast} {...dirtyProps} />
+          <RolesTab roles={roles} api={api} reload={() => load('roles')} onToast={onToast} serverId={server.id} {...dirtyProps} />
         )}
         {tab === 'members' && (
           <MembersTab
@@ -477,8 +481,9 @@ function OverviewTab({
           <span className="flex items-center gap-1 justify-center text-[11px] text-d-link mt-2">
             <Upload className="w-3 h-3" /> {t('settings.changeIcon')}
           </span>
+          <span className="block max-w-24 text-center text-[10px] leading-tight text-d-text2 mt-1">{t('srv.animatedIconHint')}</span>
           <input
-            type="file" accept="image/*" className="hidden"
+            type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
             aria-label={t('server.iconAlt')}
             disabled={uploadingIcon}
             onChange={(e) => uploadIcon(e.target)}
@@ -581,6 +586,8 @@ function OverviewTab({
           </select>
         </Field>
       </div>
+
+      <ServerAppearanceSettings server={server} onServerUpdated={onServerUpdated} onToast={onToast} />
 
       <TranslationSection server={server} onToast={onToast} />
 
@@ -790,7 +797,7 @@ function TemplateSection({ server, onToast }) {
   );
 }
 
-function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
+function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0, serverId }) {
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -845,12 +852,14 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
 
   useEffect(() => {
     setDraft(selected ? { ...selected } : null);
-  }, [selectedId, selected?.permissions, selected?.name, selected?.color]);
+  }, [selectedId, selected?.permissions, selected?.name, selected?.color, selected?.style, selected?.color_secondary, selected?.gradient_angle]);
 
   const dirty = draft && selected && (
     draft.name !== selected.name ||
     draft.color !== selected.color ||
     (draft.color_secondary ?? null) !== (selected.color_secondary ?? null) ||
+    styleOf(draft) !== styleOf(selected) ||
+    Number(draft.gradient_angle ?? 90) !== Number(selected.gradient_angle ?? 90) ||
     String(draft.permissions) !== String(selected.permissions) ||
     Boolean(draft.hoist) !== Boolean(selected.hoist) ||
     Boolean(draft.mentionable) !== Boolean(selected.mentionable)
@@ -888,6 +897,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
         method: 'PATCH',
         body: {
           name: draft.name, color: draft.color, color_secondary: draft.color_secondary ?? null,
+          style: styleOf(draft), gradient_angle: Number(draft.gradient_angle ?? 90),
           permissions: String(draft.permissions),
           hoist: Boolean(draft.hoist), mentionable: Boolean(draft.mentionable)
         }
@@ -989,7 +999,10 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                 className="w-3 h-3 rounded-full shrink-0 border border-black/20"
                 style={{ backgroundColor: role.color || '#99aab5' }}
               />
-              <span className="text-sm text-d-strong truncate flex-1">{role.name}</span>
+              <span className="text-sm text-d-strong truncate flex-1 inline-flex items-center gap-1 min-w-0">
+                <span className="truncate">{role.name}</span>
+                <RoleIcon role={role} size={14} force />
+              </span>
               <span className="text-[10px] text-d-text3 shrink-0 group-hover/role:invisible group-focus-within/role:invisible">{role.member_count}</span>
             </button>
             {movable && (
@@ -1045,71 +1058,17 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                   />
                 </Field>
 
-                <div className="mt-4">
-                  <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('roles.roleColour')}</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {ROLE_COLOR_PRESETS.map((color) => (
-                      <button
-                        key={color}
-                        onClick={() => setDraft({ ...draft, color })}
-                        style={{ backgroundColor: color }}
-                        className={`w-7 h-7 rounded flex items-center justify-center transition-transform hover:scale-110 ${
-                          draft.color === color ? 'ring-2 ring-white' : ''
-                        }`}
-                        aria-label={t('roles.colorSwatch', { color })}
-                        aria-pressed={draft.color === color}
-                      >
-                        {draft.color === color && <Check className="w-3.5 h-3.5 text-d-strong drop-shadow" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Discord's role styles: a flat colour, or a two-colour gradient name. */}
-                <fieldset className="mt-4">
-                  <legend className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('adm.roleStyle')}</legend>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {[['solid', t('adm.roleStyleSolid')], ['gradient', t('adm.roleStyleGradient')]].map(([key, text]) => {
-                      const on = key === 'gradient' ? Boolean(draft.color_secondary) : !draft.color_secondary;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          role="radio"
-                          aria-checked={on}
-                          onClick={() => setDraft({ ...draft, color_secondary: key === 'gradient' ? (draft.color_secondary || '#5865f2') : null })}
-                          className={`min-h-[32px] px-3 py-1 rounded-full text-sm border ${on ? 'bg-d-brand border-d-brand text-white' : 'border-d-divider text-d-text2 hover:bg-d-hover/60'}`}
-                        >
-                          {text}
-                        </button>
-                      );
-                    })}
-                    <span
-                      className="ml-2 text-sm font-semibold"
-                      style={draft.color_secondary
-                        ? { backgroundImage: `linear-gradient(90deg, ${draft.color || '#99aab5'}, ${draft.color_secondary})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
-                        : { color: draft.color || 'var(--color-d-text)' }}
-                    >
-                      {draft.name || t('roles.newRoleName')}
-                    </span>
-                  </div>
-                  {Boolean(draft.color_secondary) && (
-                    <div className="flex flex-wrap gap-1.5 mt-2" aria-label={t('adm.secondColour')} role="group">
-                      {ROLE_COLOR_PRESETS.map((color) => (
-                        <button
-                          key={color}
-                          type="button"
-                          onClick={() => setDraft({ ...draft, color_secondary: color })}
-                          style={{ backgroundColor: color }}
-                          aria-pressed={draft.color_secondary === color}
-                          aria-label={t('roles.colorSwatch', { color })}
-                          className={`w-6 h-6 rounded ${draft.color_secondary === color ? 'ring-2 ring-white' : ''}`}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </fieldset>
-
+                {/* Colour, style (solid / gradient / holographic), icon and preview. */}
+                <RoleStyleEditor
+                  draft={draft}
+                  setDraft={setDraft}
+                  serverId={serverId}
+                  onToast={onToast}
+                  onIconSaved={(role) => {
+                    setDraft((d) => ({ ...d, icon_url: role.icon_url, unicode_emoji: role.unicode_emoji, icon_file_id: role.icon_file_id }));
+                    reload();
+                  }}
+                />
                 <div className="flex max-sm:flex-col gap-3 sm:gap-6 mt-4">
                   <Toggle
                     label={t('roles.displaySeparately')}

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Camera, Loader2, ArrowLeft, LayoutTemplate, Hash, Volume2, MessagesSquare, Gamepad2, GraduationCap, Heart, LifeBuoy } from 'lucide-react';
+import { X, Camera, Loader2, ArrowLeft, LayoutTemplate, Hash, Volume2, MessagesSquare, Gamepad2, GraduationCap, Heart, LifeBuoy, Compass } from 'lucide-react';
 import { upload, get } from '../api';
 import { useDialog } from './settings/primitives';
 import { t, currentLocaleCode } from '../i18n/index.jsx';
@@ -19,7 +19,7 @@ const builtinCode = (key) => `builtin-${key}-${String(currentLocaleCode() || 'en
 /**
  * Discord's create/join fork: choose to make a server or paste an invite.
  */
-export default function CreateServerModal({ onClose, onCreateServer, onJoinWithInvite, onCreateFromTemplate, initialTemplateCode = null }) {
+export default function CreateServerModal({ onClose, onCreateServer, onJoinWithInvite, onCreateFromTemplate, onOpenDiscover, initialTemplateCode = null }) {
   const [mode, setMode] = useState(initialTemplateCode ? 'template' : 'choose');   // choose | create | join | template
   const [templateInput, setTemplateInput] = useState(initialTemplateCode ?? '');
   const [template, setTemplate] = useState(null);   // preview from /api/templates/:code
@@ -166,6 +166,15 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
             >
               {t('server.join')}
             </button>
+            {onOpenDiscover && (
+              <button
+                type="button"
+                onClick={() => { onClose?.(); onOpenDiscover(); }}
+                className="w-full min-h-10 text-sm font-medium text-d-link hover:underline inline-flex items-center justify-center gap-1.5"
+              >
+                <Compass className="w-4 h-4" aria-hidden="true" /> {t('srv.exploreDiscover')}
+              </button>
+            )}
           </div>
         )}
 
@@ -294,6 +303,15 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
             >
               {t('server.join')}
             </button>
+            {onOpenDiscover && (
+              <button
+                type="button"
+                onClick={() => { onClose?.(); onOpenDiscover(); }}
+                className="w-full min-h-10 text-sm font-medium text-d-link hover:underline inline-flex items-center justify-center gap-1.5"
+              >
+                <Compass className="w-4 h-4" aria-hidden="true" /> {t('srv.exploreDiscover')}
+              </button>
+            )}
           </form>
         )}
       </div>
