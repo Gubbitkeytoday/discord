@@ -16,18 +16,19 @@ import fs from 'fs';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
 
-import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION, sql, dbHealth } from './db.js';
+// observability: logger first, so everything below logs through it.
+import { logger, httpLogger } from './lib/logger.js';
+import * as telemetry from './lib/telemetry.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION, sql, dbHealth, dbStats, DB_PATH, isPostgres } from './db.js';
 import {
-  initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError
+  initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError, activeBackend
 } from './storageService.js';
 import {
   ApiError, asyncRoute, makeIdentify, errorHandler, parseLimit
 } from './lib/httpUtils.js';
 import { resolveSession, pruneSessions } from './lib/auth.js';
 import { config } from './lib/config.js';
-import {
-  securityHeaders, requestLogger, metricsMiddleware, renderMetrics, metricsSnapshot
-} from './lib/middleware.js';
+import { securityHeaders, metricsMiddleware } from './lib/middleware.js';
 import { pruneAccountTokens, assertReauthenticated } from './services/accountSecurity.js';
 import { sweepStaleThreads } from './services/threads.js';
 import {
@@ -38,6 +39,7 @@ import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
 import filesRouter from './routes/files.js';
+import observabilityRouter from './routes/observability.js'; // observability
 import * as messageService from './services/messages.js';
 import * as guildService from './services/guilds.js';
 import * as userService from './services/users.js';
@@ -75,14 +77,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // the documented Node guidance, rather than limping on.
 process.on('uncaughtException', (err) => {
   if (err?.code === 'EPIPE') return;
-  console.error('💥 Uncaught exception — shutting down:', err);
+  logger.fatal({ err }, 'uncaught exception — shutting down');
+  telemetry.reportError(err, { source: 'uncaughtException' });
   process.exitCode = 1;
   // `shutdown` is defined below; by the time anything can throw, it exists.
-  if (typeof globalThis.__agShutdown === 'function') globalThis.__agShutdown('uncaughtException', 1);
-  else process.exit(1);
+  const exit = () => {
+    if (typeof globalThis.__agShutdown === 'function') globalThis.__agShutdown('uncaughtException', 1);
+    else process.exit(1);
+  };
+  telemetry.flushErrors(2000).finally(exit);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ Unhandled Rejection caught:', reason);
+  logger.error({ err: reason }, 'unhandled promise rejection');
+  telemetry.reportError(reason instanceof Error ? reason : new Error(String(reason)), { source: 'unhandledRejection' });
 });
 process.stdout?.on('error', (err) => { if (err?.code === 'EPIPE') return; });
 process.stderr?.on('error', (err) => { if (err?.code === 'EPIPE') return; });
@@ -96,6 +103,12 @@ const CORS_ORIGIN = config.corsOrigins.includes('*')
   : (config.corsOrigins.length > 0 ? config.corsOrigins : false);
 
 // --- boot --------------------------------------------------------------------
+
+// observability: both are no-ops unless OTEL_EXPORTER_OTLP_ENDPOINT / SENTRY_DSN
+// are set. startOtel() is normally already done by lib/otel-preload.mjs.
+await telemetry.startOtel();
+await telemetry.initErrorTracking();
+if (config.enableMetrics) telemetry.startDefaultMetrics();
 
 await initDB();
 await initStorage();
@@ -126,8 +139,9 @@ app.use(securityHeaders({
     ...String(process.env.CSP_IMG_SOURCES ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   ]
 }));
-app.use(requestLogger({ format: config.logFormat, level: config.logLevel }));
+app.use(httpLogger());
 app.use(metricsMiddleware());
+app.use(telemetry.httpMetrics());
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
@@ -152,78 +166,21 @@ app.use(PUBLIC_BASE, express.static(STORAGE_ROOT, {
   }
 }));
 
-// --- health ------------------------------------------------------------------
+// --- health & metrics (routes/observability.js) ----------------------------------
 
-/**
- * Liveness: is the process up? Deliberately does not touch the database, so a
- * database blip cannot make an orchestrator kill an otherwise healthy container.
- */
-app.get('/api/live', (_req, res) => {
-  res.json({ status: 'alive', uptime_seconds: Math.round(process.uptime()) });
+// observability
+app.use(observabilityRouter({
+  io,
+  config,
+  schemaVersion: SCHEMA_VERSION,
+  db: { health: dbHealth, getQuery, path: DB_PATH, isPostgres },
+  storage: { root: STORAGE_ROOT, backend: activeBackend }
+}));
+telemetry.registerRuntimeGauges({
+  sockets: () => io.engine.clientsCount,
+  dbStats,
+  voiceParticipants: async () => (await getQuery(`SELECT COUNT(*) AS n FROM voice_states`))?.n ?? 0
 });
-
-/**
- * Readiness: should this instance receive traffic? This one *does* check the
- * database, because an instance that cannot read it should leave the pool.
- */
-app.get('/api/ready', asyncRoute(async (req, res) => {
-  if (req.app.get('shutting-down')) {
-    res.status(503).json({ status: 'draining' });
-    return;
-  }
-  const database = await dbHealth();
-  if (!database.reachable) {
-    res.status(503).json({ status: 'not_ready', database });
-    return;
-  }
-  res.json({ status: 'ready', database, ...metricsSnapshot() });
-}));
-
-/** Constant-time bearer check: hashing first gives equal-length buffers. */
-function bearerMatches(header, secret) {
-  const digest = (v) => crypto.createHash('sha256').update(String(v ?? '')).digest();
-  return crypto.timingSafeEqual(digest(header), digest(`Bearer ${secret}`));
-}
-
-// Metrics are operational data (routes, volumes, latency, memory). In
-// production they are served only behind METRICS_TOKEN; without a token the
-// endpoint does not exist (lib/config.js warns at boot). Development keeps the
-// old convenience of an open endpoint.
-if (config.enableMetrics && (config.metricsToken || !config.isProduction)) {
-  app.get('/metrics', (req, res) => {
-    if (config.metricsToken && !bearerMatches(req.get('authorization'), config.metricsToken)) {
-      res.status(401).type('text/plain').send('unauthorized\n');
-      return;
-    }
-    res.type('text/plain; version=0.0.4')
-      .send(renderMetrics({ socketConnections: io.engine.clientsCount }));
-  });
-}
-
-app.get('/api/health', asyncRoute(async (_req, res) => {
-  // Which driver is in use and whether it answers. An unreachable database
-  // is a 503 with the reason, rather than an opaque 500 from the query below.
-  const database = await dbHealth();
-  if (!database.reachable) {
-    res.status(503).json({ status: 'error', database, code_schema_version: SCHEMA_VERSION });
-    return;
-  }
-  const { version } = await getQuery(
-    `SELECT MAX(version) AS version FROM schema_migrations`
-  );
-  res.json({
-    status: 'ok',
-    database,
-    schema_version: version,
-    // What *this process* was built against. A client that expects more than
-    // this is talking to a server that was started before the code changed —
-    // the API would 404 on newer routes with no other clue.
-    code_schema_version: SCHEMA_VERSION,
-    storage_root: STORAGE_ROOT,
-    uptime_seconds: Math.round(process.uptime()),
-    connected_sockets: io.engine.clientsCount
-  });
-}));
 
 /** Permission flag reference, so the client can build a role editor. */
 app.get('/api/meta/permissions', (_req, res) => {
@@ -301,14 +258,14 @@ app.put('/api/users/:userId/note', requireUser, writeRateLimit, asyncRoute(async
  * off the request path: the change itself already committed.
  */
 function refreshRooms(scope) {
-  revalidateRooms(io, scope).catch((err) => console.error('room revalidation failed:', err.message));
+  revalidateRooms(io, scope).catch((err) => logger.error({ err }, 'room revalidation failed'));
 }
 
 /** Channel lifecycle events go only to members who can view the channel. */
 function emitChannelEvent(channel, event, payload = channel) {
   if (!channel?.server_id) return;
   emitToChannelViewers(io, channel, event, payload)
-    .catch((err) => console.error(`${event} fan-out failed:`, err.message));
+    .catch((err) => logger.error({ err, event }, 'channel event fan-out failed'));
 }
 
 /** What everyone may learn about a user from a broadcast. */
@@ -2054,7 +2011,7 @@ app.use('/api', (_req, res) => {
 if (config.serveStatic) {
   const staticRoot = path.resolve(__dirname, config.staticDir);
   if (!fs.existsSync(staticRoot)) {
-    console.error(`❌ SERVE_STATIC is on but ${staticRoot} does not exist. Run: npm run build`);
+    logger.fatal({ staticRoot }, 'SERVE_STATIC is on but the directory does not exist. Run: npm run build');
     process.exit(1);
   }
 
@@ -2078,7 +2035,7 @@ if (config.serveStatic) {
     return res.sendFile(path.join(staticRoot, 'index.html'));
   });
 
-  console.log(`🌐 Serving SPA from ${staticRoot}`);
+  logger.info({ staticRoot }, 'serving SPA');
 }
 
 app.use(errorHandler);
@@ -2098,10 +2055,10 @@ const housekeeping = setInterval(async () => {
     const tokens = await pruneAccountTokens();
     const { archived } = await sweepStaleThreads();
     if (sessions || tokens || archived) {
-      console.log(`🧽 housekeeping: ${sessions} session(s), ${tokens} token(s), ${archived} thread(s)`);
+      logger.info({ sessions, tokens, archived }, 'housekeeping pruned expired rows');
     }
   } catch (err) {
-    console.error('housekeeping failed:', err.message);
+    logger.error({ err }, 'housekeeping failed');
   }
 }, 60 * 60 * 1000);
 housekeeping.unref?.();
@@ -2114,7 +2071,7 @@ housekeeping.unref?.();
 // AFK sweep every 30 seconds — coarse enough to be free, fine enough that a
 // one-minute timeout still feels like one minute.
 const afkSweep = setInterval(() => {
-  sweepAfk(io).catch((err) => console.error('afk sweep failed:', err.message));
+  sweepAfk(io).catch((err) => logger.error({ err }, 'afk sweep failed'));
 }, 30 * 1000);
 afkSweep.unref?.();
 
@@ -2138,15 +2095,17 @@ const eventReminders = setInterval(async () => {
     // Forget events that are now in the past so the set cannot grow forever.
     if (remindedEvents.size > 1000) remindedEvents.clear();
   } catch (err) {
-    console.error('event reminders failed:', err.message);
+    logger.error({ err }, 'event reminders failed');
   }
 }, 60 * 1000);
 eventReminders.unref?.();
 
 httpServer.listen(PORT, config.host, () => {
-  console.log(`🚀 Antigravity Discord on http://${config.host}:${PORT} (${config.nodeEnv})`);
-  console.log(`   public url → ${config.publicUrl}`);
-  console.log(`   storage    → ${STORAGE_ROOT}`);
+  logger.info({
+    url: `http://${config.host}:${PORT}`, env: config.nodeEnv, public_url: config.publicUrl,
+    storage: STORAGE_ROOT, release: telemetry.RELEASE, node: process.version,
+    tracing: telemetry.tracingActive(), error_tracking: telemetry.errorTrackingConfigured()
+  }, `Antigravity Discord listening on http://${config.host}:${PORT}`);
 });
 
 /**
@@ -2160,14 +2119,14 @@ let shuttingDown = false;
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`\n${signal} received — draining.`);
+  logger.info({ signal }, 'shutdown signal received — draining');
 
   // Fail readiness first so the load balancer stops sending new traffic while
   // in-flight requests finish.
   app.set('shutting-down', true);
 
   const forceExit = setTimeout(() => {
-    console.error('   drain timed out — exiting anyway.');
+    logger.error('drain timed out — exiting anyway');
     process.exit(1);
   }, config.shutdownTimeoutMs);
   forceExit.unref?.();
@@ -2180,11 +2139,12 @@ async function shutdown(signal, exitCode = 0) {
     await new Promise((resolve) => io.close(resolve));
     await new Promise((resolve) => httpServer.close(resolve));
     await closeDB();
+    await telemetry.shutdownTelemetry();
     clearTimeout(forceExit);
-    console.log('   drained cleanly.');
+    logger.info('drained cleanly');
     process.exit(exitCode);
   } catch (err) {
-    console.error('   shutdown error:', err.message);
+    logger.error({ err }, 'shutdown error');
     process.exit(1);
   }
 }
@@ -2194,6 +2154,5 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 globalThis.__agShutdown = shutdown;
 
-process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
 
 export { app, io, httpServer };

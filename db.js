@@ -16,6 +16,10 @@ import fs from 'fs';
 import { createSqliteDriver } from './db/sqlite.js';
 import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
+import { getLogger } from './lib/logger.js';
+import { traceDb } from './lib/telemetry.js';
+
+const log = getLogger('db');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -108,7 +112,7 @@ const MIGRATIONS = [
       } finally {
         await runQuery('PRAGMA foreign_keys = ON');
       }
-      console.log(`   renumbered ${legacy.length} legacy message id(s)`);
+      log.info({ count: legacy.length }, 'renumbered legacy message ids');
     }
   },
   {
@@ -134,7 +138,7 @@ const MIGRATIONS = [
           [hash, `${account.id}@example.dev`, account.id]
         );
       }
-      console.log(`   backfilled dev password for ${seedAccounts.length} seed account(s)`);
+      log.info({ count: seedAccounts.length }, 'backfilled dev password for seed accounts');
     }
   },
   {
@@ -431,6 +435,9 @@ const driver = isPostgres
 // In-flight operations, so closeDB() can let work that is already running
 // (a socket's disconnect handler marking its user offline, say) finish before
 // the connection goes away, instead of failing it half-way.
+// Every helper below is timed (app_db_query_duration_seconds) and, when
+// OpenTelemetry is on, traced with the statement text but never its parameters.
+const DRIVER = isPostgres ? 'postgres' : 'sqlite';
 let inflight = 0;
 let lastSettled = Date.now();
 let closed = false;
@@ -450,16 +457,16 @@ function guard() {
 }
 
 /** Execute a statement. Resolves to { changes, lastID } (plus `rows` on Postgres). */
-export const runQuery = async (text, params = []) => { guard(); return track(driver.run(text, params)); };
+export const runQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'run', text, () => driver.run(text, params))); };
 
 /** First row, or undefined. */
-export const getQuery = async (text, params = []) => { guard(); return track(driver.get(text, params)); };
+export const getQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'get', text, () => driver.get(text, params))); };
 
 /** All rows (never null). */
-export const allQuery = async (text, params = []) => { guard(); return track(driver.all(text, params)); };
+export const allQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'all', text, () => driver.all(text, params))); };
 
 /** Several statements, no parameters (schema scripts). */
-export const execScript = async (text) => { guard(); return track(driver.exec(text)); };
+export const execScript = async (text) => { guard(); return track(traceDb(DRIVER, 'exec', null, () => driver.exec(text))); };
 
 /**
  * Run `fn` inside a transaction, rolling back on any throw.
@@ -477,7 +484,7 @@ export const execScript = async (text) => { guard(); return track(driver.exec(te
  * `opts` (Postgres only): { isolation: 'read committed' | 'repeatable read' |
  * 'serializable', retries }.
  */
-export const transaction = async (fn, opts) => { guard(); return track(driver.transaction(fn, opts)); };
+export const transaction = async (fn, opts) => { guard(); return track(traceDb(DRIVER, 'transaction', null, () => driver.transaction(fn, opts))); };
 
 /** True when the caller is inside a transaction(). */
 export const inTransaction = () => driver.inTransaction();
@@ -492,6 +499,9 @@ export {
 
 /** Driver details for logs and /api/health. Never includes credentials. */
 export const dbInfo = () => driver.info();
+
+/** Live load figures for metrics: in-flight calls and (Postgres) pool usage. */
+export const dbStats = () => ({ driver: DRIVER, inflight, pool: driver.poolStats?.() ?? null });
 
 /** Round-trip the database, bounded by `timeoutMs`. Never throws. */
 export async function dbHealth({ timeoutMs = 3000 } = {}) {
@@ -531,7 +541,7 @@ async function rebuildLegacySchema() {
   const backup = `${DB_PATH}.legacy-${stamp}.bak`;
   if (fs.existsSync(DB_PATH)) {
     fs.copyFileSync(DB_PATH, backup);
-    console.warn(`⚠️  Legacy schema detected. Backed up to ${path.basename(backup)}`);
+    log.warn({ backup: path.basename(backup) }, 'legacy schema detected; database backed up');
   }
 
   const tables = await allQuery(
@@ -542,7 +552,7 @@ async function rebuildLegacySchema() {
     await runQuery(`DROP TABLE IF EXISTS "${name}"`);
   }
   await runQuery('PRAGMA foreign_keys = ON');
-  console.warn('♻️  Legacy tables dropped; rebuilding with schema v1.');
+  log.warn('legacy tables dropped; rebuilding with schema v1');
 }
 
 /**
@@ -559,7 +569,7 @@ export function shouldSeed(env = process.env) {
 }
 
 const logMigration = (migration) => {
-  if (!quiet) console.log(`📐 Applied migration v${migration.version} — ${migration.name}`);
+  if (!quiet) log.info({ version: migration.version, name: migration.name }, `applied migration v${migration.version}`);
 };
 
 async function initSqlite({ seed }) {
@@ -628,7 +638,7 @@ async function initPostgres({ seed }) {
           );
         }
       });
-      if (!quiet) console.log(`📐 Created PostgreSQL schema (baseline v${PG_BASELINE_VERSION})`);
+      if (!quiet) log.info({ baseline: PG_BASELINE_VERSION }, 'created PostgreSQL schema');
     }
 
     const appliedRows = await allQuery(`SELECT version FROM schema_migrations`);
