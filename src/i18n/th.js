@@ -756,7 +756,7 @@ export default {
   'security.disableMfa': 'ปิด',
   'security.mfaEnabled': 'เปิดยืนยันสองชั้นแล้ว',
   'security.mfaDisabled': 'ปิดยืนยันสองชั้นแล้ว',
-  'security.scanHint': 'เพิ่มรหัสลับนี้ในแอป Authenticator แล้วกรอกเลขที่แอปแสดง',
+  'security.scanHint': 'สแกนคิวอาร์โค้ดด้วยแอปยืนยันตัวตน (หรือพิมพ์คีย์ด้วยตนเอง) แล้วใส่รหัส 6 หลักที่แอปแสดง',
   'security.sixDigitCode': 'รหัส 6 หลัก',
   'security.confirm': 'ยืนยัน',
   'security.saveRecoveryCodes': 'เก็บรหัสสำรองนี้ไว้ — แสดงเพียงครั้งเดียว',
@@ -1679,4 +1679,8 @@ export default {
   'roles.moveUp': 'เลื่อน {name} ขึ้น',
   'roles.moveDown': 'เลื่อน {name} ลง',
   'roles.moved': 'ย้าย {name} ไปลำดับที่ {position} แล้ว',
+  'security.qrLabel': 'คิวอาร์โค้ดสำหรับแอปยืนยันตัวตน',
+  'security.manualKey': 'หรือใส่คีย์นี้',
+  'security.copyKey': 'คัดลอกคีย์',
+  'security.openInAuthenticator': 'เปิดในแอปยืนยันตัวตน',
 };

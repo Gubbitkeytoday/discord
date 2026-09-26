@@ -756,7 +756,7 @@ export default {
   'security.disableMfa': 'Disable',
   'security.mfaEnabled': 'Two-factor is now on.',
   'security.mfaDisabled': 'Two-factor is now off.',
-  'security.scanHint': 'Add this secret to your authenticator app, then enter the code it shows.',
+  'security.scanHint': 'Scan the QR code with your authenticator app (or enter the key by hand), then type the 6-digit code it shows.',
   'security.sixDigitCode': '6-digit code',
   'security.confirm': 'Confirm',
   'security.saveRecoveryCodes': 'Save these recovery codes — they are shown once.',
@@ -1679,4 +1679,8 @@ export default {
   'roles.moveUp': 'Move {name} up',
   'roles.moveDown': 'Move {name} down',
   'roles.moved': '{name} moved to position {position}',
+  'security.qrLabel': 'QR code for your authenticator app',
+  'security.manualKey': 'Or enter this key',
+  'security.copyKey': 'Copy key',
+  'security.openInAuthenticator': 'Open in authenticator app',
 };
