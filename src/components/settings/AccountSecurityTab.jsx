@@ -7,6 +7,8 @@ import { localeTag, t } from '../../i18n/index.jsx';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { PageHeader, Divider } from './primitives';
 import QrCode from './QrCode';
+import PasskeysSection from './PasskeysSection';
+import { passkeysAvailable } from '../../auth/passkeys';
 
 /**
  * Account and security: password, two-factor with recovery codes, e-mail
@@ -26,6 +28,13 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
   const [recoveryCodes, setRecoveryCodes] = useState(null);
   const [busy, setBusy] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Passkeys section (and its divider) only when the server has them on.
+  const [showPasskeys, setShowPasskeys] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    passkeysAvailable().then((ok) => { if (alive) setShowPasskeys(ok); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   /**
    * Fetch the export and hand it to the browser as a file. Done with fetch
@@ -416,6 +425,13 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
           )}
         </div>
       </section>
+
+      {showPasskeys && (
+        <>
+          <Divider />
+          <PasskeysSection onToast={onToast} mfaEnabled={Boolean(mfa?.enabled)} />
+        </>
+      )}
 
       <Divider />
 
