@@ -31,7 +31,7 @@ What has been verified on this commit (Node 22, Linux):
 | `npm run a11y` | static audit reports no problems (names, ARIA, alt text, contrast). This is a linter, not a screen-reader test. |
 | `npm run i18n:audit`, `jsx:check`, `parse:check` | pass |
 | Docker image / `docker compose` | **not verified** in CI or by the maintainers' last pass — build it yourself before relying on it |
-| `npm audit` | reports 13 advisories in the dependency tree (mostly the `sqlite3` native build chain); review before production |
+| `npm audit --omit=dev` | 0 advisories (sqlite3 6, sharp 0.35, patched `qs`); re-run before each release |
 
 Known limitations — read these before inviting users:
 
@@ -123,7 +123,7 @@ Verified present in the code (see ARCHITECTURE.md for how each works):
 
 ## Quickstart (development)
 
-Requirements: **Node.js 20.12 or newer** (22 recommended; the server uses
+Requirements: **Node.js 20.17 or newer** (22 recommended; the server uses
 `process.loadEnvFile`), npm 10, and a platform where the `sqlite3` prebuilt
 binary installs (Linux, macOS, Windows x64/arm64). `sharp` is optional; without
 it images are stored without resized variants.
@@ -156,7 +156,15 @@ npm test                    # integration tests; each file boots its own server 
 npm run verify              # jsx:check + parse:check + a11y + i18n:audit + build + test
 ```
 
-Tests pick a port in 3900-3989 per test file; set `TEST_PORT` to force one.
+Tests pick a port in 3900-3989 per test file; set `TEST_PORT` to force one, or
+`TEST_PORT_BASE` to move the whole range.
+
+The same suite runs against PostgreSQL; each test file creates (and drops) its
+own database on the given server:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres npm run test:pg
+```
 
 ## Configuration
 
@@ -172,7 +180,12 @@ All settings are environment variables, read from `.env` if present. See
 | `TRUST_PROXY` | `loopback` | Number of proxies in front (`1` behind Caddy/nginx) |
 | `CORS_ORIGIN` | `http://localhost:5173` | Leave empty when the app serves the SPA itself; `*` is rejected in production |
 | `SERVE_STATIC` / `STATIC_DIR` | `0` / `dist` | Set `1` in production to serve the built client |
-| `DB_PATH` | `./discord.db` | SQLite file (WAL mode) |
+| `DATABASE_URL` | unset | `postgres://user:pass@host:5432/db` selects **PostgreSQL** (13+, needs `pg_trgm`); unset = SQLite at `DB_PATH`. Schema is created/migrated on boot. See [DEPLOYMENT.md §11](DEPLOYMENT.md#11-postgresql) |
+| `DB_PATH` | `./discord.db` | SQLite file (WAL mode), used when `DATABASE_URL` is unset |
+| `DATABASE_SSL` / `PGSSLMODE`, `DATABASE_SSL_CA` | unset | Postgres TLS: `disable`, `require`, `verify-full`; CA bundle path for a private CA |
+| `DB_POOL_MAX` / `DB_POOL_IDLE_MS` / `DB_CONNECT_TIMEOUT_MS` | `10` / `30000` / `10000` | Postgres connection pool per process |
+| `DB_STATEMENT_TIMEOUT_MS` / `DB_LOCK_TIMEOUT_MS` / `DB_IDLE_IN_TX_TIMEOUT_MS` | `30000` / `10000` / `60000` | Postgres per-connection limits |
+| `DB_TX_ISOLATION` / `DB_TX_RETRIES` | `serializable` / `8` | Postgres transaction isolation and automatic retries on serialization failure/deadlock |
 | `STORAGE_ROOT` / `STORAGE_PUBLIC_BASE` | `./public/uploads` / `/uploads` | Local file storage |
 | `STORAGE_URL_SECRET` | dev value | **Required** in production: new random value, 24+ chars (`openssl rand -base64 32`) |
 | `ADMIN_TOKEN` | unset | Enables file maintenance and report triage endpoints |
@@ -186,11 +199,17 @@ All settings are environment variables, read from `.env` if present. See
 | `ENABLE_METRICS` / `METRICS_TOKEN` | `1` / unset | Prometheus at `/metrics`; set a token if it is reachable publicly |
 | `SHUTDOWN_TIMEOUT_MS` | `15000` | Drain time on SIGTERM |
 | `DOMAIN` | `localhost` | Docker Compose only: hostname Caddy gets a certificate for |
+| `POSTGRES_PASSWORD` | example value | Docker Compose only: password of the bundled PostgreSQL (URL-safe characters) |
+
+Rate limits, presence, typing indicators and Socket.IO rooms are kept in
+process memory on both database engines, so run a single app instance.
 
 ## Deployment
 
-Full guide: **[DEPLOYMENT.md](DEPLOYMENT.md)** (Docker Compose with Caddy, bare
-Node behind nginx, backups, updates, scaling, security checklist).
+Full guide: **[DEPLOYMENT.md](DEPLOYMENT.md)** (Docker Compose with PostgreSQL
+and Caddy, bare Node behind nginx, backups, updates, scaling, security
+checklist, and moving an existing SQLite database to PostgreSQL with
+`npm run db:migrate-to-pg`).
 
 Minimal bare-metal run:
 
@@ -198,15 +217,16 @@ Minimal bare-metal run:
 npm ci && npm run build
 # in .env: NODE_ENV=production, SERVE_STATIC=1, ALLOW_DEV_IDENTITY=0,
 #          STORAGE_URL_SECRET=<random>, SECURE_COOKIES=1, CORS_ORIGIN=,
-#          PUBLIC_URL=https://chat.example.com, TRUST_PROXY=1
+#          PUBLIC_URL=https://chat.example.com, TRUST_PROXY=1,
+#          DATABASE_URL=postgres://… (recommended; omit to use SQLite)
 npm start
 ```
 
 Put TLS in front (Caddy or `nginx.conf.example`) — browsers only allow
 microphone/camera on HTTPS origins. With Docker, edit `.env` the same way
 (the compose file sets `NODE_ENV=production` but reads the rest from `.env`, so
-the development defaults will make it refuse to start), set `DOMAIN`, then
-`docker compose up -d --build`.
+the development defaults will make it refuse to start), set `DOMAIN` and
+`POSTGRES_PASSWORD`, then `docker compose up -d --build`.
 
 Before inviting users: set up a TURN server (see limitations), schedule
 `npm run backup` + `npm run backup:prune`, and set `ADMIN_TOKEN`.
@@ -221,7 +241,9 @@ Before inviting users: set up a TURN server (see limitations), schedule
 | Voice connects for some users but not others | No TURN server; users behind strict NAT cannot reach each other |
 | "Voice room is full" (`VOICE_FULL`) | Mesh cap reached; raise `VOICE_MESH_LIMIT` only if everyone has the upstream bandwidth |
 | Mic/camera prompt never appears | Page is not served over HTTPS (localhost is exempt) |
-| Thai search finds nothing on an old database | FTS index predates migration v2; run `npm run search:reindex` |
+| Thai search finds nothing on an old database | SQLite: FTS index predates migration v2; run `npm run search:reindex`. Postgres: check `pg_trgm` is installed |
+| `/api/health` returns 503 | The database is unreachable; `database.error` in the response says why |
+| `permission denied to create extension "pg_trgm"` | The `DATABASE_URL` role must own the database, or run `CREATE EXTENSION pg_trgm` once as an admin |
 | Tests fail with `EADDRINUSE` | Another process holds a 39xx port; set `TEST_PORT` |
 | Blank page after an update | Rebuild the client (`npm run build`) so `dist/` matches the server |
 
@@ -233,7 +255,8 @@ and socket count; check it first.
 ```
 server.js           Express app, REST routes, static serving
 realtime.js         Socket.IO gateway: presence, typing, voice signalling
-db.js, db/          SQLite access, migrations (v1-v17), schema.sql, seed.js
+db.js, db/          database layer: SQLite + PostgreSQL drivers, dialect helpers,
+                    migrations (v1-v17), schema.sql / schema.pg.sql, seed.js
 lib/                auth, permissions, snowflake IDs, TOTP, rate limits, config, mailer, S3
 routes/             auth, files, account security
 services/           domain logic: messages, guilds, automod, threads, forum, polls, apps ...

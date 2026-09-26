@@ -527,12 +527,17 @@ export async function createMessage({
       }
     }
 
+    // Monotonic: when two sends commit out of order, the pointer still ends
+    // on the newest id (ids are same-length snowflakes, so text order is
+    // numeric order).
     await runQuery(
       `UPDATE channels
-          SET last_message_id = ?, message_count = message_count + 1,
+          SET last_message_id = CASE WHEN last_message_id IS NULL OR last_message_id < ?
+                                     THEN ? ELSE last_message_id END,
+              message_count = message_count + 1,
               updated_at = ${sql.now}
         WHERE id = ?`,
-      [messageId, channelId]
+      [messageId, messageId, channelId]
     );
 
     // Posting in a thread joins it, so you receive its later messages —
@@ -568,7 +573,11 @@ export async function createMessage({
         [userId, channelId, messageId]
       );
     }
-  });
+    // The hot path. Every statement above is an insert, an upsert or an atomic
+    // update of a counter/pointer, so READ COMMITTED is enough; SERIALIZABLE
+    // would make every concurrent send in a busy channel conflict on the
+    // channel row and retry.
+  }, { isolation: 'read committed' });
 
   // Everyone else in the channel gains an unread, and a mention if named.
   //

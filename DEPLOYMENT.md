@@ -9,17 +9,23 @@ refuses to start on most misconfigurations, but not all of them are fatal.
 ## 1. What you are deploying
 
 One Node process. It serves the REST API, the WebSocket gateway, uploaded files
-and the built React client, all on a single port. SQLite is the database, so
-there is no second service to run.
+and the built React client, all on a single port.
 
-That has one consequence worth knowing up front: **SQLite means one writer**, so
-this scales vertically, not horizontally. One container is the design. Give it
-CPU and disk rather than replicas. (See [Scaling](#8-scaling).)
+The database is either **PostgreSQL** (`DATABASE_URL=postgres://…`, the
+production default in the compose file) or an embedded **SQLite** file (no
+`DATABASE_URL`: zero setup, ideal for development and small single-host
+installs). Both run the same code and the same migrations; see
+[PostgreSQL](#11-postgresql) for setup, migrating an existing SQLite database,
+backups and tuning.
+
+Either way the process keeps rate limits, presence, typing indicators and
+Socket.IO rooms **in memory**, so run **one app instance** — scale it
+vertically. (See [Scaling](#8-scaling).)
 
 | Piece | Where it lives |
 | --- | --- |
 | Application | `server.js`, `routes/`, `services/`, `lib/` |
-| Database | one file, `DB_PATH` (default `./discord.db`) |
+| Database | PostgreSQL at `DATABASE_URL`, or one SQLite file at `DB_PATH` (default `./discord.db`) |
 | Uploaded files | `STORAGE_ROOT` (default `./public/uploads`), or S3 |
 | Client bundle | `dist/`, built by `npm run build` |
 
@@ -27,8 +33,10 @@ CPU and disk rather than replicas. (See [Scaling](#8-scaling).)
 
 ## 2. Quick start with Docker Compose
 
-The compose file runs the app plus Caddy, which obtains and renews a TLS
-certificate automatically. This is the recommended path.
+The compose file runs the app, PostgreSQL 16 and Caddy, which obtains and
+renews a TLS certificate automatically. This is the recommended path. The app
+waits for Postgres to report healthy, then creates and migrates the schema
+itself.
 
 ```bash
 cp .env.example .env
@@ -45,7 +53,12 @@ ADMIN_TOKEN=<openssl rand -base64 32>
 ALLOW_DEV_IDENTITY=0
 SECURE_COOKIES=1
 CORS_ORIGIN=
+POSTGRES_PASSWORD=<openssl rand -hex 24>   # URL-safe: it is spliced into DATABASE_URL
 ```
+
+`POSTGRES_PASSWORD` is fixed into the database volume on the very first start;
+changing it later means `ALTER ROLE antigravity PASSWORD '…'` inside Postgres
+as well. To stay on SQLite under compose, add `DATABASE_URL=` (empty) to `.env`.
 
 `CORS_ORIGIN` is deliberately empty: the client is served by the same process, so
 it is same-origin and needs no CORS at all.
@@ -239,7 +252,7 @@ translation audit.
 | --- | --- | --- |
 | `/api/live` | process is up; does **not** touch the database | liveness probe |
 | `/api/ready` | database reachable; 503 while draining | readiness probe, load-balancer check |
-| `/api/health` | detailed status | humans |
+| `/api/health` | detailed status, including `database: { driver, reachable, latency_ms, pool }`; 503 if the database is unreachable | humans, dashboards |
 | `/metrics` | Prometheus text exposition | scraping |
 
 Use `/api/live` for liveness and `/api/ready` for readiness — never the reverse.
@@ -259,8 +272,13 @@ user-reported failure can be found in the logs.
 
 ### Backups
 
-The database is one file, but do not copy it with `cp` while the server is
-running: you can capture a torn page or miss data still in the WAL.
+The same commands work on both engines: with `DATABASE_URL` set they call
+`pg_dump` / `pg_restore` and write `discord-<stamp>.dump` files (details in
+[PostgreSQL → Backups](#backups-with-pg_dump)); without it they snapshot the
+SQLite file as described here.
+
+The SQLite database is one file, but do not copy it with `cp` while the server
+is running: you can capture a torn page or miss data still in the WAL.
 
 ```bash
 npm run backup            # database snapshot + uploaded files
@@ -309,7 +327,7 @@ A nightly cron (without Docker):
 npm run storage:stats     # usage, orphans, per-user quotas
 npm run storage:gc        # delete files nothing references any more
 npm run storage:verify    # re-hash stored files and compare
-npm run search:reindex    # rebuild the full-text index
+npm run search:reindex    # SQLite: rebuild the FTS5 index. Postgres: nothing to rebuild (ANALYZE only)
 ```
 
 The server also runs hourly housekeeping on its own: expired sessions and account
@@ -325,8 +343,9 @@ docker compose up -d --build     # the image builds the client itself
 
 Rolling restarts are safe: `SIGTERM` makes `/api/ready` return 503 immediately so
 the proxy stops sending new traffic, then in-flight requests finish, WebSockets
-close, and the database is checkpointed — up to `SHUTDOWN_TIMEOUT_MS` (default
-15s), after which the process exits anyway.
+close, queries already running are allowed to finish, and the database is
+closed (SQLite WAL checkpointed / Postgres pool ended) — up to
+`SHUTDOWN_TIMEOUT_MS` (default 15s), after which the process exits anyway.
 
 Migrations are versioned and run automatically at startup. **Take a backup before
 deploying a schema change**, because they are forward-only.
@@ -356,15 +375,17 @@ Existing local files are not migrated automatically.
 ## 8. Scaling
 
 **What scales now.** One process on modest hardware handles thousands of
-concurrent WebSocket connections. SQLite in WAL mode gives concurrent readers
-with a single writer, which suits chat: reads vastly outnumber writes.
+concurrent WebSocket connections. On PostgreSQL, writes from different requests
+run concurrently (each transaction on its own pooled connection); on SQLite,
+WAL mode gives concurrent readers with a single, queued writer, which suits
+small installs because reads vastly outnumber writes.
 
 **What does not, and what to do about it.**
 
 | Limit | Why | Fix |
 | --- | --- | --- |
-| One writer | SQLite | vertical scaling; PostgreSQL if you truly outgrow it |
-| No multi-instance | Socket.IO state is in-process | a Redis adapter would be needed |
+| One writer | SQLite only | switch to PostgreSQL ([§11](#11-postgresql)) |
+| No multi-instance | Socket.IO rooms, presence, typing and **rate limits** are in-process memory — even on PostgreSQL | a Socket.IO Redis adapter plus a shared rate-limit store (not implemented); until then, one instance |
 | Voice above `VOICE_MESH_LIMIT` (8) | WebRTC full mesh: each extra peer costs every participant another upstream | an SFU (mediasoup, LiveKit) |
 | Local uploads | tied to one host's disk | switch to `S3_*` |
 
@@ -425,6 +446,178 @@ from a non-localhost address.
 restarts ICE automatically (up to three times). If it stays "Can't connect",
 that pair has no route: TURN again.
 
-**Thai search returns nothing** — the FTS index needs the trigram tokenizer.
-Migration v2 handles this; if the database predates it, run
-`npm run search:reindex`.
+**Thai search returns nothing** — on SQLite the FTS index needs the trigram
+tokenizer. Migration v2 handles this; if the database predates it, run
+`npm run search:reindex`. On PostgreSQL search reads `messages.content`
+directly; check the extension exists (`\dx pg_trgm` in psql).
+
+**PostgreSQL: `permission denied to create extension "pg_trgm"`** — the first
+boot creates the schema, including `CREATE EXTENSION pg_trgm`. The role in
+`DATABASE_URL` must own the database (pg_trgm is a trusted extension from
+PostgreSQL 13), or have an administrator run `CREATE EXTENSION pg_trgm;` in that
+database once beforehand.
+
+**PostgreSQL: `remaining connection slots are reserved` / pool timeouts** —
+`DB_POOL_MAX` × processes (app + any running scripts) exceeds the server's
+`max_connections`. Lower the pool or raise the server limit; see
+[Tuning](#tuning).
+
+**PostgreSQL: `/api/health` returns 503 with `reachable: false`** — the
+`database.error` field says why (DNS, TLS, authentication, timeout).
+
+---
+
+## 11. PostgreSQL
+
+### When to use it
+
+Use PostgreSQL for any deployment that matters: concurrent writes, online
+backups with `pg_dump`, point-in-time recovery if your host offers it, and a
+database you can inspect and tune while the app runs. SQLite remains the
+zero-config default for development and small single-host installs; both
+engines run the identical code, schema and test suite.
+
+Supported: PostgreSQL **13 or newer** (tested on 16), including managed services
+(RDS, Cloud SQL, Azure, Neon, Supabase, Crunchy). The only extension needed is
+**pg_trgm** (message search), which all of them provide.
+
+### Setting it up
+
+Compose already does all of this ([§2](#2-quick-start-with-docker-compose)).
+For your own server:
+
+```sql
+CREATE ROLE antigravity LOGIN PASSWORD 'change-me';
+CREATE DATABASE antigravity OWNER antigravity ENCODING 'UTF8' TEMPLATE template0;
+```
+
+```bash
+DATABASE_URL=postgres://antigravity:change-me@db.internal:5432/antigravity
+DATABASE_SSL=verify-full            # for anything that crosses a network you do not own
+# DATABASE_SSL_CA=/path/to/ca.pem   # private CA (RDS, Cloud SQL…)
+```
+
+Percent-encode special characters in the password inside the URL
+(`@` → `%40`, `/` → `%2F`, `:` → `%3A`).
+
+On first boot the app creates the whole schema (`db/schema.pg.sql`, schema v17)
+in one transaction and records it in `schema_migrations`. Later versions are
+applied by numbered migrations, each in its own transaction, at startup. Boot
+holds a Postgres advisory lock while it migrates, so several processes starting
+at once (a rolling deploy, a script run during a restart) apply each migration
+exactly once. The app refuses to start against a database with application
+tables but no `schema_migrations`, or with a newer schema than it knows.
+
+### Moving an existing SQLite deployment to PostgreSQL
+
+The copy tool reads the SQLite file (never writes to it), creates the schema in
+an **empty** Postgres database, copies every table in one transaction
+preserving all ids, converts timestamps and JSON, checks every table's row
+count, and commits only if everything matches. On any error nothing is written
+and it tells you the table, row and column.
+
+1. **Update the code first** and start it once on SQLite, so the SQLite file
+   is at the current schema version (the tool refuses an older file).
+2. **Create the empty Postgres database** (above) and verify you can connect:
+   `psql "$DATABASE_URL" -c 'select 1'`.
+3. **Rehearse** while the old server is still running (read-only, harmless):
+   ```bash
+   npm run db:migrate-to-pg -- --from ./discord.db --to "$DATABASE_URL" --dry-run
+   ```
+   This does the entire copy and verification, then rolls back.
+4. **Stop the app** (`docker compose stop app` / `systemctl stop antigravity`)
+   so no new writes land in SQLite, and take a SQLite backup
+   (`npm run backup`).
+5. **Copy for real:**
+   ```bash
+   npm run db:migrate-to-pg -- --from ./discord.db --to "$DATABASE_URL"
+   ```
+   Re-running against a database that now has rows is refused; `--force`
+   truncates the target and copies again. `--drop-orphans` leaves behind rows
+   that already violate a foreign key in SQLite (the tool lists them first).
+6. **Point the app at Postgres** — set `DATABASE_URL` in `.env` — and start it.
+   Check `/api/health` shows `"driver": "postgres"`, sign in, open a channel,
+   search for something.
+7. Keep the SQLite file and its backup until you are satisfied; rolling back is
+   unsetting `DATABASE_URL` (anything written to Postgres meanwhile would be
+   left behind).
+
+In Docker: copy the file out of the old volume and run the tool from the app
+image against the compose network, for example
+`docker compose run --rm -v "$PWD/discord.db:/tmp/discord.db:ro" app
+node scripts/migrate-sqlite-to-postgres.mjs --from /tmp/discord.db --to "$DATABASE_URL"`.
+
+Uploaded files do not move: they stay under `STORAGE_ROOT` (or in S3), and the
+copied `files` rows keep pointing at them.
+
+### Backups with pg_dump
+
+```bash
+npm run backup                  # pg_dump --format=custom → backups/discord-<stamp>.dump (+ files)
+npm run backup:verify backups/discord-<stamp>.dump
+npm run backup:restore backups/discord-<stamp>.dump -- --force   # app stopped
+```
+
+`pg_dump` takes a consistent snapshot without blocking the app. Restore runs
+`pg_restore --clean --single-transaction`, so a failed restore changes nothing.
+The PostgreSQL client tools must be the server's major version or newer (point
+`PG_DUMP` / `PG_RESTORE` at them if several are installed). Credentials are
+passed through `PG*` environment variables, never on the command line.
+
+In compose the dump is easiest from the database container, which always has
+matching tools:
+
+```bash
+docker compose exec -T postgres pg_dump -U antigravity -d antigravity --format=custom \
+  > backups/discord-$(date +%Y%m%d-%H%M%S).dump
+```
+
+For anything beyond a small community, also turn on continuous WAL archiving /
+point-in-time recovery (managed services do this for you; self-hosted, use
+pgBackRest or WAL-G). A nightly dump alone can lose up to a day.
+
+### Tuning
+
+- **Connections.** Each app process opens up to `DB_POOL_MAX` (default 10).
+  Keep `DB_POOL_MAX × processes + maintenance scripts` well under
+  `max_connections`. 10 is plenty for one process: queries are short, and a
+  larger pool mostly adds contention. Use PgBouncer only in **session** mode —
+  transaction pooling breaks the per-connection settings and advisory lock the
+  app relies on.
+- **Timeouts** (per connection, set by the app): `DB_STATEMENT_TIMEOUT_MS`
+  (30 s), `DB_LOCK_TIMEOUT_MS` (10 s), `DB_IDLE_IN_TX_TIMEOUT_MS` (60 s).
+  A request that hits one gets a 503 with code `TIMEOUT`/`BUSY`, never a hang.
+- **Isolation.** Transactions run at `SERIALIZABLE` (`DB_TX_ISOLATION`) and are
+  retried automatically (`DB_TX_RETRIES`, default 8, exponential backoff) on
+  serialization failures and deadlocks. The code was written for SQLite, where
+  transactions never overlap; serializable isolation keeps every
+  check-then-write inside a transaction correct without auditing each one for
+  races. Sending a message — the hot path — runs `READ COMMITTED` because it
+  only makes atomic updates. Lowering the global level is not recommended.
+- **Memory.** Start from `shared_buffers` ≈ 25% of RAM,
+  `effective_cache_size` ≈ 50–75%, `work_mem` 8–16 MB,
+  `maintenance_work_mem` 128–512 MB. The compose file sets values for a 1 GB
+  VM.
+- **Search index.** `idx_messages_content_trgm` (GIN, pg_trgm) is the largest
+  index — roughly the size of the message text again. It serves
+  `ILIKE '%term%'` for terms of three or more characters; one- and
+  two-character terms (common in Thai) scan the channel/server-filtered rows.
+  Autovacuum keeps it current; after a bulk import run `ANALYZE messages` (the
+  migration tool does this).
+- **Observe.** `log_min_duration_statement=1000` (set in compose) logs slow
+  queries; `pg_stat_statements` shows where time goes.
+
+### Behaviour notes
+
+- Ids are text snowflakes (19 digits) compared byte-wise (`COLLATE "C"`), so
+  ordering is identical to SQLite. All text columns use `"C"` collation for the
+  same reason: sort order and uniqueness match SQLite exactly (name ordering is
+  by code point, not language-aware).
+- Timestamps are `timestamptz(3)` and are returned as
+  `YYYY-MM-DDTHH:MM:SS.sssZ` — the same string SQLite stored.
+- JSON columns are `jsonb`: invalid JSON is rejected on write, and object keys
+  come back in Postgres' canonical order rather than insertion order.
+- Search is case-insensitive (`ILIKE`) and, like SQLite, folds ASCII letters
+  only; Thai and other scripts match exactly, as substrings.
+- Rate limits, presence, typing state and Socket.IO rooms stay in process
+  memory; they do not move into Postgres (see [Scaling](#8-scaling)).

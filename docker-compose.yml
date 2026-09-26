@@ -10,10 +10,18 @@
 #  users behind symmetric NAT / CGNAT / strict firewalls. Enable it with the
 #  `turn` profile — see DEPLOYMENT.md, "Voice and video: TURN".
 #
+#  The database is PostgreSQL (the `postgres` service). The app creates and
+#  migrates the schema itself on boot, and waits for Postgres to be healthy.
+#  To keep SQLite instead, set `DATABASE_URL=` (empty) in .env — the app then
+#  uses /data/discord.db and the postgres service can be removed.
+#
 #  First run:
-#    cp .env.example .env      # then edit: PUBLIC_URL, STORAGE_URL_SECRET, DOMAIN
+#    cp .env.example .env      # then edit: PUBLIC_URL, STORAGE_URL_SECRET, DOMAIN,
+#                              # POSTGRES_PASSWORD (URL-safe characters only)
 #    docker compose up -d                       # or: --profile turn up -d
 #    docker compose exec app node db/seed.js    # optional demo data
+#
+#  Moving an existing SQLite deployment over: DEPLOYMENT.md, "PostgreSQL".
 # ============================================================================
 
 x-logging: &logging
@@ -38,9 +46,16 @@ services:
       # X-Forwarded-For is trustworthy. Trusting more would let a client forge
       # its own IP and escape rate limiting.
       TRUST_PROXY: 1
+      # PostgreSQL by default. `${VAR-default}` keeps an explicitly empty
+      # DATABASE_URL= from .env, which switches the app back to SQLite.
+      DATABASE_URL: ${DATABASE_URL-postgres://antigravity:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/antigravity}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
       DB_PATH: /data/discord.db
       STORAGE_ROOT: /data/uploads
       BACKUP_DIR: /backups
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - app-data:/data
       # Separate from the data volume so deleting one cannot take the other.
@@ -51,8 +66,53 @@ services:
     # Not published to the host: only Caddy may reach it.
     networks:
       - edge
-    # server.js drains in-flight requests and checkpoints SQLite on SIGTERM.
+    # server.js drains in-flight requests and closes the database on SIGTERM.
     stop_grace_period: 30s
+    logging: *logging
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: antigravity
+      POSTGRES_DB: antigravity
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # scram-sha-256 for every connection, including the first.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --encoding=UTF8"
+    # Modest settings for a small VM; see DEPLOYMENT.md "Tuning" before
+    # raising them. max_connections must exceed DB_POOL_MAX × app instances.
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # pg_dump snapshots land next to the app's backups.
+      - app-backups:/backups
+    # Never published: only the app reaches it, over the internal network.
+    expose:
+      - "5432"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antigravity -d antigravity -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # Postgres needs time to checkpoint on shutdown.
+    stop_grace_period: 60s
+    shm_size: 256mb
     logging: *logging
 
   caddy:
@@ -121,6 +181,7 @@ services:
 volumes:
   app-data:
   app-backups:
+  pg-data:
   caddy-data:
   caddy-config:
 
