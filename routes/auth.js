@@ -10,7 +10,7 @@ import express from 'express';
 
 import { runQuery, getQuery, allQuery, transaction, sql, isUniqueViolation } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
-import { ApiError, asyncRoute } from '../lib/httpUtils.js';
+import { ApiError, asyncRoute, unauthenticated } from '../lib/httpUtils.js';
 import {
   hashPassword, verifyPassword, createSession, revokeSession, revokeSessionById,
   revokeAllSessions, extractToken, sessionCookie, clearedCookie, SESSION_TTL_MS
@@ -19,6 +19,12 @@ import { loginRateLimit, rateLimit } from '../lib/rateLimit.js';
 import { config } from '../lib/config.js';
 import { sendMail } from '../lib/mailer.js';
 import { verifyMfaChallenge } from '../services/accountSecurity.js';
+import { checkBirthdate, ageGroupOf, applyMinorDefaults } from '../services/userSettings.js';
+import {
+  isAdminRow, claimFirstAdmin, getRegistrationMode
+} from '../services/instanceAdmin.js';
+import { getInvitePreview } from '../services/guilds.js';
+import adminRouter from './admin.js';
 
 const router = express.Router();
 
@@ -45,12 +51,77 @@ const PUBLIC_USER = `
 // without Secure in production unless the value was exactly '1'.
 const secureCookies = config.secureCookies;
 
-// Account creation is unauthenticated and cheap to script; keyed by IP.
+// Account creation is unauthenticated and cheap to script; keyed by IP. A
+// sign-up that carries a valid invite draws on its own, larger budget: a
+// class or a club joining from one school Wi-Fi (one NAT address) is the
+// normal case there, not an attack, and the invite's own max-uses still caps
+// it.
 const registerRateLimit = rateLimit({
   name: 'register',
-  limit: Math.max(1, Number(process.env.RATE_LIMIT_REGISTER_PER_HOUR) || 10),
+  limit: Math.max(1, Number(process.env.RATE_LIMIT_REGISTER_PER_HOUR) || 20),
   windowMs: 60 * 60_000, byIpOnly: true
 });
+const inviteRegisterRateLimit = rateLimit({
+  name: 'register-invite',
+  limit: Math.max(1, Number(process.env.RATE_LIMIT_REGISTER_INVITE_PER_HOUR) || 100),
+  windowMs: 60 * 60_000, byIpOnly: true
+});
+
+/** The invite a sign-up carries, when it is real and still usable; else null. */
+async function validInvite(code) {
+  const value = typeof code === 'string' ? code.trim() : '';
+  if (!value || value.length > 64) return null;
+  try { return await getInvitePreview(value); } catch { return null; }
+}
+
+/**
+ * Pick the bucket, and turn a bare "too many requests" into something a person
+ * can act on: how long to wait, and that it is the network, not them.
+ */
+const registerLimit = asyncRoute(async (req, res, next) => {
+  req.registrationInvite = await validInvite(req.body?.invite_code);
+  const limiter = req.registrationInvite ? inviteRegisterRateLimit : registerRateLimit;
+  limiter(req, res, (err) => {
+    if (err?.code === 'RATE_LIMITED') {
+      const seconds = Number(err.details?.retry_after_seconds) || 60;
+      const minutes = Math.max(1, Math.ceil(seconds / 60));
+      return next(new ApiError(
+        `Lots of people are signing up from this network. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+        { status: 429, code: 'REGISTER_RATE_LIMITED', details: { retry_after_seconds: seconds, minutes } }
+      ));
+    }
+    return next(err);
+  });
+});
+
+// REQUIRE_BIRTHDATE=1 makes the date of birth mandatory at sign-up (the UI
+// always asks; by default an account without one is asked once afterwards).
+const birthdateRequired = () => ['1', 'true', 'yes', 'on'].includes(String(process.env.REQUIRE_BIRTHDATE ?? '').toLowerCase());
+
+/** Is this still an empty instance (the first account bootstraps it)? */
+async function isFirstAccount() {
+  const row = await getQuery(
+    `SELECT 1 FROM users WHERE deleted_at IS NULL AND is_bot = 0 AND is_system = 0
+        AND password_hash IS NOT NULL LIMIT 1`
+  );
+  return !row;
+}
+
+/**
+ * Account flags every client needs right after sign-in: whether to show the
+ * admin console, and the age group (never the birth date itself).
+ */
+async function accountFlags(userId) {
+  const row = await getQuery(
+    `SELECT instance_admin, email, email_verified, deleted_at, disabled_at, birth_year, birth_month
+       FROM users WHERE id = ?`, [userId]
+  );
+  return {
+    is_instance_admin: isAdminRow(row),
+    birthdate_set: row?.birth_year != null,
+    age_group: ageGroupOf(row)
+  };
+}
 
 const usernameTaken = () => new ApiError('That username is taken', { status: 409, code: 'USERNAME_TAKEN' });
 
@@ -70,7 +141,20 @@ async function allocateDiscriminator(username) {
 // must not get the global read budget (600/min) of current-password guesses.
 const passwordChangeRateLimit = rateLimit({ name: 'password-change', limit: 10, windowMs: 15 * 60_000 });
 
-router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => {
+/** Public: what the sign-up form should offer. */
+router.get('/auth/registration', asyncRoute(async (_req, res) => {
+  const { mode } = await getRegistrationMode();
+  const first = await isFirstAccount();
+  res.json({
+    mode: first ? 'open' : mode,
+    invite_required: !first && mode === 'invite',
+    first_account: first,
+    minimum_age: 13,
+    birthdate_required: birthdateRequired()
+  });
+}));
+
+router.post('/auth/register', registerLimit, asyncRoute(async (req, res) => {
   const username = String(req.body?.username ?? '').trim();
   const displayName = String(req.body?.display_name ?? username).trim().slice(0, 80);
   const requestedEmail = req.body?.email ? String(req.body.email).trim().toLowerCase() : null;
@@ -83,6 +167,28 @@ router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => 
   if (requestedEmail && !isValidEmail(requestedEmail)) {
     throw new ApiError('That e-mail address is not valid', { code: 'INVALID_EMAIL' });
   }
+
+  // Who may sign up at all (REGISTRATION_MODE, or the admin's override). The
+  // very first account is always allowed: it is the one that runs the place.
+  if (!(await isFirstAccount())) {
+    const { mode } = await getRegistrationMode();
+    if (mode === 'closed') {
+      throw new ApiError('Sign-ups are closed on this server', { status: 403, code: 'REGISTRATION_CLOSED' });
+    }
+    if (mode === 'invite' && !req.registrationInvite) {
+      throw new ApiError('Sign-ups on this server need an invite link', { status: 403, code: 'INVITE_REQUIRED' });
+    }
+  }
+
+  // Age gate (13+). The day is checked here and then thrown away: only the
+  // year and month are stored.
+  const birth = req.body?.birth_date ?? (req.body?.birth_year != null
+    ? { year: req.body.birth_year, month: req.body.birth_month, day: req.body.birth_day }
+    : null);
+  if (!birth && birthdateRequired()) {
+    throw new ApiError('Enter your date of birth', { code: 'BIRTHDATE_REQUIRED' });
+  }
+  const checkedBirth = birth ? checkBirthdate(birth) : null;
   // Usernames are public (they are shown everywhere), so saying one is taken
   // discloses nothing. Usernames are unique: login by username is unambiguous.
   if (await getQuery(`SELECT 1 FROM users WHERE username = ? AND deleted_at IS NULL`, [username])) {
@@ -106,15 +212,24 @@ router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => 
   try {
     await transaction(async () => {
       await runQuery(
-        `INSERT INTO users (id, username, discriminator, display_name, email, password_hash, status)
-         VALUES (?, ?, ?, ?, ?, ?, 'online')`,
-        [id, username, discriminator, displayName || username, email, passwordHash]
+        `INSERT INTO users (id, username, discriminator, display_name, email, password_hash, status,
+                            birth_year, birth_month)
+         VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?)`,
+        [id, username, discriminator, displayName || username, email, passwordHash,
+         checkedBirth?.year ?? null, checkedBirth?.month ?? null]
       );
     });
   } catch (err) {
     // Lost a race for the same username (the unique index decides).
     if (isUniqueViolation(err)) throw usernameTaken();
     throw err;
+  }
+
+  // The first account on an empty instance administers it.
+  await claimFirstAdmin(id);
+  // Teen accounts start with the protective privacy defaults stored.
+  if (checkedBirth && ageGroupOf({ birth_year: checkedBirth.year, birth_month: checkedBirth.month }) === 'minor') {
+    await applyMinorDefaults(id);
   }
 
   if (emailOwner) {
@@ -135,7 +250,9 @@ router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => 
   const user = await getQuery(`SELECT ${PUBLIC_USER} FROM users WHERE id = ?`, [id]);
   // Echo what was asked for, identically in both cases; whether the address is
   // attached shows up only after it is verified (/api/auth/me, email_verified).
-  res.status(201).json({ user: { ...user, email: requestedEmail }, token, expires_at: expiresAt });
+  res.status(201).json({
+    user: { ...user, email: requestedEmail, ...(await accountFlags(id)) }, token, expires_at: expiresAt
+  });
 }));
 
 router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
@@ -153,6 +270,11 @@ router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
   const ok = await verifyPassword(password, user?.password_hash ?? 'scrypt$16384$8$1$AA$AA');
   if (!user || !ok) {
     throw new ApiError('Incorrect username or password', { status: 401, code: 'INVALID_CREDENTIALS' });
+  }
+  // Said only after the password proved who is asking.
+  if (user.disabled_at) {
+    throw new ApiError('This account has been disabled by the administrators of this server',
+      { status: 403, code: 'ACCOUNT_DISABLED' });
   }
 
   // Second factor. Without this, enabling 2FA protected nothing: a password
@@ -174,7 +296,7 @@ router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
   res.setHeader('Set-Cookie', sessionCookie(token, { secure: secureCookies }));
 
   const publicUser = await getQuery(`SELECT ${PUBLIC_USER} FROM users WHERE id = ?`, [user.id]);
-  res.json({ user: publicUser, token, expires_at: expiresAt });
+  res.json({ user: { ...publicUser, ...(await accountFlags(user.id)) }, token, expires_at: expiresAt });
 }));
 
 router.post('/auth/logout', asyncRoute(async (req, res) => {
@@ -185,18 +307,22 @@ router.post('/auth/logout', asyncRoute(async (req, res) => {
 }));
 
 router.post('/auth/logout-all', asyncRoute(async (req, res) => {
-  if (!req.userId) throw ApiError.unauthorized();
+  if (!req.userId) throw unauthenticated(req);
   await revokeAllSessions(req.userId, { exceptToken: extractToken(req) });
   res.json({ success: true });
 }));
 
 router.get('/auth/me', asyncRoute(async (req, res) => {
-  if (!req.userId) throw ApiError.unauthorized();
+  if (!req.userId) throw unauthenticated(req);
   const user = await getQuery(
     `SELECT ${PUBLIC_USER} FROM users WHERE id = ? AND deleted_at IS NULL`, [req.userId]
   );
-  if (!user) throw ApiError.unauthorized();
-  res.json({ user, session_id: req.sessionId ?? null, dev_identity: !req.sessionId });
+  if (!user) throw unauthenticated(req);
+  res.json({
+    user: { ...user, ...(await accountFlags(req.userId)) },
+    session_id: req.sessionId ?? null,
+    dev_identity: !req.sessionId
+  });
 }));
 
 /**
@@ -217,7 +343,7 @@ router.get('/auth/dev-accounts', asyncRoute(async (_req, res) => {
 }));
 
 router.get('/auth/sessions', asyncRoute(async (req, res) => {
-  if (!req.userId) throw ApiError.unauthorized();
+  if (!req.userId) throw unauthenticated(req);
   const sessions = await allQuery(
     `SELECT id, device_name, platform, ip_address, user_agent, created_at, last_seen_at, expires_at
        FROM sessions
@@ -229,14 +355,14 @@ router.get('/auth/sessions', asyncRoute(async (req, res) => {
 }));
 
 router.delete('/auth/sessions/:sessionId', asyncRoute(async (req, res) => {
-  if (!req.userId) throw ApiError.unauthorized();
+  if (!req.userId) throw unauthenticated(req);
   // Revoking a device also drops its live socket connections.
   await revokeSessionById(req.userId, req.params.sessionId);
   res.json({ success: true });
 }));
 
 router.post('/auth/change-password', passwordChangeRateLimit, asyncRoute(async (req, res) => {
-  if (!req.userId) throw ApiError.unauthorized();
+  if (!req.userId) throw unauthenticated(req);
   const user = await getQuery(`SELECT password_hash FROM users WHERE id = ?`, [req.userId]);
 
   // A user created before auth existed has no password yet; allow setting one.
@@ -251,6 +377,10 @@ router.post('/auth/change-password', passwordChangeRateLimit, asyncRoute(async (
   await revokeAllSessions(req.userId, { exceptToken: extractToken(req) });
   res.json({ success: true });
 }));
+
+// The instance admin console (/api/admin/*), mounted here so it needs no
+// wiring in server.js. Every route in it checks instance-admin rights itself.
+router.use(adminRouter);
 
 export default router;
 export { SESSION_TTL_MS };
