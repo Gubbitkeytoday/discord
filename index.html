@@ -6,8 +6,8 @@
     <!-- PWA: manifest, theme colour per OS scheme (src/pwa keeps it in sync
          with the in-app theme), iOS home-screen icon/title. -->
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#1e1f22" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#f2f3f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#121214" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#e3e4e8" media="(prefers-color-scheme: light)" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -28,12 +28,12 @@
          stylesheet and the bundle arrive (22 s on Slow 3G), so it is inline
          and needs no JavaScript. React replaces #root's content on mount. -->
     <style>
-      html { background: #1e1f22; color: #dbdee1; }
+      html { background: #121214; color: #dcdcdf; }
       /* Until the bundle applies the saved theme (data-theme), follow the OS —
          also after index.css has loaded, whose token default is dark. */
       @media (prefers-color-scheme: light) {
-        html { background: #f2f3f5; color: #2e3338; }
-        html:not([data-theme]) body { background: #f2f3f5 !important; color: #2e3338 !important; }
+        html { background: #e3e4e8; color: #2e3035; }
+        html:not([data-theme]) body { background: #e3e4e8 !important; color: #2e3035 !important; }
       }
       html, body { margin: 0; height: 100%; overscroll-behavior-x: none; }
       #root { height: 100%; }

@@ -123,15 +123,58 @@ export function readableColor(colour, background, minRatio = 4.5) {
   return result;
 }
 
-/** The current theme's message background, read from the design tokens. */
-export function themeBackground(token = '--color-d-canvas') {
-  if (typeof document === 'undefined') return '#313338';
+let canvasCtx = null;
+
+/**
+ * Any CSS colour the browser understands (a token, color-mix(), oklch()) as
+ * '#rrggbb'. Tokens can be color-mix/oklch expressions (tinted themes, the
+ * saturation multiplier), which getComputedStyle hands back unresolved or in
+ * a non-sRGB space, so the colour is painted on a 1×1 canvas and read back.
+ */
+export function resolveCssColor(value, fallback = '#1c1c20') {
+  const direct = parseHex(value);
+  if (direct) return toHex(direct);
+  if (typeof document === 'undefined') return fallback;
   try {
-    const value = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
-    return value || '#313338';
+    const probe = document.createElement('span');
+    probe.style.color = value;
+    probe.style.display = 'none';
+    document.documentElement.appendChild(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    const rgb = /^rgba?\(/.test(computed) ? parseColor(computed) : null;
+    if (rgb) return toHex(rgb);
+    canvasCtx ??= Object.assign(document.createElement('canvas'), { width: 1, height: 1 })
+      .getContext('2d', { willReadFrequently: true });
+    if (!canvasCtx) return fallback;
+    canvasCtx.clearRect(0, 0, 1, 1);
+    canvasCtx.fillStyle = '#000';
+    canvasCtx.fillStyle = computed;
+    canvasCtx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = canvasCtx.getImageData(0, 0, 1, 1).data;
+    return toHex([r, g, b]);
   } catch {
-    return '#313338';
+    return fallback;
   }
+}
+
+const backgroundCache = new Map();
+
+/**
+ * The current theme's message background, read from the design tokens.
+ * Cached per theme/contrast/tint state, so calling it for every message
+ * author costs one Map lookup, not a style recalculation.
+ */
+export function themeBackground(token = '--color-bg-chat') {
+  if (typeof document === 'undefined') return '#1c1c20';
+  const { theme = '', contrast = '', tint = '' } = document.documentElement.dataset;
+  const tintColor = tint ? getComputedStyle(document.documentElement).getPropertyValue('--tint-color') : '';
+  const key = `${token}|${theme}|${contrast}|${tint}|${tintColor}`;
+  if (!backgroundCache.has(key)) {
+    if (backgroundCache.size > 64) backgroundCache.clear();
+    backgroundCache.set(key, resolveCssColor(`var(${token})`));
+  }
+  return backgroundCache.get(key);
 }
 
 /**

@@ -8,13 +8,20 @@ import {
   PageHeader, Section, SettingToggle, RadioList, Slider, ResetButton, Divider, Segmented
 } from './primitives';
 
+// Swatches show each theme's chat background (docs/research/DISCORD-THEMES.md §3.2).
 const THEMES = () => [
-  { key: 'light',  label: t('appearance.light'),  icon: Sun,     swatch: '#ffffff', ink: '#313338' },
-  { key: 'ash',    label: t('appearance.ash'),    icon: Circle,  swatch: '#3b3d42', ink: '#ffffff' },
-  { key: 'dark',   label: t('appearance.dark'),   icon: Moon,    swatch: '#313338', ink: '#ffffff' },
-  { key: 'onyx',   label: t('appearance.onyx'),   icon: Circle,  swatch: '#111214', ink: '#ffffff' },
+  { key: 'light',  label: t('appearance.light'),  icon: Sun,     swatch: '#fbfbfc', ink: '#2e3035' },
+  { key: 'ash',    label: t('appearance.ash'),    icon: Circle,  swatch: '#35363c', ink: '#ffffff' },
+  { key: 'dark',   label: t('appearance.dark'),   icon: Moon,    swatch: '#1c1c20', ink: '#ffffff' },
+  { key: 'onyx',   label: t('appearance.onyx'),   icon: Circle,  swatch: '#000000', ink: '#ffffff' },
   { key: 'system', label: t('appearance.system'), icon: Monitor,
-    swatch: 'linear-gradient(135deg,#ffffff 0 50%,#313338 50% 100%)', ink: '#ffffff' }
+    swatch: 'linear-gradient(135deg,#fbfbfc 0 50%,#1c1c20 50% 100%)', ink: '#ffffff' }
+];
+
+const SYSTEM_DARK = () => [
+  { key: 'ash',  label: t('appearance.ash') },
+  { key: 'dark', label: t('appearance.dark') },
+  { key: 'onyx', label: t('appearance.onyx') }
 ];
 
 const DENSITIES = () => [
@@ -74,6 +81,18 @@ export default function AppearanceTab() {
             );
           })}
         </div>
+        {appearance.theme === 'system' && (
+          <div className="mt-4">
+            <p id="system-dark-label" className="mb-2 text-sm font-medium text-d-strong">{t('appearance.systemDarkTheme')}</p>
+            <p className="mb-2 text-sm text-d-text2">{t('appearance.systemDarkThemeHint')}</p>
+            <Segmented
+              label={t('appearance.systemDarkTheme')}
+              value={appearance.systemDarkTheme ?? 'dark'}
+              onChange={(value) => set({ systemDarkTheme: value })}
+              options={SYSTEM_DARK()}
+            />
+          </div>
+        )}
       </Section>
 
       <Divider />

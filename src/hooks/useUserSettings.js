@@ -22,6 +22,10 @@ const SAVE_DEBOUNCE_MS = 400;
 export const PREFERENCE_DEFAULTS = {
   appearance: {
     theme: 'dark',
+    // "Sync with computer" follows the OS light/dark switch; these say WHICH
+    // light and which dark theme it switches between (Discord: Ash/Dark/Onyx).
+    systemDarkTheme: 'dark',
+    systemLightTheme: 'light',
     uiDensity: 'default',
     messageDisplay: 'cozy',
     zoom: 100,
@@ -334,6 +338,19 @@ export function applyCategoryFromServer(category, value) {
 // --- applying to the document ------------------------------------------------
 
 let mediaQuery = null;
+
+const THEMES = ['light', 'ash', 'dark', 'onyx'];
+const DARK_THEMES = ['ash', 'dark', 'onyx'];
+
+/** The concrete theme to paint: "system" becomes the chosen light or dark one. */
+export function resolveTheme(appearance = current.appearance) {
+  const theme = appearance?.theme ?? 'dark';
+  if (theme !== 'system') return THEMES.includes(theme) ? theme : 'dark';
+  let light = false;
+  try { light = Boolean(window.matchMedia?.('(prefers-color-scheme: light)').matches); } catch { /* no matchMedia */ }
+  if (light) return THEMES.includes(appearance.systemLightTheme) ? appearance.systemLightTheme : 'light';
+  return DARK_THEMES.includes(appearance.systemDarkTheme) ? appearance.systemDarkTheme : 'dark';
+}
 let motionQuery = null;
 let resizeBound = false;
 
@@ -361,9 +378,7 @@ export function applyPreferences(prefs = current) {
   const root = document.documentElement;
   const { appearance, accessibility, streamerMode, chat } = prefs;
 
-  const resolvedTheme = appearance.theme === 'system'
-    ? (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
-    : appearance.theme;
+  const resolvedTheme = resolveTheme(appearance);
 
   // Suspend transitions across a theme swap: a full-page colour cross-fade
   // looks broken, and Chromium does not reliably repaint transitioned colours
@@ -393,8 +408,9 @@ export function applyPreferences(prefs = current) {
 
   root.style.setProperty('--app-zoom', String((appearance.zoom ?? 100) / 100));
   const saturation = (accessibility.saturation ?? 100) / 100;
-  root.style.setProperty('--app-saturation', String(saturation));
-  root.style.setProperty('--app-saturation-inverse', String(1 / Math.max(0.1, saturation)));
+  // Accent tokens multiply their OKLCH chroma by --sat (index.css); images
+  // and avatars are untouched, unlike the old whole-page CSS filter.
+  root.style.setProperty('--sat', String(Math.min(1, Math.max(0, saturation))));
   applyEffectiveWidth(root, appearance.zoom);
   if (!resizeBound && typeof window !== 'undefined') {
     resizeBound = true;

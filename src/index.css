@@ -1,17 +1,204 @@
 @import "tailwindcss";
 
 /* ============================================================================
-   Theme tokens
+   Design tokens
    ---------------------------------------------------------------------------
-   The neutral palette is declared through Tailwind's @theme so it generates
-   real utilities (bg-d-surface, text-d-text3, border-d-edge/40 …). That matters
-   because a Tailwind arbitrary colour value is baked into the stylesheet and
-   can never respond to a theme switch, while a token resolves through a CSS
-   variable that [data-theme="light"] can override.
+   Three layers (docs/research/DISCORD-THEMES.md §3):
 
-   Brand and status colours are deliberately identical in both themes — that is
-   what Discord does, and it keeps the accent recognisable.
+   1. RAW values, `--base-*`, set per theme on :root[data-theme=…] (and
+      :root[data-contrast="high"]). Dark is the default. The palette is the
+      contrast-checked one from the research doc: every text token reaches
+      4.5:1 on every surface of its theme (text-faint excepted on
+      bg-selected in Light/Ash — never pair those).
+   2. SEMANTIC tokens in @theme, `--color-bg-*`, `--color-text-*`,
+      `--color-border-*`, `--color-focus-ring`, `--color-fill-*`. These are
+      what Tailwind turns into utilities (bg-bg-chat, text-text-muted …) and
+      what new code should use. By default each one is simply its raw value.
+   3. LEGACY aliases, `--color-d-*`, so the ~2 000 existing `bg-d-surface`,
+      `text-d-text3` … classes keep working unchanged. They point at layer 2.
+
+   Hooks for later rounds:
+   - Tinted / gradient themes: set `data-tint` on <html> plus `--tint-color`
+     and `--tint-amount` (and `--tint-text-*`). Every surface is then
+     `color-mix(in oklab, tint, raw)`, Discord's own approach, without
+     touching a component. Leave raised/floating opaque for menus.
+   - Accessibility › Saturation multiplies the chroma of every accent (brand,
+     status, link, danger …) through `--sat` (OKLCH). Unlike a CSS filter it
+     leaves avatars, images and video alone, and it does not turn :root into
+     a containing block for position:fixed.
+   Accents keep their hue across themes, as Discord's do; their TEXT forms are
+   separate tokens because a fill that works behind white text is unreadable
+   as text on a dark surface (Tailwind v4 resolves `text-*` through
+   `--text-color-*` first, which re-points text-d-danger & co. below).
    ========================================================================= */
+
+/* ---- 1. raw values per theme ------------------------------------------- */
+:root {
+  --sat: 1;
+  --tint-color: #000;
+  --tint-amount: 0%;
+  --tint-text-color: #000;
+  --tint-text-amount: 0%;
+  --base-bg-app: #121214;
+  --base-bg-sidebar: #18181b;
+  --base-bg-chat: #1c1c20;
+  --base-bg-surface: #232328;
+  --base-bg-raised: #28282e;
+  --base-bg-input: #26262b;
+  --base-bg-hover: #222226;
+  --base-bg-selected: #2c2c32;
+  --base-bg-floating: #0c0c0e;
+  --base-bg-panel: #151517;
+  --base-bg-rowhover: #1f1f23;
+  --base-bg-deep: #0e0e10;
+  --base-bg-deepest: #070708;
+  --base-text-strong: #ffffff;
+  --base-text-default: #dcdcdf;
+  --base-text-subtle: #bfc0c5;
+  --base-text-muted: #a3a4ab;
+  --base-text-faint: #97989f;
+  --base-border-subtle: #3a3a41;
+  --base-border-strong: #6e6f78;
+  --base-control: #4a4b53;
+  --base-control2: #35363d;
+  --base-invert: #f2f3f5;
+  --base-mention: #c9cdfb;
+  --base-text-link: oklch(74.36% calc(0.1195 * var(--sat)) 254.52) /* #76aff6 */;
+  --base-text-brand: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+  --base-text-danger: oklch(73.51% calc(0.1621 * var(--sat)) 24.48) /* #ff7b75 */;
+  --base-text-positive: oklch(74.14% calc(0.1400 * var(--sat)) 151.29) /* #5fc47d */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+}
+:root[data-theme="light"] {
+  --base-bg-app: #e3e4e8;
+  --base-bg-sidebar: #f0f1f4;
+  --base-bg-chat: #fbfbfc;
+  --base-bg-surface: #ffffff;
+  --base-bg-raised: #ffffff;
+  --base-bg-input: #e8e9ec;
+  --base-bg-hover: #e6e7ea;
+  --base-bg-selected: #d9dade;
+  --base-bg-floating: #ffffff;
+  --base-bg-panel: #e9eaee;
+  --base-bg-rowhover: #f3f3f5;
+  --base-bg-deep: #d7d9dd;
+  --base-bg-deepest: #c9ccd1;
+  --base-text-strong: #060607;
+  --base-text-default: #2e3035;
+  --base-text-subtle: #44464e;
+  --base-text-muted: #5b5d66;
+  --base-text-faint: #62646d;
+  --base-border-subtle: #c9cbd1;
+  --base-border-strong: #7d7f88;
+  --base-control: #b5bac1;
+  --base-control2: #c4c9ce;
+  --base-invert: #313338;
+  --base-mention: #3c45a5;
+  --base-text-link: oklch(48.82% calc(0.1318 * var(--sat)) 248.13) /* #0063a6 */;
+  --base-text-brand: oklch(49.53% calc(0.1860 * var(--sat)) 273.19) /* #4450c9 */;
+  --base-text-danger: oklch(50.13% calc(0.1783 * var(--sat)) 28.70) /* #b3261e */;
+  --base-text-positive: oklch(46.12% calc(0.1073 * var(--sat)) 152.91) /* #18693a */;
+  --base-text-warning: oklch(48.86% calc(0.1040 * var(--sat)) 73.09) /* #835500 */;
+  --base-text-mint: oklch(48.04% calc(0.0915 * var(--sat)) 170.28) /* #0c6e56 */;
+  --base-focus-ring: oklch(49.53% calc(0.1860 * var(--sat)) 273.19) /* #4450c9 */;
+  color-scheme: light;
+}
+:root[data-theme="ash"] {
+  --base-bg-app: #2a2b30;
+  --base-bg-sidebar: #303137;
+  --base-bg-chat: #35363c;
+  --base-bg-surface: #3b3c43;
+  --base-bg-raised: #3f4048;
+  --base-bg-input: #40414a;
+  --base-bg-hover: #3a3b41;
+  --base-bg-selected: #44454d;
+  --base-bg-floating: #222327;
+  --base-bg-panel: #2d2e33;
+  --base-bg-rowhover: #38393f;
+  --base-bg-deep: #25262b;
+  --base-bg-deepest: #1f2024;
+  --base-text-strong: #ffffff;
+  --base-text-default: #e0e0e3;
+  --base-text-subtle: #c9cacf;
+  --base-text-muted: #b1b2b8;
+  --base-text-faint: #aeafb5;
+  --base-border-subtle: #56575f;
+  --base-border-strong: #8a8b93;
+  --base-control: #5c5e66;
+  --base-control2: #4a4c53;
+  --base-invert: #f2f3f5;
+  --base-mention: #d3d6fc;
+  --base-text-link: oklch(78.61% calc(0.0994 * var(--sat)) 253.55) /* #8cbdf8 */;
+  --base-text-brand: oklch(78.00% calc(0.1123 * var(--sat)) 276.22) /* #a4b1ff */;
+  --base-text-danger: oklch(79.47% calc(0.1180 * var(--sat)) 23.20) /* #ff9d98 */;
+  --base-text-positive: oklch(77.79% calc(0.1338 * var(--sat)) 151.64) /* #6fcf8b */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(78.00% calc(0.1123 * var(--sat)) 276.22) /* #a4b1ff */;
+}
+:root[data-theme="onyx"] {
+  --base-bg-app: #000000;
+  --base-bg-sidebar: #08080a;
+  --base-bg-chat: #000000;
+  --base-bg-surface: #131316;
+  --base-bg-raised: #18181c;
+  --base-bg-input: #141417;
+  --base-bg-hover: #111114;
+  --base-bg-selected: #1d1d22;
+  --base-bg-floating: #18181c;
+  --base-bg-panel: #050506;
+  --base-bg-rowhover: #0b0b0d;
+  --base-bg-deep: #000000;
+  --base-bg-deepest: #000000;
+  --base-text-strong: #ffffff;
+  --base-text-default: #d6d6da;
+  --base-text-subtle: #b9bac0;
+  --base-text-muted: #9c9da4;
+  --base-text-faint: #8a8b93;
+  --base-border-subtle: #2c2c31;
+  --base-border-strong: #65666e;
+  --base-control: #3b3e45;
+  --base-control2: #26282e;
+  --base-invert: #f2f3f5;
+  --base-mention: #c9cdfb;
+  --base-text-link: oklch(74.36% calc(0.1195 * var(--sat)) 254.52) /* #76aff6 */;
+  --base-text-brand: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+  --base-text-danger: oklch(73.51% calc(0.1621 * var(--sat)) 24.48) /* #ff7b75 */;
+  --base-text-positive: oklch(74.14% calc(0.1400 * var(--sat)) 151.29) /* #5fc47d */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+}
+:root[data-contrast="high"] {
+  --base-text-default: #ffffff;
+  --base-text-subtle: #f2f3f5;
+  --base-text-muted: #dbdee1;
+  --base-text-faint: #c4c7cc;
+  --base-border-subtle: #ffffff;
+  --base-border-strong: #ffffff;
+  --base-text-link: oklch(83.99% calc(0.0838 * var(--sat)) 247.80) /* #9fd0ff */;
+  --base-text-danger: oklch(83.18% calc(0.0932 * var(--sat)) 21.67) /* #ffb0ad */;
+  --base-text-positive: oklch(85.31% calc(0.1218 * var(--sat)) 152.56) /* #8ee6a8 */;
+  --base-text-brand: oklch(86.04% calc(0.0639 * var(--sat)) 281.06) /* #c9cdfb */;
+  --base-focus-ring: oklch(100.00% calc(0.0000 * var(--sat)) 89.88) /* #ffffff */;
+}
+:root[data-contrast="high"][data-theme="light"] {
+  --base-text-default: #000000;
+  --base-text-subtle: #16181b;
+  --base-text-muted: #2e3035;
+  --base-text-faint: #44464e;
+  --base-border-subtle: #000000;
+  --base-border-strong: #000000;
+  --base-text-link: oklch(39.82% calc(0.1051 * var(--sat)) 247.15) /* #004a7c */;
+  --base-text-danger: oklch(41.91% calc(0.1566 * var(--sat)) 26.16) /* #8f1418 */;
+  --base-text-positive: oklch(41.22% calc(0.1013 * var(--sat)) 152.23) /* #0d5a2e */;
+  --base-text-brand: oklch(38.35% calc(0.1554 * var(--sat)) 272.89) /* #2c3494 */;
+  --base-focus-ring: oklch(0.00% calc(0.0000 * var(--sat)) 0.00) /* #000000 */;
+}
+
+/* ---- 2 + 3. semantic tokens and legacy aliases -------------------------- */
 @theme {
   /* Typography. Tailwind's `font-sans` (on the app root) resolves through this
      token, so it is the one place the UI typeface is chosen. Inter first for
@@ -26,69 +213,111 @@
   --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
     'Noto Sans Mono', monospace;
 
-  /* surfaces */
-  --color-d-base:      #1e1f22;
-  --color-d-base2:     #1a1b1e;
-  --color-d-base3:     #090a0c;
-  --color-d-sunken:    #111214;
-  --color-d-panel:     #232428;
-  --color-d-surface:   #2b2d31;
-  --color-d-canvas:    #313338;
-  --color-d-input:     #383a40;
-  --color-d-active:    #404249;
-  --color-d-hover:     #35373c;
-  --color-d-hover2:    #35363c;
-  --color-d-rowhover:  #2e3035;
-  --color-d-divider:   #3f4147;
-  --color-d-edge:      #1f2023;
-  --color-d-control:   #4e5058;
-  --color-d-control2:  #3b3e45;
-  --color-d-invert:    #f2f3f5;
+  /* semantic: surfaces (app frame < sidebar < chat < surface < raised) */
+  --color-bg-app: var(--base-bg-app);
+  --color-bg-sidebar: var(--base-bg-sidebar);
+  --color-bg-chat: var(--base-bg-chat);
+  --color-bg-surface: var(--base-bg-surface);
+  --color-bg-raised: var(--base-bg-raised);
+  --color-bg-input: var(--base-bg-input);
+  --color-bg-hover: var(--base-bg-hover);
+  --color-bg-selected: var(--base-bg-selected);
+  --color-bg-floating: var(--base-bg-floating);
+  --color-bg-panel: var(--base-bg-panel);
+  --color-bg-rowhover: var(--base-bg-rowhover);
+  --color-bg-deep: var(--base-bg-deep);
+  --color-bg-deepest: var(--base-bg-deepest);
+  --color-text-strong: var(--base-text-strong);
+  --color-text-default: var(--base-text-default);
+  --color-text-subtle: var(--base-text-subtle);
+  --color-text-muted: var(--base-text-muted);
+  --color-text-faint: var(--base-text-faint);
+  --color-border-subtle: var(--base-border-subtle);
+  --color-border-strong: var(--base-border-strong);
+  --color-control: var(--base-control);
+  --color-control2: var(--base-control2);
+  --color-invert: var(--base-invert);
+  --color-mention: var(--base-mention);
+  --color-text-link: var(--base-text-link);
+  --color-text-brand: var(--base-text-brand);
+  --color-text-danger: var(--base-text-danger);
+  --color-text-positive: var(--base-text-positive);
+  --color-text-warning: var(--base-text-warning);
+  --color-text-mint: var(--base-text-mint);
+  --color-focus-ring: var(--base-focus-ring);
 
-  /* text — every step reaches 4.5:1 on the surfaces it is used on
-     (text4 was #80848e: 3.68:1 on surface, 3.38:1 on canvas). */
-  --color-d-text:      #dbdee1;
-  --color-d-text2:     #b5bac1;
-  --color-d-text3:     #a4a9b1;
-  --color-d-text4:     #9ba1a9;
-  --color-d-mention:   #c9cdfb;
-  --color-d-strong:    #ffffff;
+  /* semantic: accent fills (follow Saturation through --sat) */
+  --color-fill-brand: oklch(57.74% calc(0.2091 * var(--sat)) 273.85) /* #5865f2 */;
+  --color-fill-brandhover: oklch(49.67% calc(0.1760 * var(--sat)) 273.91) /* #4752c4 */;
+  --color-fill-brandactive: oklch(44.04% calc(0.1530 * var(--sat)) 274.22) /* #3c45a5 */;
+  --color-fill-online: oklch(63.70% calc(0.1551 * var(--sat)) 152.26) /* #23a55a */;
+  --color-fill-idle: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --color-fill-danger: oklch(63.73% calc(0.2150 * var(--sat)) 24.73) /* #f23f43 */;
+  --color-fill-dangerhover: oklch(58.84% calc(0.1993 * var(--sat)) 24.39) /* #da373c */;
+  --color-fill-success: oklch(53.20% calc(0.1238 * var(--sat)) 151.57) /* #248046 */;
+  --color-fill-successhover: oklch(44.31% calc(0.1039 * var(--sat)) 151.13) /* #1a6334 */;
+  --color-fill-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --color-fill-streaming: oklch(42.68% calc(0.1490 * var(--sat)) 296.51) /* #593695 */;
+  --color-on-brand: #ffffff;
 
-  /* brand + status fills (theme-invariant, like Discord's) */
-  --color-d-brand:       #5865f2;
-  --color-d-brandhover:  #4752c4;
-  --color-d-brandactive: #3c45a5;
-  --color-d-online:      #23a55a;
-  --color-d-idle:        #f0b232;
-  --color-d-danger:      #f23f43;
-  --color-d-link:        #00a8fc;
-  --color-d-success:     #248046;
-  --color-d-successhover:#1a6334;
-  --color-d-dangerhover: #da373c;
-  --color-d-mint:        #4fddab;
-  --color-d-streaming:   #593695;
+  /* legacy aliases: surfaces */
+  --color-d-base:      var(--color-bg-app);
+  --color-d-base2:     var(--color-bg-deep);
+  --color-d-base3:     var(--color-bg-deepest);
+  --color-d-sunken:    var(--color-bg-floating);
+  --color-d-panel:     var(--color-bg-panel);
+  --color-d-surface:   var(--color-bg-sidebar);
+  --color-d-canvas:    var(--color-bg-chat);
+  --color-d-input:     var(--color-bg-input);
+  --color-d-active:    var(--color-bg-selected);
+  --color-d-hover:     var(--color-bg-hover);
+  --color-d-hover2:    var(--color-bg-hover);
+  --color-d-rowhover:  var(--color-bg-rowhover);
+  --color-d-divider:   var(--color-border-subtle);
+  --color-d-edge:      var(--color-bg-app);
+  --color-d-control:   var(--color-control);
+  --color-d-control2:  var(--color-control2);
+  --color-d-invert:    var(--color-invert);
 
-  /* Accent colours used AS TEXT. A fill colour that looks right behind white
-     text is too dark to be text on a dark surface (#f23f43 is 3.35:1 on the
-     canvas, #5865f2 2.74:1) and far too light on white (#f0b232 is 1.89:1).
-     Tailwind v4 resolves `text-*` through `--text-color-*` before `--color-*`,
-     so these re-point `text-d-danger`, `text-d-online`, … everywhere without
-     touching a component, while `bg-d-danger` keeps the true brand fill. */
-  --color-d-dangertext:  #ff7a7d;
-  --color-d-onlinetext:  #2dc770;
-  --color-d-brandtext:   #949cf7;
-  --color-d-idletext:    #f0b232;
-  --color-d-minttext:    #4fddab;
-  --text-color-d-danger: var(--color-d-dangertext);
-  --text-color-d-online: var(--color-d-onlinetext);
-  --text-color-d-brand:  var(--color-d-brandtext);
-  --text-color-d-idle:   var(--color-d-idletext);
-  --text-color-d-mint:   var(--color-d-minttext);
-  --text-color-d-success: var(--color-d-onlinetext);
+  /* legacy aliases: text */
+  --color-d-text:      var(--color-text-default);
+  --color-d-text2:     var(--color-text-subtle);
+  --color-d-text3:     var(--color-text-muted);
+  --color-d-text4:     var(--color-text-faint);
+  --color-d-mention:   var(--color-mention);
+  --color-d-strong:    var(--color-text-strong);
+  --color-d-link:      var(--color-text-link);
+
+  /* legacy aliases: accent fills */
+  --color-d-brand:       var(--color-fill-brand);
+  --color-d-brandhover:  var(--color-fill-brandhover);
+  --color-d-brandactive: var(--color-fill-brandactive);
+  --color-d-online:      var(--color-fill-online);
+  --color-d-idle:        var(--color-fill-idle);
+  --color-d-danger:      var(--color-fill-danger);
+  --color-d-dangerhover: var(--color-fill-dangerhover);
+  --color-d-success:     var(--color-fill-success);
+  --color-d-successhover:var(--color-fill-successhover);
+  --color-d-mint:        var(--color-fill-mint);
+  --color-d-streaming:   var(--color-fill-streaming);
+
+  /* Accent colours used AS TEXT, and the legacy utilities re-pointed at them
+     (`text-d-danger` = readable danger text, `bg-d-danger` = the true fill). */
+  --color-d-dangertext:  var(--color-text-danger);
+  --color-d-onlinetext:  var(--color-text-positive);
+  --color-d-brandtext:   var(--color-text-brand);
+  --color-d-idletext:    var(--color-text-warning);
+  --color-d-minttext:    var(--color-text-mint);
+  --text-color-d-danger: var(--color-text-danger);
+  --text-color-d-online: var(--color-text-positive);
+  --text-color-d-success: var(--color-text-positive);
+  --text-color-d-brand:  var(--color-text-brand);
+  --text-color-d-idle:   var(--color-text-warning);
+  --text-color-d-mint:   var(--color-text-mint);
 
   /* Keyboard focus indicator: ≥3:1 against every surface (2.4.11/1.4.11).
-     Brand blurple itself is only 2.74:1 on the dark canvas. */
-  --color-d-focus:       #949cf7;
+     Brand blurple itself is only 2.6–2.7:1 on the dark surfaces. */
+  --color-d-focus:       var(--color-focus-ring);
 
   /* Shape and depth scale, shared by the ui/ primitives. */
   --radius-d-sm: 4px;
@@ -98,120 +327,44 @@
   --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.36), 0 0 0 1px rgb(0 0 0 / 0.12);
 }
 
-/* Light theme: surfaces invert, text darkens, accents stay put. */
 :root[data-theme="light"] {
-  --color-d-base:      #e3e5e8;
-  --color-d-base2:     #d7d9dd;
-  --color-d-base3:     #c9ccd1;
-  --color-d-sunken:    #f2f3f5;
-  --color-d-panel:     #ebedef;
-  --color-d-surface:   #f2f3f5;
-  --color-d-canvas:    #ffffff;
-  --color-d-input:     #ebedef;
-  --color-d-active:    #d4d7dc;
-  --color-d-hover:     #e0e1e5;
-  --color-d-hover2:    #e0e1e5;
-  --color-d-rowhover:  #f5f6f7;
-  --color-d-divider:   #d3d5d8;
-  --color-d-edge:      #e0e1e5;
-  --color-d-control:   #b5bac1;
-  --color-d-control2:  #c4c9ce;
-  --color-d-invert:    #313338;
-
-  --color-d-text:      #2e3338;
-  --color-d-text2:     #4e5058;
-  --color-d-text3:     #54565e;
-  --color-d-text4:     #5f626b;
-  --color-d-mention:   #3c45a5;
-  --color-d-strong:    #060607;
-  /* #00a8fc reaches only 2.62:1 on white; darken it for the light theme. */
-  --color-d-link:      #0068a8;
-
-  --color-d-dangertext: #b8232a;
-  --color-d-onlinetext: #17733f;
-  --color-d-brandtext:  #3f49b8;
-  --color-d-idletext:   #835500;
-  --color-d-minttext:   #0c6e56;
-  --color-d-focus:      #3f49b8;
   --shadow-d-pop: 0 8px 16px rgb(0 0 0 / 0.12), 0 0 0 1px rgb(0 0 0 / 0.06);
   --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.08);
 }
 
-/* Ash: a mid-grey theme that sits between Dark and Light. */
-:root[data-theme="ash"] {
-  --color-d-base:      #2b2d31;
-  --color-d-base2:     #26282c;
-  --color-d-base3:     #1e1f22;
-  --color-d-sunken:    #232529;
-  --color-d-panel:     #313338;
-  --color-d-surface:   #35373c;
-  --color-d-canvas:    #3b3d42;
-  --color-d-input:     #43454b;
-  --color-d-active:    #4a4c53;
-  --color-d-hover:     #41434a;
-  --color-d-hover2:    #41434a;
-  --color-d-rowhover:  #3f4147;
-  --color-d-divider:   #4a4c53;
-  --color-d-edge:      #2b2d31;
-  --color-d-control:   #5c5e66;
-  --color-d-control2:  #494c53;
-
-  /* Lighter surfaces need lighter muted text to stay at 4.5:1. */
-  --color-d-text3:     #b3b8bf;
-  --color-d-text4:     #aab0b7;
-  --color-d-dangertext: #ff9294;
-  --color-d-onlinetext: #3dd67f;
-  --color-d-brandtext:  #a5acf9;
-  --color-d-focus:      #a5acf9;
+/* Tinted themes (gradient / custom themes build on this): pull every surface,
+   border and text token toward a theme colour by a small amount. Off unless
+   <html data-tint> is set, so the common case resolves to plain hex values. */
+:root[data-tint] {
+  --color-bg-app: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-app));
+  --color-bg-sidebar: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-sidebar));
+  --color-bg-chat: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-chat));
+  --color-bg-surface: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-surface));
+  --color-bg-raised: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-raised));
+  --color-bg-input: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-input));
+  --color-bg-hover: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-hover));
+  --color-bg-selected: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-selected));
+  --color-bg-floating: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-floating));
+  --color-bg-panel: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-panel));
+  --color-bg-rowhover: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-rowhover));
+  --color-bg-deep: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-deep));
+  --color-bg-deepest: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-deepest));
+  --color-text-strong: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-strong));
+  --color-text-default: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-default));
+  --color-text-subtle: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-subtle));
+  --color-text-muted: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-muted));
+  --color-text-faint: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-faint));
+  --color-border-subtle: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-border-subtle));
+  --color-border-strong: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-border-strong));
+  --color-control: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-control));
+  --color-control2: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-control2));
 }
 
-/* Onyx: darker than Dark, near-black surfaces. */
-:root[data-theme="onyx"] {
-  --color-d-base:      #000000;
-  --color-d-base2:     #050506;
-  --color-d-base3:     #000000;
-  --color-d-sunken:    #060607;
-  --color-d-panel:     #101114;
-  --color-d-surface:   #131417;
-  --color-d-canvas:    #181A1E;
-  --color-d-input:     #202227;
-  --color-d-active:    #26282e;
-  --color-d-hover:     #1f2126;
-  --color-d-hover2:    #1f2126;
-  --color-d-rowhover:  #1b1d21;
-  --color-d-divider:   #26282e;
-  --color-d-edge:      #0a0b0d;
-  --color-d-control:   #3b3e45;
-  --color-d-control2:  #26282e;
-}
-
-/* High contrast: stronger separation on top of whichever theme is active. */
+/* High contrast: brand fills darken so white labels reach 6.5:1. */
 :root[data-contrast="high"] {
-  --color-d-text:    #ffffff;
-  --color-d-text2:   #f2f3f5;
-  --color-d-text3:   #dbdee1;
-  --color-d-text4:   #b5bac1;
-  --color-d-divider: #ffffff;
-  --color-d-edge:    #ffffff;
-  --color-d-link:    #7ec8ff;
-  --color-d-dangertext: #ffa3a5;
-  --color-d-onlinetext: #5ee79a;
-  --color-d-brandtext:  #c9cdfb;
-  --color-d-focus:      #ffffff;
+  --color-fill-brand: oklch(49.53% calc(0.1860 * var(--sat)) 273.19);
 }
-:root[data-contrast="high"][data-theme="light"] {
-  --color-d-text:    #000000;
-  --color-d-text2:   #16181b;
-  --color-d-text3:   #2e3338;
-  --color-d-text4:   #4e5058;
-  --color-d-divider: #000000;
-  --color-d-edge:    #000000;
-  --color-d-link:    #004a7c;
-  --color-d-dangertext: #8f1418;
-  --color-d-onlinetext: #0d5a2e;
-  --color-d-brandtext:  #2c3494;
-  --color-d-focus:      #000000;
-}
+
 :root[data-contrast="high"] :focus-visible {
   outline-width: 3px;
 }
@@ -241,23 +394,14 @@
   html { font-size: calc(16px * var(--app-zoom, 1)); }
 
   /*
-   * Saturation is applied to the ROOT element, never to `body` or `#root`.
-   *
-   * This is not a style preference — it is load-bearing. Per CSS Filter
-   * Effects, any `filter` other than `none` makes the element a containing
-   * block for its `position: fixed` descendants, *unless that element is the
-   * document root*. Putting the filter on `body` therefore turned every fixed
-   * overlay in the app into an absolutely-positioned one: the login screen was
-   * clipped off the top of the window, and modals, toasts and the settings
-   * surface all anchored to the page instead of the viewport.
-   *
-   * The `:not([data-saturation="100"])` guard means the default setting emits
-   * no filter at all, so the common case carries neither the bug's blast
-   * radius nor its compositing cost.
+   * Saturation is NOT a filter. It used to be `filter: saturate()` on :root,
+   * which greyed out avatars, images and video along with the UI, and a filter
+   * on any element but the root turns it into a containing block for every
+   * position:fixed overlay (modals, toasts, the login screen). Now
+   * useUserSettings sets `--sat` (0…1) and every accent token multiplies its
+   * OKLCH chroma by it — see the token section at the top of this file.
+   * Never put a `filter` on body or #root (scripts/a11y-audit.mjs checks).
    */
-  :root[data-saturation]:not([data-saturation="100"]) {
-    filter: saturate(var(--app-saturation, 1));
-  }
 
   :root[data-reduced-motion="true"] *,
   :root[data-reduced-motion="true"] *::before,
@@ -516,13 +660,13 @@
   text-underline-offset: 2px;
 }
 
-/* Accessibility › "Apply saturation to custom colours" off: role colours,
-   role dots and anything marked [data-custom-color] are counter-saturated so
-   they keep their real hue while the rest of the app is desaturated. The
-   saturate() matrices compose multiplicatively, so s × 1/s is identity (the
-   factor is clamped at 0.1 to avoid dividing by zero). */
-:root[data-saturate-custom="false"]:not([data-saturation="100"]) :is(.role-colored, .role-dot, [data-custom-color]) {
-  filter: saturate(var(--app-saturation-inverse, 1));
+/* Accessibility › Saturation for colours the tokens cannot reach: role
+   colours, role dots and anything marked [data-custom-color] carry an inline
+   colour chosen by a server owner. With "Apply saturation to custom colours"
+   on (the default) they are desaturated with a filter on the small element
+   itself, never on an ancestor; with it off they keep their real hue. */
+:root[data-saturate-custom="true"]:not([data-saturation="100"]) :is(.role-colored, .role-dot, [data-custom-color]) {
+  filter: saturate(var(--sat, 1));
 }
 
 /* Accessibility › "Larger click targets": every control is at least 44×44
