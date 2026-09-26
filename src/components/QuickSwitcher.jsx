@@ -3,6 +3,7 @@ import { Hash, Volume2, AtSign, Server } from 'lucide-react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, serverIconOf } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -110,7 +111,7 @@ export default function QuickSwitcher({
               }`}
             >
               {entry.avatar ? (
-                <img src={entry.avatar || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+                <img src={proxiedImageUrl(entry.avatar || FALLBACK_AVATAR)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
               ) : (
                 <entry.icon className="w-5 h-5 text-d-text4 shrink-0" />
               )}

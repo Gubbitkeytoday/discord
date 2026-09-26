@@ -67,6 +67,17 @@ function isNarrowViewport(query) {
   try { return typeof window !== 'undefined' && Boolean(window.matchMedia?.(query).matches); } catch { return false; }
 }
 const LAST_SERVER_KEY = 'antigravity.lastServer';
+// Why the last session ended, carried across the reload that sign-out does so
+// the login screen can say it (an i18n key).
+const SIGN_OUT_NOTICE_KEY = 'antigravity.signOutNotice';
+
+function takeSignOutNotice() {
+  try {
+    const key = sessionStorage.getItem(SIGN_OUT_NOTICE_KEY);
+    sessionStorage.removeItem(SIGN_OUT_NOTICE_KEY);
+    return key || null;
+  } catch { return null; }
+}
 
 // Bumped with every db.js migration. The client compares it to the running
 // server's own number (GET /api/health) so a stale backend is loud, not silent.
@@ -137,6 +148,9 @@ export default function App() {
 
   // Voice
   const [currentVoiceChannel, setCurrentVoiceChannel] = useState(null);
+  // For socket handlers registered once: which voice room we are in right now.
+  const currentVoiceChannelRef = useRef(null);
+  useEffect(() => { currentVoiceChannelRef.current = currentVoiceChannel; }, [currentVoiceChannel]);
   const [activeVoiceParticipants, setActiveVoiceParticipants] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
@@ -201,6 +215,7 @@ export default function App() {
   const [inviteFor, setInviteFor] = useState(null);
   const [showShortcuts, setShowShortcuts] = useState(false);   // { server, channelId } for the invite dialog
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  const [signOutNotice] = useState(takeSignOutNotice);
   const { prefs } = useUserSettings();
   // A preference that failed to save has already been rolled back; say so.
   useEffect(() => onPreferenceSaveError(({ error }) => {
@@ -906,6 +921,25 @@ export default function App() {
       // The session is gone server-side; the only honest answer is the login screen.
       handleSignOut();
     };
+    // This session was ended elsewhere (sign-out from another device, password
+    // change, account deletion). Say so, then take the normal sign-out path;
+    // the note survives the reload and is repeated on the login screen.
+    const onSessionRevoked = () => {
+      pushToast(t('session.revoked'), { type: 'error', ttl: 6000 });
+      try { sessionStorage.setItem(SIGN_OUT_NOTICE_KEY, 'session.revoked'); } catch { /* private mode */ }
+      handleSignOut();
+    };
+    // The server removed us from a voice room (moved out, kicked, lost
+    // permission). Drop the voice UI state for that channel only.
+    const onVoiceDisconnected = ({ channelId } = {}) => {
+      const current = currentVoiceChannelRef.current;
+      if (!current || (channelId && current.id !== channelId)) return;
+      currentVoiceChannelRef.current = null;
+      setCurrentVoiceChannel(null);
+      setActiveVoiceParticipants([]);
+      setScreenSharing(false);
+      pushToast(t('voice.disconnectedByServer'), { type: 'info', ttl: 5000 });
+    };
 
     const handlers = {
       new_message: onNewMessage,
@@ -957,7 +991,9 @@ export default function App() {
       channel_permissions_synced: refreshServer,
       action_error: onActionError,
       message_error: onActionError,
-      identify_error: onIdentifyError
+      identify_error: onIdentifyError,
+      session_revoked: onSessionRevoked,
+      voice_disconnected: onVoiceDisconnected
     };
     for (const [event, fn] of Object.entries(handlers)) socket.on(event, fn);
     return () => { for (const [event, fn] of Object.entries(handlers)) socket.off(event, fn); };
@@ -1375,6 +1411,11 @@ export default function App() {
   // --- direct messages -------------------------------------------------------
 
   const openDmWith = async (recipientId) => {
+    // Leave the current channel at once: while the DM is being opened the old
+    // composer must not stay on screen, or text typed "into the DM" in that
+    // moment is sent to the channel you just left.
+    setActiveServerId('home');
+    setActiveChannelId(null);
     const channel = await post('/api/dms', { recipientId });
     setDmChannels((prev) => (prev.some((d) => d.id === channel.id) ? prev : [channel, ...prev]));
     setActiveServerId('home');
@@ -2059,7 +2100,14 @@ export default function App() {
   }
 
   if (authState === false) {
-    return <LoginScreen onAuthenticated={handleAuthenticated} devAccounts={devAccounts} inviteCode={inviteCode} />;
+    return (
+      <LoginScreen
+        onAuthenticated={handleAuthenticated}
+        devAccounts={devAccounts}
+        inviteCode={inviteCode}
+        initialNotice={signOutNotice ? t(signOutNotice) : null}
+      />
+    );
   }
 
   if (inviteCode) {

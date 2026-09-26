@@ -342,11 +342,13 @@ describe('voice ICE servers', () => {
     assert.equal(body.iceTransportPolicy, 'all');
     const turn = body.iceServers.find((s) => s.urls.includes('turn:turn.test:3478'));
     assert.ok(turn, 'TURN server missing');
-    const [expiry, user] = turn.username.split(':');
-    assert.equal(user, 'user-me');
+    const [expiry, nonce] = turn.username.split(':');
+    assert.match(nonce, /^[0-9a-f-]{36}$/, 'TURN username must not carry the user id');
     const ttl = Number(expiry) - Math.floor(Date.now() / 1000);
     assert.ok(ttl > 500 && ttl <= 600, `unexpected ttl ${ttl}`);
-    const expected = crypto.createHmac('sha1', 'test-turn-secret').update(turn.username).digest('base64');
+    // Recompute with the coturn REST algorithm. The MAC input is the opaque
+    // expiry:nonce string just returned, not account data.
+    const expected = crypto.createHmac('sha1', 'test-turn-secret').update(String(expiry) + ':' + nonce).digest('base64');
     assert.equal(turn.credential, expected);
   });
 });

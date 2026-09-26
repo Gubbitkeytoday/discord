@@ -3,6 +3,7 @@ import { Loader2, Search, X } from 'lucide-react';
 import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const MAX_RECIPIENTS = 9; // Discord caps a group DM at 10 people including you
@@ -99,7 +100,7 @@ export default function CreateGroupDmModal({ friends = [], existing = null, onCr
                 selected.includes(friend.id) ? 'bg-d-active' : 'hover:bg-d-hover/60'
               }`}
             >
-              <img src={friend.avatar_url || defaultAvatar(friend.id)} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+              <img src={proxiedImageUrl(friend.avatar_url || defaultAvatar(friend.id))} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm text-d-strong truncate">{friend.display_name || friend.username}</span>
                 <span className="block text-[11px] text-d-text3 truncate">@{friend.username}</span>

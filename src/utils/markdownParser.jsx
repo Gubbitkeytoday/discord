@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from './media';
 
 /**
  * Discord-flavoured markdown renderer.
@@ -149,7 +150,7 @@ function renderToken(token, key, context) {
     return (
       <img
         key={key}
-        src={url}
+        src={proxiedImageUrl(url)}
         alt={`:${name}:`}
         title={`:${name}:`}
         className={`inline-block w-[1.375em] h-[1.375em] align-[-0.3em] mx-[1px] ${animated ? '' : ''}`}

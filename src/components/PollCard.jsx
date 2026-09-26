@@ -19,6 +19,7 @@ import React, { useEffect, useState } from 'react';
 import { BarChart3, Check, Clock, Users, Lock } from 'lucide-react';
 import { api } from '../api';
 import { t, localeTag } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 /** "2 days left" / "4 hours left" / "12 minutes left". */
 function formatRemaining(expiresAt) {
@@ -174,7 +175,7 @@ export default function PollCard({ poll: incoming, currentUserId, canManage = fa
                   )}
                   {voters.list.map((voter) => (
                     <li key={voter.id} className="flex items-center gap-1.5 text-[11px] text-d-text2">
-                      <img src={voter.avatar_url} alt="" className="h-4 w-4 rounded-full object-cover" />
+                      <img src={proxiedImageUrl(voter.avatar_url)} alt="" className="h-4 w-4 rounded-full object-cover" />
                       {voter.display_name || voter.username}
                     </li>
                   ))}
