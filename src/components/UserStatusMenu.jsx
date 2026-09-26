@@ -40,7 +40,7 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
           <option.icon className={`w-4 h-4 mt-0.5 shrink-0 ${option.tint}`} />
           <span className="min-w-0">
             <span className="block truncate">{option.label}</span>
-            {option.hint && <span className="block text-[10px] opacity-70">{option.hint}</span>}
+            {Boolean(option.hint) && <span className="block text-[10px] opacity-70">{option.hint}</span>}
           </span>
         </button>
       ))}

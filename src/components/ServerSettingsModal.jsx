@@ -453,7 +453,7 @@ function OverviewTab({
             onChange={(v) => setForm({ ...form, afk_channel_id: v })}
           />
         </Field>
-        {form.afk_channel_id && (
+        {Boolean(form.afk_channel_id) && (
           <Field label={t('settings.afkTimeout')}>
             <select
               value={form.afk_timeout}
@@ -820,7 +820,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
         {/* Editor */}
         {draft && (
           <div className="flex-1 min-w-0">
-            {draft.is_everyone && (
+            {Boolean(draft.is_everyone) && (
               <p className="text-xs text-d-text3 bg-d-surface rounded p-2.5 mb-4">
                 {t('roles.everyoneNote')}
               </p>
@@ -1098,7 +1098,7 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
                   {member.nickname || member.display_name}
                   {server.owner_id === member.id && <Crown className="w-3.5 h-3.5 text-d-idle" title={t('members.ownerTitle')} />}
                   {Boolean(member.is_bot) && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
-                  {member.timeout_until && member.timeout_until > new Date().toISOString() && (
+                  {Boolean(member.timeout_until) && member.timeout_until > new Date().toISOString() && (
                     <span className="bg-d-idle/20 text-d-idle text-[9px] font-bold px-1 rounded flex items-center gap-0.5">
                       <Clock className="w-2.5 h-2.5" />
                       {t('members.timedOutUntil', { time: new Date(member.timeout_until).toLocaleString(localeTag()) })}
@@ -1754,12 +1754,12 @@ function ReportsTab({ reports, reload, onToast }) {
             <p className="text-[11px] text-d-text3">
               {t('reports.by', { name: report.reporter_name ?? report.reporter_id })} · {report.target_type}
             </p>
-            {report.target?.content && (
+            {Boolean(report.target?.content) && (
               <p className="text-xs text-d-text bg-d-base rounded p-2 whitespace-pre-wrap break-words">
                 {report.target.author ? `${report.target.author}: ` : ''}{report.target.content}
               </p>
             )}
-            {report.details && <p className="text-[11px] text-d-text2">{report.details}</p>}
+            {Boolean(report.details) && <p className="text-[11px] text-d-text2">{report.details}</p>}
             <div className="flex gap-3">
               <button
                 onClick={() => resolve(report, 'resolved')}

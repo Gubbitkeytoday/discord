@@ -354,8 +354,8 @@ export default function ChannelSidebar({
                                 className={`w-5 h-5 rounded-full ${p.isSpeaking ? 'ring-2 ring-d-online' : ''}`}
                               />
                               <span className="truncate flex-1">{p.username}</span>
-                              {p.isMuted && <MicOff className="w-3 h-3 text-d-danger" />}
-                              {p.isDeafened && <Headphones className="w-3 h-3 text-d-danger" />}
+                              {Boolean(p.isMuted) && <MicOff className="w-3 h-3 text-d-danger" />}
+                              {Boolean(p.isDeafened) && <Headphones className="w-3 h-3 text-d-danger" />}
                             </div>
                           ))}
                         </div>

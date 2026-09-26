@@ -113,14 +113,14 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
             <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
               item.checked ? 'bg-d-brand border-d-brand text-white' : 'border-d-text4'
             }`}>
-              {item.checked && <Check className="w-3 h-3" />}
+              {Boolean(item.checked) && <Check className="w-3 h-3" />}
             </span>
           )}
-          {item.hint && <span className="text-[10px] opacity-70 shrink-0">{item.hint}</span>}
-          {item.submenu && <ChevronRight className="w-4 h-4 shrink-0" />}
+          {Boolean(item.hint) && <span className="text-[10px] opacity-70 shrink-0">{item.hint}</span>}
+          {Boolean(item.submenu) && <ChevronRight className="w-4 h-4 shrink-0" />}
         </button>
 
-        {item.submenu && isOpen && (
+        {Boolean(item.submenu) && isOpen && (
           <Submenu width={width} emptyLabel={item.emptyLabel} empty={item.submenu.length === 0}>
             {renderItems(item.submenu, depth + 1)}
           </Submenu>

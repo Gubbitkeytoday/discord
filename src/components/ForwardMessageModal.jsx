@@ -82,7 +82,7 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
               <option.icon className="w-4 h-4 text-d-text4 shrink-0" />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm text-d-strong truncate">{option.label}</span>
-                {option.sub && <span className="block text-[11px] text-d-text3 truncate">{option.sub}</span>}
+                {Boolean(option.sub) && <span className="block text-[11px] text-d-text3 truncate">{option.sub}</span>}
               </span>
               <span className={`w-4 h-4 rounded border shrink-0 ${selected.includes(option.id) ? 'bg-d-brand border-d-brand' : 'border-d-text4'}`} />
             </button>

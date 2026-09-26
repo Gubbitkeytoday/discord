@@ -716,7 +716,7 @@ export default function ChatArea({
               {t('chat.archived')}
             </span>
           )}
-          {channel.topic && (
+          {Boolean(channel.topic) && (
             <>
               <div className="w-[1px] h-4 bg-d-divider mx-2 hidden sm:block" />
               <span className="text-xs text-d-text3 truncate hidden sm:block" title={channel.topic}>{channel.topic}</span>
@@ -948,7 +948,7 @@ export default function ChatArea({
 
           return (
             <React.Fragment key={msg.id}>
-              {msg.dateDivider && (
+              {Boolean(msg.dateDivider) && (
                 <div className="flex items-center gap-2 my-4" role="separator">
                   <div className="flex-1 h-[1px] bg-d-divider" />
                   <span className="text-[11px] font-semibold text-d-text3 px-1">
@@ -958,7 +958,7 @@ export default function ChatArea({
                 </div>
               )}
 
-              {msg.isFirstUnread && (
+              {Boolean(msg.isFirstUnread) && (
                 <div className="flex items-center gap-2 my-2">
                   <div className="flex-1 h-[1px] bg-d-danger" />
                   <span className="text-[10px] font-bold text-d-danger bg-d-danger/10 px-2 py-0.5 rounded">
@@ -1028,7 +1028,7 @@ export default function ChatArea({
                 )}
 
                 <div className="flex-1 min-w-0">
-                  {msg.reply_to_id && (
+                  {Boolean(msg.reply_to_id) && (
                     <div className="flex items-center gap-1.5 text-xs text-d-text3 mb-1">
                       <Reply className="w-3.5 h-3.5 shrink-0 rotate-180 text-d-text4" />
                       {msg.replyToMsg ? (
@@ -1069,25 +1069,25 @@ export default function ChatArea({
                         )}
                         {msg.display_name || msg.username}
                       </span>
-                      {msg.is_bot && (
+                      {Boolean(msg.is_bot) && (
                         <span className="bg-d-brand text-white text-[10px] font-bold px-1.5 rounded">BOT</span>
                       )}
-                      {msg.ephemeral && (
+                      {Boolean(msg.ephemeral) && (
                         <span className="text-[9px] uppercase tracking-wide bg-d-surface text-d-text3 px-1 rounded shrink-0" title={t('bot.ephemeralHint')}>
                           {t('bot.ephemeral')}
                         </span>
                       )}
-                      {msg.crossposted && (
+                      {Boolean(msg.crossposted) && (
                         <span className="text-[9px] uppercase tracking-wide bg-d-surface text-d-text3 px-1 rounded shrink-0" title={t('chat.publishedHint')}>
                           {t('chat.published')}
                         </span>
                       )}
-                      {msg.webhook_id && !msg.is_bot && (
+                      {Boolean(msg.webhook_id) && !msg.is_bot && (
                         <span className="bg-d-surface text-d-text3 text-[10px] font-bold px-1.5 rounded">
                           {t('webhooks.badge')}
                         </span>
                       )}
-                      {chatPrefs.showTimestamps && (
+                      {Boolean(chatPrefs.showTimestamps) && (
                         <span className="text-[11px] text-d-text3" title={formatFullTimestamp(msg.created_at)}>
                           {formatTime(msg.created_at, undefined, chatPrefs.use24HourClock)}
                         </span>
@@ -1122,7 +1122,7 @@ export default function ChatArea({
                     msg.content ? (
                       <div className="message-body text-d-text leading-relaxed whitespace-pre-wrap break-words">
                         {renderMarkdown(msg)}
-                        {msg.edited_at && (onShowEditHistory ? (
+                        {Boolean(msg.edited_at) && (onShowEditHistory ? (
                           // The "(edited)" marker is the natural place to ask
                           // "edited from what?", so it is the button.
                           <button
@@ -1142,7 +1142,7 @@ export default function ChatArea({
                     ) : null
                   )}
 
-                  {msg.poll && (
+                  {Boolean(msg.poll) && (
                     <PollCard
                       poll={msg.poll}
                       currentUserId={currentUser?.id}
@@ -1153,7 +1153,7 @@ export default function ChatArea({
                     />
                   )}
 
-                  {msg.sticker && (
+                  {Boolean(msg.sticker) && (
                     <img
                       src={msg.sticker.url}
                       alt={msg.sticker.name}
@@ -1168,7 +1168,7 @@ export default function ChatArea({
                     />
                   )}
 
-                  {chatPrefs.showEmbeds && msg.embeds?.length > 0 && (
+                  {Boolean(chatPrefs.showEmbeds) && msg.embeds?.length > 0 && (
                     <div className="space-y-1">
                       {msg.embeds.map((embed, i) => (
                         // A bot's rich embed is authored data; a link preview
@@ -1208,7 +1208,7 @@ export default function ChatArea({
                     </div>
                   )}
 
-                  {msg.failed && (
+                  {Boolean(msg.failed) && (
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-d-danger">
                       <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                       <span className="truncate">{msg.error ?? t('chat.sendFailedShort')}</span>

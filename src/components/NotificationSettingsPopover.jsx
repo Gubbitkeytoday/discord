@@ -95,7 +95,7 @@ export default function NotificationSettingsPopover({
         </button>
       </div>
 
-      {settings?.muted_until && muted && (
+      {Boolean(settings?.muted_until) && muted && (
         <p className="px-3 pb-1 text-[10px] text-d-text4">
           {t('notif.mutedUntil', { time: new Date(settings.muted_until).toLocaleString() })}
         </p>

@@ -115,7 +115,7 @@ export default function QuickSwitcher({
                 <entry.icon className="w-5 h-5 text-d-text4 shrink-0" />
               )}
               <span className="text-sm text-d-strong font-medium truncate">{entry.label}</span>
-              {entry.hint && (
+              {Boolean(entry.hint) && (
                 <span className="text-[11px] text-d-text3 truncate ml-auto pl-2">{entry.hint}</span>
               )}
             </button>

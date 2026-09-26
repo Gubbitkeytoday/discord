@@ -354,7 +354,7 @@ export default function ProfileTab({ currentUser, onSaveProfile, onSetStatus, on
                 {currentUser?.discriminator ? `#${currentUser.discriminator}` : ''}
                 {form.pronouns ? ` · ${form.pronouns}` : ''}
               </p>
-              {form.bio && (
+              {Boolean(form.bio) && (
                 <p className="mt-3 whitespace-pre-wrap border-t border-d-divider pt-3 text-xs
                   leading-relaxed text-d-text">
                   {form.bio}

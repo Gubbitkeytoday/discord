@@ -51,12 +51,12 @@ export default function EditHistoryModal({ message, onClose }) {
         </header>
 
         <div className="max-h-[60vh] overflow-y-auto p-4 space-y-3">
-          {state.loading && (
+          {Boolean(state.loading) && (
             <p className="text-sm text-d-text3 flex items-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />{t('common.loading')}
             </p>
           )}
-          {state.error && <p className="text-sm text-d-danger">{state.error}</p>}
+          {Boolean(state.error) && <p className="text-sm text-d-danger">{state.error}</p>}
           {!state.loading && !state.error && state.revisions.length <= 1 && (
             <p className="text-sm text-d-text3">{t('chat.noEditHistory')}</p>
           )}

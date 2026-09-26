@@ -27,7 +27,7 @@ export function RichEmbed({ embed }) {
     >
       <div className="p-3 flex gap-3">
         <div className="min-w-0 flex-1">
-          {embed.author?.name && (
+          {Boolean(embed.author?.name) && (
             <div className="flex items-center gap-1.5 mb-1 min-w-0">
               {httpOnly(embed.author.icon_url) && (
                 <img src={embed.author.icon_url} alt="" className="w-5 h-5 rounded-full object-cover shrink-0" />
@@ -36,7 +36,7 @@ export function RichEmbed({ embed }) {
             </div>
           )}
 
-          {embed.title && (
+          {Boolean(embed.title) && (
             titleHref ? (
               <a
                 href={titleHref}
@@ -52,7 +52,7 @@ export function RichEmbed({ embed }) {
             )
           )}
 
-          {embed.description && (
+          {Boolean(embed.description) && (
             <p className="text-sm text-d-text2 mt-1 whitespace-pre-line break-words">{embed.description}</p>
           )}
 
@@ -67,7 +67,7 @@ export function RichEmbed({ embed }) {
             </dl>
           )}
 
-          {embed.image?.url && httpOnly(embed.image.url) && (
+          {Boolean(embed.image?.url) && httpOnly(embed.image.url) && (
             <img
               src={embed.image.url}
               alt=""
@@ -81,14 +81,14 @@ export function RichEmbed({ embed }) {
               {httpOnly(embed.footer?.icon_url) && (
                 <img src={embed.footer.icon_url} alt="" className="w-4 h-4 rounded-full object-cover" />
               )}
-              {embed.footer?.text && <span className="truncate">{embed.footer.text}</span>}
-              {embed.footer?.text && embed.timestamp && <span aria-hidden="true">·</span>}
-              {embed.timestamp && <time dateTime={embed.timestamp}>{new Date(embed.timestamp).toLocaleString()}</time>}
+              {Boolean(embed.footer?.text) && <span className="truncate">{embed.footer.text}</span>}
+              {Boolean(embed.footer?.text) && embed.timestamp && <span aria-hidden="true">·</span>}
+              {Boolean(embed.timestamp) && <time dateTime={embed.timestamp}>{new Date(embed.timestamp).toLocaleString()}</time>}
             </div>
           )}
         </div>
 
-        {embed.thumbnail?.url && httpOnly(embed.thumbnail.url) && (
+        {Boolean(embed.thumbnail?.url) && httpOnly(embed.thumbnail.url) && (
           <img
             src={embed.thumbnail.url}
             alt=""
@@ -157,7 +157,7 @@ export function MessageComponents({ message, onToast }) {
                   rel="noreferrer noopener"
                   className={`inline-flex items-center gap-1.5 text-sm font-semibold px-3 py-1.5 rounded-md ${style}`}
                 >
-                  {component.emoji && <span aria-hidden="true">{component.emoji}</span>}
+                  {Boolean(component.emoji) && <span aria-hidden="true">{component.emoji}</span>}
                   {component.label}
                   <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
                 </a>

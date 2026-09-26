@@ -175,7 +175,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               {currentUser?.email || t('security.noEmail')}
             </p>
           </div>
-          {currentUser?.email && (
+          {Boolean(currentUser?.email) && (
             <button
               onClick={verifyEmail}
               disabled={busy === 'email'}
@@ -286,7 +286,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
                   <Copy className="w-3.5 h-3.5" />
                 </button>
               </div>
-              {enrolment.otpauth_uri && (
+              {Boolean(enrolment.otpauth_uri) && (
                 <p className="text-[11px] text-d-text4 break-all">{enrolment.otpauth_uri}</p>
               )}
               <label className="block">
@@ -331,7 +331,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
             </div>
           )}
 
-          {mfa?.enabled && (
+          {Boolean(mfa?.enabled) && (
             <form onSubmit={disableMfa} className="flex items-end gap-2 pt-2 border-t border-d-divider">
               <label className="block">
                 <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
@@ -380,7 +380,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               <div className="min-w-0">
                 <p className="text-sm text-d-strong truncate">
                   {session.device_name || session.user_agent || t('security.unknownDevice')}
-                  {session.current && (
+                  {Boolean(session.current) && (
                     <span className="ml-2 text-[10px] bg-d-online/20 text-d-online px-1.5 py-0.5 rounded">
                       {t('security.thisDevice')}
                     </span>

@@ -276,7 +276,7 @@ export default function VoiceRoom({
         </div>
       </div>
 
-      {media.error && (
+      {Boolean(media.error) && (
         <div className="mx-4 mt-3 px-3 py-2 bg-d-danger/10 border border-d-danger/40 rounded flex items-start gap-2 text-xs text-d-danger">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="flex-1">
@@ -297,7 +297,7 @@ export default function VoiceRoom({
       )}
 
       {/* Silence warning: transmitting but nothing is coming through. */}
-      {voiceSettings.silenceWarning && media.transmitting && media.micLevel === 0 && (
+      {Boolean(voiceSettings.silenceWarning) && media.transmitting && media.micLevel === 0 && (
         <div className="mx-4 mt-3 px-3 py-2 bg-d-idle/10 border border-d-idle/40 rounded text-xs text-d-idle">
           {t('voice.silenceWarning')}
         </div>
@@ -308,7 +308,7 @@ export default function VoiceRoom({
         <div className="mx-4 mt-3 rounded-xl overflow-hidden bg-black relative shrink-0 group">
           <VideoTile
             stream={stage.stream}
-            mirror={stage.isSelf && stage.kind === 'camera' && voiceSettings.mirrorCamera}
+            mirror={Boolean(stage.isSelf) && stage.kind === 'camera' && voiceSettings.mirrorCamera}
             className="w-full max-h-[45vh] object-contain"
           />
           <div className="absolute top-2 left-2 bg-d-brand text-white text-[10px] font-bold px-2 py-0.5 rounded">
@@ -325,7 +325,7 @@ export default function VoiceRoom({
                 <Minimize2 className="w-3 h-3" /> {t('voice.unpin')}
               </button>
             ) : null}
-            {stage.isSelf && stage.kind === 'screen' && (
+            {Boolean(stage.isSelf) && stage.kind === 'screen' && (
               <button
                 onClick={media.toggleScreenShare}
                 className="bg-d-danger text-white text-[10px] font-semibold px-2 py-1 rounded"
@@ -377,7 +377,7 @@ export default function VoiceRoom({
                         speaking ? 'scale-105 ring-4 ring-d-online' : ''
                       }`}
                     />
-                    {p.isMuted && (
+                    {Boolean(p.isMuted) && (
                       <div className="absolute bottom-0 right-0 bg-d-danger p-1.5 rounded-full text-white shadow-md">
                         <MicOff className="w-4 h-4" />
                       </div>
@@ -440,10 +440,10 @@ export default function VoiceRoom({
                   <span className="text-sm font-bold text-d-strong truncate">
                     {p.username}{isSelf && t('voice.you')}
                   </span>
-                  {p.isMuted && <MicOff className="w-3.5 h-3.5 text-d-danger" />}
-                  {p.isDeafened && <HeadphoneOff className="w-3.5 h-3.5 text-d-danger" />}
-                  {p.isVideo && <Video className="w-3.5 h-3.5 text-d-online" />}
-                  {p.isStreaming && <Monitor className="w-3.5 h-3.5 text-d-brand" />}
+                  {Boolean(p.isMuted) && <MicOff className="w-3.5 h-3.5 text-d-danger" />}
+                  {Boolean(p.isDeafened) && <HeadphoneOff className="w-3.5 h-3.5 text-d-danger" />}
+                  {Boolean(p.isVideo) && <Video className="w-3.5 h-3.5 text-d-online" />}
+                  {Boolean(p.isStreaming) && <Monitor className="w-3.5 h-3.5 text-d-brand" />}
                   {locallyMuted && <VolumeX className="w-3.5 h-3.5 text-d-idle" title={t('voice.mutedLocally')} />}
                 </div>
 
@@ -528,7 +528,7 @@ export default function VoiceRoom({
                 <li key={p.userId} className={`flex items-center gap-2 rounded-full pl-1 pr-2 py-1 border ${p.requestedToSpeakAt ? 'border-d-brand bg-d-brand/10' : 'border-d-edge bg-d-surface'}`}>
                   <img src={p.avatar_url || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover" />
                   <span className="text-xs text-d-strong max-w-[8rem] truncate">{p.username}{p.userId === selfId && t('voice.you')}</span>
-                  {p.requestedToSpeakAt && <Hand className="w-3.5 h-3.5 text-d-brand" aria-label={t('stage.wantsToSpeak')} />}
+                  {Boolean(p.requestedToSpeakAt) && <Hand className="w-3.5 h-3.5 text-d-brand" aria-label={t('stage.wantsToSpeak')} />}
                   {canModerateStage && (
                     <button
                       onClick={() => setSpeaker(p.userId, true)}
@@ -651,7 +651,7 @@ export default function VoiceRoom({
           </button>
         )}
 
-        {channel?.server_id && (
+        {Boolean(channel?.server_id) && (
           <button
             onClick={() => setShowSoundboard((v) => !v)}
             className={`p-3.5 rounded-full transition-all ${

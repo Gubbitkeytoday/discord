@@ -197,11 +197,11 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
               index === activeIndex ? 'bg-d-active' : 'hover:bg-d-hover'
             }`}
           >
-            {option.avatar && (
+            {Boolean(option.avatar) && (
               <img src={option.avatar || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
             )}
-            {option.image && <img src={option.image} alt="" className="w-6 h-6 object-contain shrink-0" />}
-            {option.emoji && <span className="w-6 text-center text-lg shrink-0">{option.emoji}</span>}
+            {Boolean(option.image) && <img src={option.image} alt="" className="w-6 h-6 object-contain shrink-0" />}
+            {Boolean(option.emoji) && <span className="w-6 text-center text-lg shrink-0">{option.emoji}</span>}
 
             <span
               className="text-sm font-medium truncate"
@@ -209,7 +209,7 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
             >
               {option.primary}
             </span>
-            {option.secondary && (
+            {Boolean(option.secondary) && (
               <span className="text-xs text-d-text3 truncate ml-auto pl-2">{option.secondary}</span>
             )}
           </button>

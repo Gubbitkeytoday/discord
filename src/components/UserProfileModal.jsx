@@ -76,8 +76,8 @@ export default function UserProfileModal({
               <p className="text-xs text-d-text3">
                 @{user.username}{user.discriminator ? `#${user.discriminator}` : ''}
               </p>
-              {user.pronouns && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
-              {user.custom_status && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
+              {Boolean(user.pronouns) && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
+              {Boolean(user.custom_status) && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
             </div>
 
             <div className="w-full h-[1px] bg-d-surface" />
@@ -129,7 +129,7 @@ export default function UserProfileModal({
                   {new Date(joined).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}
                 </div>
               )}
-              {user.created_at && (
+              {Boolean(user.created_at) && (
                 <div>
                   <span className="block font-bold text-d-text2 uppercase">{t('profile.discordSince')}</span>
                   {new Date(user.created_at).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}

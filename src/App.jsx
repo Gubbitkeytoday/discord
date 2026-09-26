@@ -1829,7 +1829,7 @@ export default function App() {
       onSelectChannel={(id) => setActiveChannelId(id)}
       onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
       isLoadingMessages={isLoadingMessages}
-      onCreateThread={activeChannel?.server_id && activeChannel.type !== 'thread' ? handleCreateThread : null}
+      onCreateThread={Boolean(activeChannel?.server_id) && activeChannel.type !== 'thread' ? handleCreateThread : null}
       onForward={(msg) => setForwardMessage(msg)}
       botCommands={botCommands}
       onRunBotCommand={async (command, options, target = null) => {

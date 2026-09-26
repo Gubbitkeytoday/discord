@@ -24,7 +24,7 @@ export default function LinkEmbed({ embed, onOpenImage }) {
       style={{ borderLeftColor: embed.color || '#5865f2' }}
     >
       <div className="p-3">
-        {embed.site_name && (
+        {Boolean(embed.site_name) && (
           <p className="text-[11px] text-d-text3 mb-0.5 truncate">{embed.site_name}</p>
         )}
         <a
@@ -35,10 +35,10 @@ export default function LinkEmbed({ embed, onOpenImage }) {
         >
           {embed.title}
         </a>
-        {embed.description && (
+        {Boolean(embed.description) && (
           <p className="text-xs text-d-text mt-1 line-clamp-3">{embed.description}</p>
         )}
-        {embed.image && (
+        {Boolean(embed.image) && (
           <img
             src={embed.image}
             alt=""

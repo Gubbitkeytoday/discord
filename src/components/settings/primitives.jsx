@@ -191,7 +191,7 @@ export function RadioList({ value, onChange, options, label }) {
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-d-strong">{option.label}</span>
-              {option.hint && (
+              {Boolean(option.hint) && (
                 <span className="mt-0.5 block text-xs text-d-text2 leading-relaxed">{option.hint}</span>
               )}
             </span>

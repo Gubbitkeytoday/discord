@@ -42,9 +42,9 @@ function TagChip({ tag, active = false, onClick, removable = false, size = 'sm' 
         ${active ? 'bg-d-brand/20 border-d-brand text-d-strong' : 'bg-d-surface border-d-edge text-d-text2'}
         ${onClick ? 'hover:border-d-text4 hover:text-d-strong' : ''}`}
     >
-      {tag.emoji && <span aria-hidden="true">{tag.emoji}</span>}
+      {Boolean(tag.emoji) && <span aria-hidden="true">{tag.emoji}</span>}
       <span className="truncate max-w-[9rem]">{tag.name}</span>
-      {tag.moderated && <Lock className="w-2.5 h-2.5 opacity-70" aria-label={t('forum.moderatedTag')} />}
+      {Boolean(tag.moderated) && <Lock className="w-2.5 h-2.5 opacity-70" aria-label={t('forum.moderatedTag')} />}
       {removable && <X className="w-3 h-3" aria-hidden="true" />}
     </Comp>
   );
@@ -65,18 +65,18 @@ function PostCard({ post, onOpen, canModerate, onTogglePin, onEditTags, isNew })
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 mb-1 text-[11px] text-d-text3">
-            {post.pinned && (
+            {Boolean(post.pinned) && (
               <span className="inline-flex items-center gap-1 text-d-brand font-semibold">
                 <Pin className="w-3 h-3" aria-hidden="true" />{t('forum.pinned')}
               </span>
             )}
-            {post.archived && (
+            {Boolean(post.archived) && (
               <span className="bg-d-surface text-d-text3 px-1.5 py-0.5 rounded">{t('chat.archived')}</span>
             )}
-            {post.locked && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
+            {Boolean(post.locked) && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
           </div>
           <h3 className="font-bold text-d-strong text-[15px] leading-snug break-words">{post.name}</h3>
-          {post.preview && (
+          {Boolean(post.preview) && (
             <p className="text-sm text-d-text2 mt-1 line-clamp-2 break-words whitespace-pre-line">{post.preview}</p>
           )}
           {post.tags.length > 0 && (
@@ -109,7 +109,7 @@ function PostCard({ post, onOpen, canModerate, onTogglePin, onEditTags, isNew })
             )}
           </div>
         </div>
-        {post.thumbnail_url && (
+        {Boolean(post.thumbnail_url) && (
           <img
             src={post.thumbnail_url}
             alt=""
@@ -168,8 +168,8 @@ function GalleryCard({ post, onOpen, canModerate, onTogglePin, onEditTags }) {
         </div>
         <div className="p-3 min-w-0">
           <div className="flex items-center gap-1.5 text-[11px] text-d-text3 mb-0.5">
-            {post.pinned && <Pin className="w-3 h-3 text-d-brand" aria-label={t('forum.pinned')} />}
-            {post.locked && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
+            {Boolean(post.pinned) && <Pin className="w-3 h-3 text-d-brand" aria-label={t('forum.pinned')} />}
+            {Boolean(post.locked) && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
             {post.tags.slice(0, 2).map((tag) => <TagChip key={tag.id} tag={tag} />)}
           </div>
           <h3 className="font-bold text-d-strong text-sm leading-snug line-clamp-2 break-words">{post.name}</h3>
@@ -225,7 +225,7 @@ function TagPicker({ tags, selected, onChange, canModerate, requireTag }) {
             tag={tag}
             size="md"
             active={selected.includes(tag.id)}
-            onClick={tag.moderated && !canModerate ? undefined : () => toggle(tag.id)}
+            onClick={Boolean(tag.moderated) && !canModerate ? undefined : () => toggle(tag.id)}
           />
         ))}
       </div>
@@ -548,7 +548,7 @@ function ManageTagsModal({ channel, tags, onClose, onChanged, onToast }) {
                     <>
                       <span className="w-6 text-center" aria-hidden="true">{tag.emoji || '🏷️'}</span>
                       <span className="flex-1 text-sm text-d-strong truncate">{tag.name}</span>
-                      {tag.moderated && (
+                      {Boolean(tag.moderated) && (
                         <span className="text-[10px] uppercase tracking-wide text-d-text3 inline-flex items-center gap-1">
                           <Lock className="w-3 h-3" aria-hidden="true" />{t('forum.modOnly')}
                         </span>
@@ -755,8 +755,8 @@ export default function ForumView({
         <div className="flex items-center gap-2 min-w-0">
           <MessagesSquare className="w-6 h-6 text-d-text4 shrink-0" aria-hidden="true" />
           <span className="font-bold text-d-strong text-[15px] truncate">{channel.name}</span>
-          {channel.is_private && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
-          {channel.topic && (
+          {Boolean(channel.is_private) && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
+          {Boolean(channel.topic) && (
             <>
               <div className="w-[1px] h-4 bg-d-divider mx-2 hidden sm:block" />
               <span className="text-xs text-d-text3 truncate hidden sm:block" title={channel.topic}>{channel.topic}</span>
@@ -940,7 +940,7 @@ export default function ForumView({
       {modal === 'manage' && (
         <ManageTagsModal channel={channel} tags={tags} onClose={() => setModal(null)} onChanged={loadTags} onToast={onToast} />
       )}
-      {modal?.editTags && (
+      {Boolean(modal?.editTags) && (
         <EditTagsModal
           post={modal.editTags}
           tags={tags}

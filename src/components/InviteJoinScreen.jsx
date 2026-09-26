@@ -73,7 +73,7 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
                 : t('invites.youWereInvited')}
             </p>
             <h1 className="text-xl font-bold text-d-strong mb-1">{preview.server.name}</h1>
-            {preview.server.description && (
+            {Boolean(preview.server.description) && (
               <p className="text-xs text-d-text3 mb-3">{preview.server.description}</p>
             )}
 

@@ -130,7 +130,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       >
                         {member.display_name || member.username}
                       </span>
-                      {member.role_icon?.url && (
+                      {Boolean(member.role_icon?.url) && (
                         <img
                           src={member.role_icon.url}
                           alt=""
@@ -141,7 +141,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       {(member.is_bot || member.role === 'bot') && (
                         <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded shrink-0">BOT</span>
                       )}
-                      {member.pending && (
+                      {Boolean(member.pending) && (
                         <span className="bg-d-surface text-d-text3 text-[9px] font-bold px-1 rounded shrink-0" title={t('onboarding.pendingHint')}>
                           {t('onboarding.pendingBadge')}
                         </span>

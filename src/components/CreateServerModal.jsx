@@ -157,7 +157,7 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
               <form onSubmit={submitTemplate} className="space-y-4">
                 <div className="bg-d-surface/60 border border-d-edge rounded-lg p-3">
                   <div className="font-semibold text-d-strong text-sm">{template.name}</div>
-                  {template.description && <div className="text-xs text-d-text3 mt-0.5">{template.description}</div>}
+                  {Boolean(template.description) && <div className="text-xs text-d-text3 mt-0.5">{template.description}</div>}
                   <div className="text-[11px] text-d-text3 mt-1">
                     {t('server.templateStats', { channels: template.channel_count, roles: template.role_count, uses: template.usage_count })}
                   </div>

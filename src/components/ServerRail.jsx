@@ -191,7 +191,7 @@ export default function ServerRail({
                   <ServerIcon
                     server={server}
                     active={activeServerId === server.id}
-                    unread={state.unread && !muted}
+                    unread={Boolean(state.unread) && !muted}
                     badge={muted ? 0 : state.mentions}
                     dim={muted}
                     onSelect={() => onSelectServer(server.id)}
@@ -244,7 +244,7 @@ export default function ServerRail({
                       <ServerIcon
                         server={server}
                         active={activeServerId === server.id}
-                        unread={state.unread && !muted}
+                        unread={Boolean(state.unread) && !muted}
                         badge={muted ? 0 : state.mentions}
                         dim={muted}
                         onSelect={() => onSelectServer(server.id)}
