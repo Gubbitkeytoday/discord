@@ -532,6 +532,135 @@ const MIGRATIONS = [
       await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS translation_disabled INTEGER NOT NULL DEFAULT 0`);
     }
   }
+  // media pipeline (v37–v38): responsive renditions, persisted job queue,
+  // presigned direct uploads. See services/mediaPipeline.js.
+  ,{
+    version: 37,
+    name: 'media pipeline: renditions, thumbhash, job queue',
+    up: async () => {
+      const addColumn = async (t, column, ddl) => {
+        const cols = await allQuery(`PRAGMA table_info(${t})`);
+        if (!cols.some((c) => c.name === column)) await runQuery(`ALTER TABLE ${t} ADD COLUMN ${column} ${ddl}`);
+      };
+      await addColumn('files', 'thumbhash', 'TEXT');
+      // NULL: not an image/video (or pre-pipeline). processing | ready | failed | unsupported
+      await addColumn('files', 'media_status', 'TEXT');
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS file_renditions (
+           id          TEXT PRIMARY KEY,
+           file_id     TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+           bucket      INTEGER NOT NULL,
+           format      TEXT NOT NULL CHECK (format IN ('webp','avif')),
+           storage_key TEXT NOT NULL UNIQUE,
+           mime_type   TEXT NOT NULL,
+           width       INTEGER NOT NULL,
+           height      INTEGER NOT NULL,
+           size        INTEGER NOT NULL DEFAULT 0,
+           animated    INTEGER NOT NULL DEFAULT 0,
+           created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           UNIQUE (file_id, bucket, format)
+         )`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS media_jobs (
+           id           TEXT PRIMARY KEY,
+           file_id      TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+           kind         TEXT NOT NULL,
+           status       TEXT NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','done','failed')),
+           attempts     INTEGER NOT NULL DEFAULT 0,
+           last_error   TEXT,
+           run_after    TEXT NOT NULL,
+           locked_until TEXT,
+           created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           UNIQUE (file_id, kind)
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_media_jobs_due ON media_jobs(status, run_after)`);
+    },
+    postgres: async () => {
+      await runQuery(`ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbhash TEXT COLLATE "C"`);
+      await runQuery(`ALTER TABLE files ADD COLUMN IF NOT EXISTS media_status TEXT COLLATE "C"`);
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS file_renditions (
+           id          TEXT COLLATE "C" PRIMARY KEY,
+           file_id     TEXT COLLATE "C" NOT NULL REFERENCES files(id) ON DELETE CASCADE DEFERRABLE,
+           bucket      INTEGER NOT NULL,
+           format      TEXT COLLATE "C" NOT NULL CHECK (format IN ('webp','avif')),
+           storage_key TEXT COLLATE "C" NOT NULL UNIQUE,
+           mime_type   TEXT COLLATE "C" NOT NULL,
+           width       INTEGER NOT NULL,
+           height      INTEGER NOT NULL,
+           size        BIGINT NOT NULL DEFAULT 0,
+           animated    INTEGER NOT NULL DEFAULT 0,
+           created_at  TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           UNIQUE (file_id, bucket, format)
+         )`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS media_jobs (
+           id           TEXT COLLATE "C" PRIMARY KEY,
+           file_id      TEXT COLLATE "C" NOT NULL REFERENCES files(id) ON DELETE CASCADE DEFERRABLE,
+           kind         TEXT COLLATE "C" NOT NULL,
+           status       TEXT COLLATE "C" NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','done','failed')),
+           attempts     INTEGER NOT NULL DEFAULT 0,
+           last_error   TEXT,
+           run_after    TIMESTAMPTZ(3) NOT NULL,
+           locked_until TIMESTAMPTZ(3),
+           created_at   TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           updated_at   TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           UNIQUE (file_id, kind)
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_media_jobs_due ON media_jobs(status, run_after)`);
+    }
+  }
+  ,{
+    version: 38,
+    name: 'presigned direct uploads',
+    up: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS direct_uploads (
+           id            TEXT PRIMARY KEY,
+           user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+           category      TEXT NOT NULL,
+           object_key    TEXT NOT NULL UNIQUE,
+           filename      TEXT NOT NULL,
+           declared_mime TEXT NOT NULL,
+           declared_size INTEGER NOT NULL,
+           visibility    TEXT NOT NULL DEFAULT 'public',
+           status        TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','completed','rejected','expired')),
+           file_id       TEXT REFERENCES files(id) ON DELETE SET NULL,
+           expires_at    TEXT NOT NULL,
+           created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS direct_uploads (
+           id            TEXT COLLATE "C" PRIMARY KEY,
+           user_id       TEXT COLLATE "C" NOT NULL REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           category      TEXT COLLATE "C" NOT NULL,
+           object_key    TEXT COLLATE "C" NOT NULL UNIQUE,
+           filename      TEXT NOT NULL,
+           declared_mime TEXT COLLATE "C" NOT NULL,
+           declared_size BIGINT NOT NULL,
+           visibility    TEXT COLLATE "C" NOT NULL DEFAULT 'public',
+           status        TEXT COLLATE "C" NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','completed','rejected','expired')),
+           file_id       TEXT COLLATE "C" REFERENCES files(id) ON DELETE SET NULL DEFERRABLE,
+           expires_at    TIMESTAMPTZ(3) NOT NULL,
+           created_at    TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
+    }
+  }
 ];
 
 // Applied in array order, so the array order must be the version order — and

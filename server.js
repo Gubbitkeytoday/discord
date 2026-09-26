@@ -40,6 +40,7 @@ import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
 import filesRouter from './routes/files.js';
+import mediaRouter from './routes/media.js'; // media pipeline
 import * as messageService from './services/messages.js';
 import * as guildService from './services/guilds.js';
 import * as userService from './services/users.js';
@@ -259,6 +260,7 @@ app.use('/api', createLivekitRouter({ io })); // livekit
 app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
 app.use('/api', passkeysRouter); // passkeys
 app.use('/api', translationRouter); // translation
+app.use(mediaRouter); // media pipeline: /api/media/*, S3 fallback for /uploads/*
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)
 // is fetched by the server, so viewers' browsers never contact third-party

@@ -7,8 +7,6 @@
 // ============================================================================
 
 import express from 'express';
-import fs from 'fs';
-
 import crypto from 'crypto';
 
 import { ApiError, asyncRoute, parseLimit, requireUser } from '../lib/httpUtils.js';
@@ -16,7 +14,7 @@ import { getFileType } from '../lib/mediaProbe.js';
 import {
   storeFile, getFile, getVariant, deleteFile, listFilesForUser,
   getStorageUsage, collectGarbage, verifyIntegrity, recordAccess,
-  verifyFileSignature, signFileUrl, resolveStoragePath, formatBytes,
+  verifyFileSignature, signFileUrl, sendStoredObject, formatBytes,
   addReference, releaseReference,
   DEFAULT_ORPHAN_GRACE_MS, DEFAULT_GC_LIMIT,
   uploadAvatar, uploadBanner, uploadServerIcon, uploadEmoji, uploadSticker, uploadAttachment,
@@ -26,11 +24,21 @@ import { getQuery, allQuery } from '../db.js';
 
 const router = express.Router();
 
-/** Shape a files row into the descriptor the frontend consumes. */
+/**
+ * Shape a files row into the descriptor the frontend consumes.
+ *
+ * Images carry everything a client needs to render without layout shift and
+ * at the right size: display `width`/`height` (EXIF orientation applied),
+ * a `thumbhash` placeholder (and the older `placeholder` data URI), and
+ * responsive `renditions` with ready `srcset` strings per format. `url` stays
+ * the original (sanitised) file; `display_url` negotiates the best format.
+ */
 function toDescriptor(file) {
   return {
     id: file.id,
     url: file.url,
+    download_url: file.download_url ?? `/api/files/${file.id}?download=1`,
+    display_url: file.display_url ?? null,
     filename: file.original_name,
     file_type: file.file_type ?? getFileType(file.mime_type),
     mimetype: file.mime_type,
@@ -38,10 +46,16 @@ function toDescriptor(file) {
     size_human: formatBytes(file.size),
     width: file.width,
     height: file.height,
+    duration_secs: file.duration_secs ?? null,
     is_animated: Boolean(file.is_animated),
     placeholder: file.blurhash ?? null,
+    thumbhash: file.thumbhash ?? null,
+    media_status: file.media_status ?? null,
     category: file.category,
     variants: file.variants ?? {},
+    renditions: file.renditions ?? [],
+    srcset: file.srcset ?? {},
+    poster_url: file.variants?.poster?.url ?? null,
     thumbnail_url: file.variants?.thumb?.url ?? file.variants?.medium?.url ?? file.url,
     created_at: file.created_at,
     deduped: file.deduped ?? false
@@ -239,62 +253,31 @@ router.get('/files/:fileId', asyncRoute(async (req, res) => {
 
   let storageKey = file.storage_key;
   let mime = file.mime_type;
-  let size = file.size;
   if (variantKind) {
     const variant = await getVariant(file.id, variantKind);
     if (!variant) throw ApiError.notFound(`Variant '${variantKind}'`);
     storageKey = variant.storage_key;
     mime = variant.mime_type;
-    size = variant.size;
+  } else if (String(storageKey).startsWith('incoming/')) {
+    // A direct upload that has not been verified and stripped yet.
+    res.setHeader('Retry-After', '2');
+    throw new ApiError('This upload is still being processed', { status: 409, code: 'MEDIA_PROCESSING' });
   }
 
-  const absolute = resolveStoragePath(storageKey);
-  let stat;
-  try { stat = fs.statSync(absolute); }
-  catch { throw new ApiError('File bytes are missing from storage', { status: 410, code: 'BYTES_GONE' }); }
-
-  // Content-addressed keys are immutable, so this may be cached forever.
-  res.setHeader('Content-Type', mime);
-  res.setHeader('Cache-Control', file.visibility === 'public'
-    ? 'public, max-age=31536000, immutable'
-    : 'private, max-age=300');
-  res.setHeader('ETag', `"${file.hash}${variantKind ? `-${variantKind}` : ''}"`);
-  res.setHeader('Accept-Ranges', 'bytes');
-  // Never let an uploaded SVG or HTML-ish blob execute in our origin.
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-  res.setHeader(
-    'Content-Disposition',
-    `${getFileType(mime) === 'file' ? 'attachment' : 'inline'}; ` +
-    `filename*=UTF-8''${encodeURIComponent(file.original_name)}`
-  );
-
-  if (req.headers['if-none-match'] === res.getHeader('ETag')) return res.status(304).end();
-
-  // Range support so <video>/<audio> can seek.
-  const range = req.headers.range;
-  if (range) {
-    const match = /bytes=(\d*)-(\d*)/.exec(range);
-    if (match) {
-      const start = match[1] ? Number(match[1]) : 0;
-      const end = match[2] ? Number(match[2]) : stat.size - 1;
-      if (start >= stat.size || end >= stat.size || start > end) {
-        res.setHeader('Content-Range', `bytes */${stat.size}`);
-        return res.status(416).end();
-      }
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-      res.setHeader('Content-Length', end - start + 1);
-      recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: end - start + 1 })
-        .catch(() => {});
-      return fs.createReadStream(absolute, { start, end }).pipe(res);
-    }
+  // Content-addressed keys are immutable, so a public file may be cached forever.
+  const result = await sendStoredObject(req, res, {
+    storageKey,
+    backend: file.backend,
+    mime,
+    etag: `"${file.hash}${variantKind ? `-${variantKind}` : ''}"`,
+    cacheControl: file.visibility === 'public' ? 'public, max-age=31536000, immutable' : 'private, max-age=300',
+    filename: file.original_name,
+    download: req.query.download === '1' || req.query.download === 'true'
+  });
+  if (result?.bytes) {
+    recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: result.bytes })
+      .catch(() => {});
   }
-
-  res.setHeader('Content-Length', stat.size);
-  recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: size })
-    .catch(() => {});
-  fs.createReadStream(absolute).pipe(res);
 }));
 
 // --- mutation ----------------------------------------------------------------
