@@ -62,7 +62,6 @@ export const SERVERS_MIGRATIONS = [
       await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS accent_color TEXT COLLATE "C"`);
       await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS traits JSONB`);
       await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS discovery_category TEXT COLLATE "C"`);
-      await runQuery(`CREATE INDEX IF NOT EXISTS idx_servers_discoverable ON servers USING GIN (features) WHERE deleted_at IS NULL`);
       await runQuery(`CREATE INDEX IF NOT EXISTS idx_servers_discovery ON servers(discovery_category, member_count) WHERE deleted_at IS NULL`);
     }
   }

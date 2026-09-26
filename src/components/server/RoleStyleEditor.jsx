@@ -32,7 +32,7 @@ function ColourPicker({ value, onChange, label }) {
             style={{ backgroundColor: colour }}
             aria-pressed={value === colour}
             aria-label={t('roles.colorSwatch', { color: colour })}
-            className={`w-6 h-6 rounded border border-black/20 ${value === colour ? 'ring-2 ring-d-strong ring-offset-1 ring-offset-d-canvas' : ''}`}
+            className={`w-7 h-7 pointer-coarse:w-10 pointer-coarse:h-10 rounded border border-black/20 ${value === colour ? 'ring-2 ring-d-strong ring-offset-1 ring-offset-d-canvas' : ''}`}
           />
         ))}
         <label htmlFor={`${id}-native`} className="sr-only">{t('srv.customColour')}</label>

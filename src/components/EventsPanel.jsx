@@ -9,7 +9,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat, ImagePlus, Trash2, Radio
+  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat, ImagePlus, Trash2
 } from 'lucide-react';
 import { api, get, upload } from '../api';
 import ImageCropDialog from './server/ImageCropDialog.jsx';
@@ -243,11 +243,6 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
         live ? 'border-d-online' : over ? 'border-d-divider opacity-60' : 'border-d-divider'
       }`}
     >
-      {live && (
-        <div className="flex items-center gap-2 bg-d-online/15 px-4 py-1.5 text-xs font-bold uppercase text-d-onlinetext">
-          <Radio className="h-3.5 w-3.5" aria-hidden="true" /> {t('srv.liveNow')}
-        </div>
-      )}
       {Boolean(event.image_url) && (
         <img src={proxiedImageUrl(event.image_url)} alt="" className="w-full aspect-[5/2] object-cover" />
       )}

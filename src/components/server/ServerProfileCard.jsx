@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Loader2, Check } from 'lucide-react';
 import { t } from '../../i18n/index.jsx';
 import { proxiedImageUrl } from '../../utils/media';
@@ -23,6 +23,7 @@ const fmt = (n) => {
 export default function ServerProfileCard({
   profile, actionLabel, onAction, onOpen, busy = false, headingLevel = 3, compact = false, className = ''
 }) {
+  const [iconFailed, setIconFailed] = useState(false);
   if (!profile) return null;
   const Heading = `h${headingLevel}`;
   const accent = /^#[0-9a-f]{6}$/i.test(profile.accent_color ?? '') ? profile.accent_color : null;
@@ -51,8 +52,9 @@ export default function ServerProfileCard({
       </div>
       <div className="relative px-4 pb-4 flex-1 flex flex-col">
         <div className="-mt-8 mb-2 w-16 h-16 rounded-[20px] border-4 border-d-surface bg-d-surface overflow-hidden shrink-0">
-          {icon ? (
-            <AnimatedServerIcon src={icon} animated={Boolean(profile.icon_animated)} alt="" className="w-full h-full object-cover" />
+          {icon && !iconFailed ? (
+            <AnimatedServerIcon src={icon} animated={Boolean(profile.icon_animated)} alt="" className="w-full h-full object-cover"
+              onError={() => setIconFailed(true)} />
           ) : (
             <span className="w-full h-full bg-d-brand text-white text-lg font-semibold flex items-center justify-center" aria-hidden="true">
               {serverInitials(profile.name)}

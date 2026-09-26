@@ -210,7 +210,7 @@ export default function ChannelSettingsModal({ channel, canManage, onSave, onDel
                       maxLength={32}
                       aria-label={t('srv.channelEmoji')}
                       placeholder="🎮"
-                      className={`${field} w-28`}
+                      className={`${field.replace('w-full', '')} w-28`}
                     />
                     {Boolean(iconEmoji) && canManage && (
                       <button type="button" onClick={() => setIconEmoji('')} className="text-xs text-d-text2 hover:text-d-strong hover:underline min-h-8 px-1">
