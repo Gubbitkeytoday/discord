@@ -42,6 +42,24 @@ export class ApiRequestError extends Error {
 
 const THAI = /[\u0E00-\u0E7F]/;
 
+// Stable error codes the backend sends. Each is looked up as `apiError.<CODE>`
+// in the dictionaries; this English text is only the last resort for a code
+// whose translation has not shipped yet (and the server gave no message).
+export const API_ERROR_FALLBACKS = Object.freeze({
+  USERNAME_TAKEN: 'That username is already taken.',
+  PASSWORD_REQUIRED: 'Enter your current password to continue.',
+  MFA_REQUIRED: 'Enter your two-factor authentication code.',
+  INVALID_MFA_CODE: 'That code is not valid. Try again.',
+  MAIL_NOT_CONFIGURED: 'E-mail is not set up on this server, so that could not be sent.',
+  INVALID_COLOR: 'That colour is not valid. Use a hex colour like #5865F2.',
+  REFERENCE_CONFLICT: 'That conflicts with something that changed meanwhile. Refresh and try again.',
+  BUSY: 'The server is busy. Try again in a moment.',
+  TIMEOUT: 'That took too long. Try again.',
+  INVALID_URL: 'That link is not a valid URL.',
+  URL_NOT_ALLOWED: 'That address is not allowed.',
+  NOT_AN_IMAGE: 'That file is not an image.'
+});
+
 /**
  * Turn an error body into a message in the reader's language. The server
  * sends a stable `code`; a known code wins, then the server's own text —
@@ -58,6 +76,7 @@ export function localizeError(data, status) {
   const message = data?.error;
   const readerLocale = (typeof document !== 'undefined' && document.documentElement.lang) || 'en';
   if (message && !(!readerLocale.startsWith('th') && THAI.test(message))) return message;
+  if (code && API_ERROR_FALLBACKS[code]) return API_ERROR_FALLBACKS[code];
   return t('apiError.generic', { code: code ?? `HTTP ${status}` });
 }
 

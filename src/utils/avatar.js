@@ -1,3 +1,5 @@
+import { proxiedImageUrl } from './media';
+
 // A default avatar that costs no network request and cannot 404: Discord's
 // blurple circle with a neutral figure, inlined as an SVG data URI.
 const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
@@ -28,7 +30,8 @@ export function defaultAvatar(seed) {
 
 /** Avatar for a user-ish object, falling back to its coloured default. */
 export function avatarOf(entity) {
-  return entity?.avatar_url || entity?.member_avatar_url
+  const own = entity?.avatar_url || entity?.member_avatar_url;
+  return (own && proxiedImageUrl(own))
     || defaultAvatar(entity?.user_id ?? entity?.userId ?? entity?.id);
 }
 
@@ -41,7 +44,13 @@ const GENERATED_ICON_HOSTS = /^https?:\/\/api\.dicebear\.com\//i;
 export function serverIconOf(server) {
   const url = server?.icon_url;
   if (!url || GENERATED_ICON_HOSTS.test(url)) return null;
-  return url;
+  // The backend may already hand us the proxied form of a generated icon.
+  if (url.startsWith('/api/media/proxy?url=')) {
+    try {
+      if (GENERATED_ICON_HOSTS.test(decodeURIComponent(url.slice('/api/media/proxy?url='.length)))) return null;
+    } catch { /* malformed: fall through and let onError handle it */ }
+  }
+  return proxiedImageUrl(url);
 }
 
 /** Discord's acronym for an icon-less guild: first letter of each word. */

@@ -6,6 +6,7 @@ import {
 import { useDialog } from './settings/primitives';
 import { localeTag, t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl, cssImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -38,7 +39,7 @@ export default function UserProfileModal({
         <div
           className="h-28 bg-cover bg-center relative"
           style={{
-            backgroundImage: user.banner_url ? `url(${user.banner_url})` : undefined,
+            backgroundImage: user.banner_url ? cssImageUrl(user.banner_url) : undefined,
             backgroundColor: user.accent_color || 'var(--color-d-brand)'
           }}
         >
@@ -55,7 +56,7 @@ export default function UserProfileModal({
           <div className="relative -top-10 mb-[-2rem] flex justify-between items-end">
             <div className="relative">
               <img
-                src={user.avatar_url || defaultAvatar(user.id)}
+                src={proxiedImageUrl(user.avatar_url || defaultAvatar(user.id))}
                 alt=""
                 className="w-20 h-20 rounded-full border-4 border-d-panel object-cover"
               />

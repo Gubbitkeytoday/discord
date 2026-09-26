@@ -49,6 +49,8 @@ const StickerPicker = lazyComponent(() => import('./StickerPicker'));
 const CreatePollModal = lazyComponent(() => import('./CreatePollModal'));
 import { useUserSettings } from '../hooks/useUserSettings';
 import ComposerAutocomplete, { detectTrigger, buildOptions } from './ComposerAutocomplete';
+import { proxiedImageUrl, cssImageUrl } from '../utils/media';
+import { localizeError } from '../api';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const QUICK_EMOJIS = ['❤️', '🔥', '👍', '😂', '🎉', '🚀', '💯', '💩', '✨'];
@@ -151,8 +153,22 @@ export default function ChatArea({
     return member?.nickname || member?.display_name || member?.username || t('chat.someone');
   }, [members, currentUser?.id]);
   const [lightboxImg, setLightboxImg] = useState(null);
-  const [isUploading, setIsUploading] = useState(false);
+  // Uploads in flight (the picker, paste and drop can overlap) and how far the
+  // bytes have got. Nothing is sent while one is running: Send is disabled,
+  // and Enter queues the message until the upload has landed.
+  const [uploadsInFlight, setUploadsInFlight] = useState(0);
+  const isUploading = uploadsInFlight > 0;
+  const [uploadProgress, setUploadProgress] = useState(null);   // 0..1, or null when unknown
+  const [sendQueued, setSendQueued] = useState(false);
+  const handleSendRef = useRef(null);
   const [uploadError, setUploadError] = useState(null);
+  useEffect(() => {
+    if (!sendQueued || isUploading) return;
+    setSendQueued(false);
+    handleSendRef.current?.();
+  }, [sendQueued, isUploading]);
+  // A queued send belongs to the conversation it was typed in.
+  useEffect(() => { setSendQueued(false); }, [channel?.id]);
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState('');
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -432,25 +448,42 @@ export default function ChatArea({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  /** POST the files with upload progress (fetch cannot report it). */
+  const postAttachments = (formData) => new Promise((resolve, reject) => {
+    const xhr = new window.XMLHttpRequest();
+    xhr.open('POST', '/api/upload/attachments');
+    xhr.withCredentials = true;
+    if (currentUser) xhr.setRequestHeader('x-user-id', currentUser.id);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) setUploadProgress(event.loaded / event.total);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText || 'null'); } catch { data = null; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data ?? {});
+      else resolve({ ...(data ?? {}), error: data ? localizeError(data, xhr.status) : t('chat.uploadFailed') });
+    };
+    xhr.onerror = () => reject(new Error(t('chat.uploadFailed')));
+    xhr.onabort = () => reject(new Error(t('chat.uploadFailed')));
+    xhr.send(formData);
+  });
+
   /** Shared by the file picker, clipboard paste and drag-and-drop. */
   const uploadFiles = async (files) => {
     if (!files?.length) return;
     if (!canAttach) { setUploadError(t('chat.noAttachPermission')); return; }
 
-    setIsUploading(true);
+    setUploadsInFlight((n) => n + 1);
+    setUploadProgress(0);
     setUploadError(null);
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
 
+    let ok = false;
     try {
-      const res = await fetch('/api/upload/attachments', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: currentUser ? { 'x-user-id': currentUser.id } : {},
-        body: formData
-      });
-      const data = await res.json();
+      const data = await postAttachments(formData);
       if (data.attachments?.length) {
+        ok = true;
         setAttachments((prev) => [...prev, ...data.attachments]);
         if (data.failed?.length) {
           setUploadError(data.failed.map((f) => `${f.filename}: ${f.error}`).join('\n'));
@@ -461,7 +494,11 @@ export default function ChatArea({
     } catch (err) {
       setUploadError(err.message);
     } finally {
-      setIsUploading(false);
+      // A send that was waiting on a failed upload is not sent: the person
+      // should see the error and decide, not have the text go out alone.
+      if (!ok) setSendQueued(false);
+      setUploadsInFlight((n) => Math.max(0, n - 1));
+      setUploadProgress(null);
     }
   };
 
@@ -488,6 +525,8 @@ export default function ChatArea({
 
   const handleSend = (e) => {
     e?.preventDefault();
+    // Never send ahead of an attachment still uploading; Enter queues instead.
+    if (isUploading) { setSendQueued(true); return; }
     if (!inputText.trim() && attachments.length === 0) return;
     if (!canSend || isArchived) return;
 
@@ -538,6 +577,7 @@ export default function ChatArea({
     playMessageIncomingSound();
     clearComposer();
   };
+  handleSendRef.current = handleSend;
 
   /**
    * React, and on shift-click also fire a Super Reaction: the burst is a local
@@ -803,7 +843,7 @@ export default function ChatArea({
             </button>
           )}
           {isDM ? (
-            <img src={channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+            <img src={proxiedImageUrl(channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id))} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
           ) : (
             <HeaderIcon className="w-6 h-6 text-d-text4 shrink-0" />
           )}
@@ -1075,7 +1115,7 @@ export default function ChatArea({
           <div className="my-6">
             {isDM ? (
               // A conversation opens on the person, not on a channel glyph.
-              <img src={channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id)} alt="" className="w-20 h-20 rounded-full object-cover mb-3" />
+              <img src={proxiedImageUrl(channel.avatar_url || defaultAvatar(channel.recipients?.[0]?.id ?? channel.id))} alt="" className="w-20 h-20 rounded-full object-cover mb-3" />
             ) : (
               <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3">
                 <HeaderIcon className="w-10 h-10 text-d-strong" />
@@ -1207,7 +1247,7 @@ export default function ChatArea({
                   </div>
                 ) : (
                   <img
-                    src={msg.avatar_url || defaultAvatar(msg.user_id)}
+                    src={proxiedImageUrl(msg.avatar_url || defaultAvatar(msg.user_id))}
                     alt=""
                     onClick={() => onSelectUser?.(msg.user_id)}
                     onContextMenu={(e) => {
@@ -1559,12 +1599,39 @@ export default function ChatArea({
           </div>
         )}
 
+        {isUploading && (
+          <div
+            className="mb-2 px-3 py-2 bg-d-surface rounded-lg border border-d-divider text-xs text-d-text2 flex items-center gap-2"
+            role="status"
+            data-testid="upload-progress"
+          >
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-d-brand shrink-0" aria-hidden="true" />
+            <span className="shrink-0">
+              {t('chat.uploading')}{uploadProgress !== null ? ` ${Math.round(uploadProgress * 100)}%` : ''}
+            </span>
+            <div
+              className="h-1.5 flex-1 rounded-full bg-d-base overflow-hidden"
+              role="progressbar"
+              aria-label={t('chat.uploading')}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={uploadProgress !== null ? Math.round(uploadProgress * 100) : undefined}
+            >
+              <div
+                className="h-full bg-d-brand transition-[width] duration-150"
+                style={{ width: `${Math.round((uploadProgress ?? 0) * 100)}%` }}
+              />
+            </div>
+            {sendQueued && <span className="shrink-0 text-d-text3">{t('chat.sendAfterUpload')}</span>}
+          </div>
+        )}
+
         {attachments.length > 0 && (
           <div className="mb-2 p-2.5 bg-d-surface rounded-lg border border-d-divider flex flex-wrap gap-3">
             {attachments.map((att, i) => (
               <div key={att.id ?? i} className="relative group bg-d-base p-1 rounded-lg border border-d-divider flex items-center gap-2">
                 {att.file_type === 'image' ? (
-                  <img src={att.thumbnail_url ?? att.url} alt="" className="w-14 h-14 rounded object-cover" />
+                  <img src={proxiedImageUrl(att.thumbnail_url ?? att.url)} alt="" className="w-14 h-14 rounded object-cover" />
                 ) : (
                   <div className="w-14 h-14 bg-d-surface rounded flex items-center justify-center text-xs text-d-brand font-semibold">
                     FILE
@@ -1803,9 +1870,10 @@ export default function ChatArea({
           {prefs.appearance.showSendButton && (
           <button
             type="submit"
-            disabled={(!inputText.trim() && attachments.length === 0) || !canSend || isArchived}
+            disabled={isUploading || (!inputText.trim() && attachments.length === 0) || !canSend || isArchived}
+            aria-busy={isUploading ? 'true' : undefined}
             className={`p-1.5 rounded-full transition-colors mb-0.5 ${
-              (inputText.trim() || attachments.length > 0) && canSend && !isArchived
+              (inputText.trim() || attachments.length > 0) && canSend && !isArchived && !isUploading
                 ? 'bg-d-brand text-white hover:bg-d-brandhover'
                 : 'text-d-text4 cursor-not-allowed'
             }`}
@@ -1942,7 +2010,7 @@ function Attachment({
       <div
         className="relative rounded-lg overflow-hidden bg-cover bg-center max-w-sm"
         style={{
-          backgroundImage: att.placeholder ? `url(${att.placeholder})` : undefined,
+          backgroundImage: att.placeholder ? cssImageUrl(att.placeholder) : undefined,
           aspectRatio: ratio ? String(ratio) : undefined,
           maxHeight: '18rem',
           width: att.width ? Math.min(att.width, 384) : undefined
@@ -1975,7 +2043,7 @@ function Attachment({
       <video
         src={att.url}
         controls
-        poster={att.variants?.poster?.url}
+        poster={proxiedImageUrl(att.variants?.poster?.url)}
         className="max-w-md max-h-72 rounded-lg border border-d-surface bg-black"
       />
     );
