@@ -207,9 +207,18 @@ async function sendMessage(page, text) {
 }
 
 async function hoverAction(page, text, title) {
+  // The hover toolbar exists only for the row under the pointer. A virtualized
+  // list can shift a row after it is hovered (a message arrives, an image or
+  // font finishes loading), leaving the pointer over another row — re-hover
+  // and retry, as a person would.
   const row = msgRow(page, text).first();
-  await row.hover();
   const btn = row.locator(`button[title^="${title}"]`).first();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await row.scrollIntoViewIfNeeded().catch(() => {});
+    await row.hover();
+    if (await btn.isVisible().catch(() => false)) break;
+    await page.waitForTimeout(250);
+  }
   await btn.click({ timeout: T });
 }
 
