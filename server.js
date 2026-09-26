@@ -38,6 +38,7 @@ import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
 import filesRouter from './routes/files.js';
+import mediaRouter from './routes/media.js'; // media pipeline
 import * as messageService from './services/messages.js';
 import * as guildService from './services/guilds.js';
 import * as userService from './services/users.js';
@@ -239,6 +240,7 @@ app.get('/api/meta/permissions', (_req, res) => {
 app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
+app.use(mediaRouter); // media pipeline: /api/media/*, S3 fallback for /uploads/*
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)
 // is fetched by the server, so viewers' browsers never contact third-party
