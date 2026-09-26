@@ -355,6 +355,10 @@ export async function createMessage({
 
   // Webhooks and system messages skip moderation and carry no user; every real
   // sender must be able to see the channel and hold SEND_MESSAGES in it.
+  if (!Array.isArray(attachments)) attachments = [];
+  if (attachments.length > 10) {
+    throw new ApiError('A message can carry at most 10 attachments', { code: 'TOO_MANY_ATTACHMENTS' });
+  }
   let senderPermissions = '0';
   if (!skipModeration && userId) {
     const access = await assertChannelAccess({
@@ -489,6 +493,9 @@ export async function createMessage({
         `SELECT * FROM files WHERE id = ? AND deleted_at IS NULL`, [fileId]
       );
       if (!file) continue; // silently drop unknown ids rather than 500
+      // Someone else's private upload cannot be re-posted by id: that would
+      // publish its name, size and dimensions and pin it against GC.
+      if (file.visibility === 'private' && file.uploader_id !== userId) continue;
 
       // The waveform is the one field the client is the authority on — it is a
       // visual summary of audio the browser already decoded, and re-deriving it
@@ -710,6 +717,9 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
   );
   if (!message) throw ApiError.notFound('Message');
   if (message.user_id !== userId) throw ApiError.forbidden('You can only edit your own messages');
+  // The author must still be able to see the channel — someone kicked, or
+  // hidden from it by an overwrite, cannot keep rewriting what others read.
+  const access = await assertChannelAccess({ channelId: message.channel_id, userId });
 
   // An edit may change the text, the embeds, the components, or any mix. A
   // bot updating only its buttons should not have to resend the text.
@@ -723,6 +733,26 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
     throw new ApiError('An edit cannot empty a message — delete it instead', { code: 'EMPTY_MESSAGE' });
   }
   const mentions = parseMentions(trimmed);
+
+  // AutoMod applies to edits exactly as to sends; otherwise posting something
+  // harmless and editing the blocked words in afterwards defeats every rule.
+  if (!keepsContent && trimmed !== message.content && message.server_id) {
+    const { roleIds } = await resolveSenderContext(message.server_id, userId);
+    const verdict = await automod.evaluate({
+      serverId: message.server_id, channelId: message.channel_id, userId,
+      content: trimmed, memberRoleIds: roleIds, permissions: access.permissions ?? '0'
+    });
+    if (verdict.blocked) {
+      await automod.logHit({
+        serverId: message.server_id, userId, channelId: message.channel_id,
+        rule: verdict.rule, reason: verdict.reason, content: trimmed
+      });
+      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+        status: 403, code: 'AUTOMOD_BLOCKED',
+        details: { rule: verdict.rule?.name, reason: verdict.reason }
+      });
+    }
+  }
 
   await transaction(async () => {
     // Keep the previous revision so an edit history is possible later.
@@ -790,7 +820,16 @@ export async function deleteMessage({ messageId, userId, canManageMessages = fal
 }
 
 /** Toggle one user's reaction. Returns the fresh aggregate for broadcasting. */
+// Discord allows 20 distinct reactions per message; the emoji key itself is a
+// unicode sequence or `name:id`, never kilobytes of text.
+const MAX_UNIQUE_REACTIONS = 20;
+const MAX_EMOJI_LENGTH = 64;
+
 export async function toggleReaction({ messageId, userId, emoji, emojiId = null }) {
+  emoji = String(emoji ?? '').trim();
+  if (!emoji || emoji.length > MAX_EMOJI_LENGTH) {
+    throw new ApiError('Invalid emoji', { code: 'INVALID_EMOJI' });
+  }
   const message = await getQuery(
     `SELECT id, channel_id FROM messages WHERE id = ? AND deleted_at IS NULL`, [messageId]
   );
@@ -825,6 +864,20 @@ export async function toggleReaction({ messageId, userId, emoji, emojiId = null 
     `SELECT 1 FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?`,
     [messageId, userId, emoji]
   );
+
+  if (!existing) {
+    const known = await getQuery(
+      `SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ? LIMIT 1`, [messageId, emoji]
+    );
+    if (!known) {
+      const { n } = await getQuery(
+        `SELECT count(DISTINCT emoji) AS n FROM reactions WHERE message_id = ?`, [messageId]
+      );
+      if (n >= MAX_UNIQUE_REACTIONS) {
+        throw new ApiError('Maximum number of reactions reached', { code: 'MAX_REACTIONS' });
+      }
+    }
+  }
 
   if (existing) {
     await runQuery(
@@ -915,8 +968,10 @@ export async function searchMessages({
   // ever posted here" is a perfectly ordinary thing to ask for.
   if (!term && !hasFilters(parsed.filters)) return [];
 
-  const where = ['m.deleted_at IS NULL'];
-  const filterParams = [];
+  // An ephemeral reply exists for exactly one person; search must not surface
+  // it to anyone else.
+  const where = ['m.deleted_at IS NULL', '(m.ephemeral_user_id IS NULL OR m.ephemeral_user_id = ?)'];
+  const filterParams = [viewerId ?? ''];
   if (channelId) { where.push('m.channel_id = ?'); filterParams.push(channelId); }
   if (serverId)  { where.push('m.server_id = ?');  filterParams.push(serverId); }
   if (authorId)  { where.push('m.user_id = ?');    filterParams.push(authorId); }
@@ -1224,10 +1279,25 @@ export async function bulkDeleteMessages({ channelId, messageIds, userId }) {
   const deletable = rows.map((r) => r.id);
   if (!deletable.length) return { channel_id: channelId, ids: [] };
 
-  await runQuery(
-    `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      WHERE id IN (${deletable.map(() => '?').join(',')})`,
-    deletable
-  );
+  const marks = deletable.map(() => '?').join(',');
+  // Same bookkeeping as a single delete: attachment references are released
+  // (or the bytes are never garbage-collected) and the search index forgets
+  // the text.
+  await transaction(async () => {
+    const attachments = await allQuery(
+      `SELECT file_id FROM attachments WHERE message_id IN (${marks})`, deletable
+    );
+    for (const a of attachments) await releaseReference(a.file_id);
+    await runQuery(
+      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id IN (${marks})`,
+      deletable
+    );
+    await runQuery(`DELETE FROM messages_fts WHERE message_id IN (${marks})`, deletable);
+    await runQuery(
+      `UPDATE channels SET message_count = MAX(0, message_count - ?) WHERE id = ?`,
+      [deletable.length, channelId]
+    );
+  });
   return { channel_id: channelId, ids: deletable };
 }

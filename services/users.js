@@ -27,16 +27,29 @@ export async function getUser(userId, viewerId = null) {
     `SELECT ${PUBLIC_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`, [userId]
   );
   if (!user) throw ApiError.notFound('User');
-  const mutualServers = await allQuery(
-    `SELECT s.id, s.name, s.icon_url
-       FROM server_members sm JOIN servers s ON s.id = sm.server_id
-      WHERE sm.user_id = ? AND sm.left_at IS NULL AND s.deleted_at IS NULL`,
-    [userId]
-  );
+  // "Mutual" means shared with the viewer. Listing every server the target
+  // is in would disclose private servers to anyone who can look them up.
+  const mutualServers = !viewerId || viewerId === userId
+    ? await allQuery(
+        `SELECT s.id, s.name, s.icon_url
+           FROM server_members sm JOIN servers s ON s.id = sm.server_id
+          WHERE sm.user_id = ? AND sm.left_at IS NULL AND s.deleted_at IS NULL`,
+        [userId]
+      )
+    : await allQuery(
+        `SELECT s.id, s.name, s.icon_url
+           FROM server_members sm
+           JOIN server_members me ON me.server_id = sm.server_id AND me.user_id = ? AND me.left_at IS NULL
+           JOIN servers s ON s.id = sm.server_id
+          WHERE sm.user_id = ? AND sm.left_at IS NULL AND s.deleted_at IS NULL`,
+        [viewerId, userId]
+      );
 
   // SQLite has no boolean type; normalise on the way out so the wire shape is
   // the same here as it is on a message.
   const shaped = { ...user, is_bot: Boolean(user.is_bot), mutual_servers: mutualServers };
+  // "Invisible" is only ever revealed to its owner.
+  if (viewerId && viewerId !== userId && shaped.status === 'invisible') shaped.status = 'offline';
 
   // Private profile (Discord, Aug 2026): the bio and banner are what a
   // profile "shows", so those are what visibility hides. Name, avatar and
@@ -129,6 +142,28 @@ export async function updateProfile({ userId, patch }) {
 
   // Clients send the URL they got back from an upload, not the file id. Resolve
   // it so the file gets a reference and survives garbage collection.
+  // Discord's limits; unbounded text here ends up in every member list,
+  // message header and broadcast.
+  const LIMITS = { display_name: 32, bio: 190, pronouns: 40, custom_status: 128, locale: 16, theme: 32 };
+  for (const [field, max] of Object.entries(LIMITS)) {
+    if (patch[field] === undefined || patch[field] === null) continue;
+    if (typeof patch[field] !== 'string' || patch[field].length > max) {
+      throw new ApiError(`${field} must be text of at most ${max} characters`, { code: 'INVALID_FIELD' });
+    }
+  }
+  if (patch.status !== undefined
+      && !['online', 'idle', 'dnd', 'offline', 'invisible'].includes(patch.status)) {
+    throw new ApiError(`Invalid status '${patch.status}'`, { code: 'INVALID_STATUS' });
+  }
+  for (const field of ['avatar_url', 'banner_url']) {
+    const value = patch[field];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string' || value.length > 2048
+        || !(value.startsWith('/') || /^https?:\/\//i.test(value))) {
+      throw new ApiError(`${field} must be an http(s) or same-origin URL`, { code: 'INVALID_URL' });
+    }
+  }
+
   const resolved = { ...patch };
   for (const [urlField, idField] of [['avatar_url', 'avatar_file_id'], ['banner_url', 'banner_file_id']]) {
     if (resolved[urlField] === undefined || resolved[idField] !== undefined) continue;

@@ -9,7 +9,9 @@
 import express from 'express';
 import fs from 'fs';
 
-import { ApiError, asyncRoute, parseLimit } from '../lib/httpUtils.js';
+import crypto from 'crypto';
+
+import { ApiError, asyncRoute, parseLimit, requireUser } from '../lib/httpUtils.js';
 import { getFileType } from '../lib/mediaProbe.js';
 import {
   storeFile, getFile, getVariant, deleteFile, listFilesForUser,
@@ -68,36 +70,51 @@ async function handleSingle(req, res, category, field) {
   res.json(toDescriptor(file));
 }
 
+/** The caller's own id; a `userId` query naming someone else is refused. */
+function ownUserId(req) {
+  if (req.query.userId && req.query.userId !== req.userId) {
+    throw ApiError.forbidden('You can only list your own files');
+  }
+  return req.userId;
+}
+
+/** A private file is visible only to its uploader (or via a signed URL). */
+function assertCanSeeFile(req, file) {
+  if (file.visibility === 'private' && file.uploader_id !== req.userId) {
+    throw ApiError.forbidden('This file is private');
+  }
+}
+
 // --- upload endpoints --------------------------------------------------------
 
 // Legacy generic endpoint. Kept because the original client calls it.
-router.post('/upload', uploadAttachment.single('file'), asyncRoute(async (req, res) => {
+router.post('/upload', requireUser, uploadAttachment.single('file'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'attachments', 'file');
 }));
 
-router.post('/upload/avatar', uploadAvatar.single('avatar'), asyncRoute(async (req, res) => {
+router.post('/upload/avatar', requireUser, uploadAvatar.single('avatar'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'avatars', 'avatar');
 }));
 
-router.post('/upload/banner', uploadBanner.single('banner'), asyncRoute(async (req, res) => {
+router.post('/upload/banner', requireUser, uploadBanner.single('banner'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'banners', 'banner');
 }));
 
-router.post('/upload/server-icon', uploadServerIcon.single('icon'), asyncRoute(async (req, res) => {
+router.post('/upload/server-icon', requireUser, uploadServerIcon.single('icon'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'icons', 'icon');
 }));
 
-router.post('/upload/emoji', uploadEmoji.single('emoji'), asyncRoute(async (req, res) => {
+router.post('/upload/emoji', requireUser, uploadEmoji.single('emoji'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'emojis', 'emoji');
 }));
 
-router.post('/upload/sticker', uploadSticker.single('sticker'), asyncRoute(async (req, res) => {
+router.post('/upload/sticker', requireUser, uploadSticker.single('sticker'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'stickers', 'sticker');
 }));
 
 // Multi-file message attachments. Partial success is reported per file rather
 // than failing the whole batch — one oversized image should not lose the rest.
-router.post('/upload/attachments', uploadAttachment.array('files', 10), asyncRoute(async (req, res) => {
+router.post('/upload/attachments', requireUser, uploadAttachment.array('files', 10), asyncRoute(async (req, res) => {
   if (!req.files?.length) throw new ApiError('No files uploaded', { code: 'NO_FILE' });
 
   const attachments = [];
@@ -139,9 +156,10 @@ router.get('/files/limits', (_req, res) => {
 });
 
 /** Current user's quota. */
-router.get('/files/usage', asyncRoute(async (req, res) => {
-  const userId = req.query.userId ?? req.userId;
-  if (!userId) throw ApiError.unauthorized();
+router.get('/files/usage', requireUser, asyncRoute(async (req, res) => {
+  // Only ever your own: `?userId=` is accepted for older clients but must
+  // name the caller, or anyone could read anyone's upload inventory.
+  const userId = ownUserId(req);
   const usage = await getStorageUsage(userId);
   if (!usage) throw ApiError.notFound('User');
 
@@ -158,9 +176,8 @@ router.get('/files/usage', asyncRoute(async (req, res) => {
 }));
 
 /** Paginated list of a user's uploads — powers a media gallery / storage manager. */
-router.get('/files', asyncRoute(async (req, res) => {
-  const userId = req.query.userId ?? req.userId;
-  if (!userId) throw ApiError.unauthorized();
+router.get('/files', requireUser, asyncRoute(async (req, res) => {
+  const userId = ownUserId(req);
   const rows = await listFilesForUser(userId, {
     category: req.query.category ?? null,
     limit: parseLimit(req.query.limit, { fallback: 50, max: 200 }),
@@ -173,9 +190,10 @@ router.get('/files', asyncRoute(async (req, res) => {
   });
 }));
 
-router.get('/files/:fileId/meta', asyncRoute(async (req, res) => {
+router.get('/files/:fileId/meta', requireUser, asyncRoute(async (req, res) => {
   const file = await getFile(req.params.fileId);
   if (!file) throw ApiError.notFound('File');
+  assertCanSeeFile(req, file);
   const refs = await allQuery(
     `SELECT message_id FROM attachments WHERE file_id = ? LIMIT 20`, [req.params.fileId]
   );
@@ -183,7 +201,7 @@ router.get('/files/:fileId/meta', asyncRoute(async (req, res) => {
 }));
 
 /** Mint a time-limited URL for a private file. */
-router.post('/files/:fileId/signed-url', asyncRoute(async (req, res) => {
+router.post('/files/:fileId/signed-url', requireUser, asyncRoute(async (req, res) => {
   const file = await getFile(req.params.fileId);
   if (!file) throw ApiError.notFound('File');
   if (file.visibility === 'private' && file.uploader_id !== req.userId) {
@@ -281,22 +299,27 @@ router.get('/files/:fileId', asyncRoute(async (req, res) => {
 
 // --- mutation ----------------------------------------------------------------
 
-router.delete('/files/:fileId', asyncRoute(async (req, res) => {
+router.delete('/files/:fileId', requireUser, asyncRoute(async (req, res) => {
   const file = await getQuery(`SELECT * FROM files WHERE id = ?`, [req.params.fileId]);
   if (!file) throw ApiError.notFound('File');
-  if (file.uploader_id && file.uploader_id !== req.userId) {
+  // A file with no uploader (legacy/anonymous) belongs to nobody, so nobody
+  // but maintenance may delete it.
+  if (file.uploader_id !== req.userId) {
     throw ApiError.forbidden('Only the uploader can delete this file');
   }
   await deleteFile(file.id, { force: req.query.force === 'true' });
   res.json({ success: true, id: file.id });
 }));
 
-router.post('/files/:fileId/reference', asyncRoute(async (req, res) => {
+// Raw reference-count manipulation. Releasing a reference makes a file
+// GC-eligible, so an open endpoint would let anyone get someone else's bytes
+// deleted by the next sweep. Maintenance only.
+router.post('/files/:fileId/reference', requireAdmin, asyncRoute(async (req, res) => {
   await addReference(req.params.fileId, Number(req.body?.count) || 1);
   res.json({ success: true });
 }));
 
-router.delete('/files/:fileId/reference', asyncRoute(async (req, res) => {
+router.delete('/files/:fileId/reference', requireAdmin, asyncRoute(async (req, res) => {
   await releaseReference(req.params.fileId, Number(req.query?.count) || 1);
   res.json({ success: true });
 }));
@@ -307,7 +330,11 @@ router.delete('/files/:fileId/reference', asyncRoute(async (req, res) => {
 function requireAdmin(req, _res, next) {
   const token = process.env.ADMIN_TOKEN;
   if (!token) return next(ApiError.forbidden('Maintenance endpoints require ADMIN_TOKEN to be set'));
-  if (req.get('x-admin-token') !== token) return next(ApiError.forbidden());
+  const given = Buffer.from(String(req.get('x-admin-token') ?? ''));
+  const expected = Buffer.from(token);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+    return next(ApiError.forbidden());
+  }
   next();
 }
 

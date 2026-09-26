@@ -8,6 +8,9 @@
 
 import crypto from 'crypto';
 import dns from 'dns/promises';
+import { lookup as dnsLookup } from 'dns';
+import http from 'http';
+import https from 'https';
 import net from 'net';
 
 import { runQuery, getQuery } from '../db.js';
@@ -15,6 +18,7 @@ import { runQuery, getQuery } from '../db.js';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
 const MAX_BYTES = 256 * 1024;   // enough for <head>, not enough to be a download
+const MAX_REDIRECTS = 3;
 
 const hashUrl = (url) => crypto.createHash('sha256').update(url).digest('hex').slice(0, 32);
 
@@ -24,7 +28,8 @@ async function assertPublicUrl(rawUrl) {
   try { url = new URL(rawUrl); } catch { throw new Error('URL ไม่ถูกต้อง'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('รองรับเฉพาะ http/https');
 
-  const host = url.hostname;
+  // WHATWG keeps the brackets on an IPv6 literal ("[::1]").
+  const host = url.hostname.replace(/^\[|\]$/g, '');
   if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host)) {
     throw new Error('ปฏิเสธ host ภายในเครื่อง');
   }
@@ -45,19 +50,104 @@ async function assertPublicUrl(rawUrl) {
   return url;
 }
 
-function isPrivateAddress(ip) {
+export function isPrivateAddress(ip) {
   if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
+    const [a, b, c] = ip.split('.').map(Number);
     return (
       a === 10 || a === 127 || a === 0 ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168) ||
       (a === 169 && b === 254) ||   // link-local, incl. cloud metadata
-      (a === 100 && b >= 64 && b <= 127)
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 192 && b === 0 && c === 0) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      a >= 224                      // multicast, reserved, broadcast
     );
   }
+  if (!net.isIPv6(ip)) return true;  // not an address we understand: refuse
   const lower = ip.toLowerCase();
-  return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80');
+  // IPv4-mapped / -translated forms (::ffff:127.0.0.1, ::ffff:7f00:1,
+  // 64:ff9b::a9fe:a9fe) reach the IPv4 address they embed.
+  const mapped = lower.match(/^(?:::ffff:(?:0:)?|64:ff9b::)(.+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    if (net.isIPv4(tail)) return isPrivateAddress(tail);
+    const hex = tail.split(':');
+    if (hex.length === 2) {
+      const hi = parseInt(hex[0], 16); const lo = parseInt(hex[1], 16);
+      return isPrivateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    return true;
+  }
+  return lower === '::1' || lower === '::' || lower.startsWith('fc') || lower.startsWith('fd')
+    || lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea')
+    || lower.startsWith('feb') || lower.startsWith('ff');
+}
+
+/**
+ * DNS lookup for outbound unfurls that refuses private answers *at connect
+ * time*. Validating a name once and then letting fetch() resolve it again is
+ * a DNS-rebinding hole: the second answer can be 127.0.0.1.
+ */
+function guardedLookup(hostname, options, callback) {
+  dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) return callback(err);
+    const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: options?.family }];
+    const bad = list.find(({ address }) => isPrivateAddress(address));
+    if (bad || list.length === 0) {
+      return callback(Object.assign(new Error('ปฏิเสธที่อยู่ภายในเครือข่าย'), { code: 'EPRIVATE' }));
+    }
+    if (options?.all) return callback(null, list);
+    return callback(null, list[0].address, list[0].family ?? (net.isIPv6(list[0].address) ? 6 : 4));
+  });
+}
+
+/**
+ * GET with every hop checked. Redirects are followed by hand (at most
+ * MAX_REDIRECTS), and each target goes through assertPublicUrl again — with
+ * `redirect: 'follow'` a public page could 302 the unfurler straight to the
+ * cloud metadata service.
+ */
+async function safeGet(startUrl, { signal }) {
+  let current = await assertPublicUrl(startUrl);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const response = await new Promise((resolve, reject) => {
+      const client = current.protocol === 'https:' ? https : http;
+      const req = client.get(current, {
+        lookup: guardedLookup,
+        signal,
+        headers: {
+          // Many sites only emit OpenGraph tags for a bot-looking agent.
+          'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
+          Accept: 'text/html,application/xhtml+xml'
+        }
+      }, resolve);
+      req.on('error', reject);
+    });
+    const status = response.statusCode ?? 0;
+    if (status >= 300 && status < 400 && response.headers.location) {
+      response.resume();
+      if (hop === MAX_REDIRECTS) throw new Error('too many redirects');
+      current = await assertPublicUrl(new URL(response.headers.location, current).href);
+      continue;
+    }
+    if (status < 200 || status >= 300) {
+      response.resume();
+      throw new Error(`HTTP ${status}`);
+    }
+    return { response, url: current };
+  }
+  throw new Error('too many redirects');
+}
+
+/** Only http(s) image URLs survive into an embed. */
+function safeHttpUrl(value, base) {
+  try {
+    const url = new URL(value, base);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 const META_PATTERNS = {
@@ -105,38 +195,26 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
   }
 
   let embed = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const url = await assertPublicUrl(rawUrl);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    const response = await fetch(url, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: {
-        // Many sites only emit OpenGraph tags for a bot-looking agent.
-        'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
-        Accept: 'text/html,application/xhtml+xml'
-      }
-    }).finally(() => clearTimeout(timer));
-
-    const contentType = response.headers.get('content-type') ?? '';
+    const { response, url } = await safeGet(rawUrl, { signal: controller.signal });
+    const contentType = String(response.headers['content-type'] ?? '');
 
     if (contentType.startsWith('image/')) {
+      response.destroy();
       embed = { type: 'image', url: rawUrl, image: rawUrl };
     } else if (contentType.includes('html')) {
       // Read at most MAX_BYTES rather than buffering an arbitrary page.
-      const reader = response.body?.getReader();
       const chunks = [];
       let received = 0;
-      while (reader && received < MAX_BYTES) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
+      for await (const chunk of response) {
+        chunks.push(chunk);
+        received += chunk.length;
+        if (received >= MAX_BYTES) break;
       }
-      reader?.cancel().catch(() => {});
-      const html = Buffer.concat(chunks.map(Buffer.from)).toString('utf8');
+      response.destroy();
+      const html = Buffer.concat(chunks).toString('utf8');
 
       const title = extract(html, META_PATTERNS.title);
       if (title) {
@@ -146,15 +224,23 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
           url: rawUrl,
           title,
           description: extract(html, META_PATTERNS.description),
-          image: image ? new URL(image, url).href : null,
+          image: image ? safeHttpUrl(image, url) : null,
           site_name: extract(html, META_PATTERNS.siteName) ?? url.hostname,
-          color: extract(html, META_PATTERNS.themeColor)
+          // Rendered into a style; only a plain colour is accepted.
+          color: /^#[0-9a-f]{3,8}$/i.test(extract(html, META_PATTERNS.themeColor) ?? '')
+            ? extract(html, META_PATTERNS.themeColor) : null
         };
+      } else {
+        response.destroy();
       }
+    } else {
+      response.destroy();
     }
   } catch (err) {
     // Cache the miss too, so one bad link is not refetched on every render.
     embed = null;
+  } finally {
+    clearTimeout(timer);
   }
 
   await runQuery(

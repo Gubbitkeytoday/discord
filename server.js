@@ -10,6 +10,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
@@ -60,7 +61,8 @@ import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
 import {
-  registerRealtime, resetVolatileState, fanOutMessage, sweepAfk
+  registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
+  revalidateRooms, emitToChannelViewers
 } from './realtime.js';
 import { requireUser } from './lib/httpUtils.js';
 
@@ -203,8 +205,8 @@ app.use('/api', filesRouter);
 
 // --- users -------------------------------------------------------------------
 
-app.get('/api/users', asyncRoute(async (_req, res) => {
-  res.json(await userService.listUsers());
+app.get('/api/users', requireUser, asyncRoute(async (_req, res) => {
+  res.json((await userService.listUsers()).map(publicUserEvent));
 }));
 
 // Every custom emoji the viewer may use, grouped by server — the picker's
@@ -249,6 +251,33 @@ app.put('/api/users/:userId/note', requireUser, writeRateLimit, asyncRoute(async
   }));
 }));
 
+/**
+ * Drop socket rooms a permission change just took away. Best-effort and
+ * off the request path: the change itself already committed.
+ */
+function refreshRooms(scope) {
+  revalidateRooms(io, scope).catch((err) => console.error('room revalidation failed:', err.message));
+}
+
+/** Channel lifecycle events go only to members who can view the channel. */
+function emitChannelEvent(channel, event, payload = channel) {
+  if (!channel?.server_id) return;
+  emitToChannelViewers(io, channel, event, payload)
+    .catch((err) => console.error(`${event} fan-out failed:`, err.message));
+}
+
+/** What everyone may learn about a user from a broadcast. */
+function publicUserEvent(user) {
+  if (!user) return user;
+  const { mutual_servers: _servers, ...rest } = user;
+  const hidden = (user.profile_visibility ?? 'everyone') !== 'everyone';
+  return {
+    ...rest,
+    status: rest.status === 'invisible' ? 'offline' : rest.status,
+    ...(hidden ? { bio: null, banner_url: null, pronouns: null } : {})
+  };
+}
+
 /** Reads scoped to one guild require membership in it. */
 async function requireMembership(req, serverId = req.params.serverId) {
   const resolved = await guildService.resolvePermissions({ userId: req.userId, serverId });
@@ -267,7 +296,10 @@ app.put('/api/users/:userId', asyncRoute(async (req, res) => {
   const updated = await userService.updateProfile({
     userId: req.params.userId, patch: req.body ?? {}
   });
-  io.emit('user_updated', updated);
+  // Everyone connected receives this, so it carries only the public view —
+  // never the full server list or a private profile's bio.
+  io.except(`user-${updated.id}`).emit('user_updated', publicUserEvent(updated));
+  io.to(`user-${updated.id}`).emit('user_updated', updated);
   res.json(updated);
 }));
 
@@ -278,7 +310,13 @@ app.patch('/api/users/:userId/presence', asyncRoute(async (req, res) => {
     status: req.body?.status,
     customStatus: req.body?.custom_status
   });
-  io.emit('presence_updated', {
+  // Others see "invisible" as offline, exactly as on the socket path.
+  io.except(`user-${updated.id}`).emit('presence_updated', {
+    userId: updated.id,
+    status: updated.status === 'invisible' ? 'offline' : updated.status,
+    custom_status: updated.custom_status
+  });
+  io.to(`user-${updated.id}`).emit('presence_updated', {
     userId: updated.id, status: updated.status, custom_status: updated.custom_status
   });
   res.json(updated);
@@ -382,6 +420,27 @@ async function emitMemberJoined(serverId, userId, detail) {
 }
 
 app.post('/api/servers/:serverId/join', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // Joining by id alone is only for guilds that opted into discovery (Discord's
+  // DISCOVERABLE feature). Every other guild is invite-only — without this,
+  // anyone who learned a server id could walk into a private server.
+  const target = await getQuery(
+    `SELECT features FROM servers WHERE id = ? AND deleted_at IS NULL`, [req.params.serverId]
+  );
+  if (!target) throw ApiError.notFound('Server');
+  let features = [];
+  try { features = JSON.parse(target.features || '[]'); } catch { features = []; }
+  const alreadyMember = (await guildService.resolvePermissions({
+    userId: req.userId, serverId: req.params.serverId
+  })).isMember;
+  const banned = await getQuery(
+    `SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?`, [req.params.serverId, req.userId]
+  );
+  if (banned) throw ApiError.forbidden('You are banned from this server');
+  if (!alreadyMember && !(Array.isArray(features) && features.includes('DISCOVERABLE'))) {
+    throw new ApiError('This server can only be joined with an invite', {
+      status: 403, code: 'INVITE_REQUIRED'
+    });
+  }
   const detail = await guildService.joinServer({
     serverId: req.params.serverId, userId: req.userId
   });
@@ -396,6 +455,7 @@ app.post('/api/servers/:serverId/leave', requireUser, asyncRoute(async (req, res
   io.to(req.params.serverId).emit('member_removed', {
     serverId: req.params.serverId, userId: req.userId, reason: 'leave'
   });
+  refreshRooms({ userIds: [req.userId], serverId: req.params.serverId });
   res.json(result);
 }));
 
@@ -454,6 +514,7 @@ app.delete('/api/servers/:serverId/members/:userId/roles/:roleId', requireUser, 
   await guildService.assertPermission({ userId: req.userId, serverId, permission: 'MANAGE_ROLES' });
   await guildService.removeRole({ serverId, userId, roleId, actorId: req.userId });
   io.to(serverId).emit('member_updated', { serverId, userId });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -467,6 +528,7 @@ app.post('/api/servers/:serverId/bans/:userId', requireUser, asyncRoute(async (r
     reason: req.body?.reason, deleteMessageSeconds: Number(req.body?.deleteMessageSeconds) || 0
   });
   io.to(serverId).emit('member_removed', { serverId, userId, reason: 'ban' });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -475,6 +537,7 @@ app.post('/api/servers/:serverId/kicks/:userId', requireUser, asyncRoute(async (
   await guildService.assertPermission({ userId: req.userId, serverId, permission: 'KICK_MEMBERS' });
   await guildService.kickMember({ serverId, userId, moderatorId: req.userId, reason: req.body?.reason });
   io.to(serverId).emit('member_removed', { serverId, userId, reason: 'kick' });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -537,7 +600,7 @@ app.post('/api/channels', requireUser, writeRateLimit, asyncRoute(async (req, re
     topic: req.body.topic ?? null,
     userId: req.userId
   });
-  io.to(serverId).emit('channel_created', channel);
+  emitChannelEvent(channel, 'channel_created');
   res.json(channel);
 }));
 
@@ -545,7 +608,7 @@ app.patch('/api/channels/:channelId', requireUser, asyncRoute(async (req, res) =
   const channel = await guildService.updateChannel({
     channelId: req.params.channelId, patch: req.body ?? {}, userId: req.userId
   });
-  if (channel.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  emitChannelEvent(channel, 'channel_updated');
   res.json(channel);
 }));
 
@@ -606,6 +669,7 @@ app.delete('/api/dms/:channelId/recipients/:userId', requireUser, asyncRoute(asy
     channelId: req.params.channelId, userId: req.userId, targetId: req.params.userId
   });
   io.to(`user-${req.params.userId}`).emit('dm_channel_removed', { id: req.params.channelId });
+  refreshRooms({ userIds: [req.params.userId], channelIds: [req.params.channelId] });
   await emitDmToRecipients(req.params.channelId, req.params.userId, 'dm_channel_updated');
   res.json(result);
 }));
@@ -691,7 +755,9 @@ app.get('/api/polls/:messageId/answers/:answerId/voters', requireUser, asyncRout
 
 const broadcastEvent = (event, kind = 'event_updated') => {
   if (!event) return;
-  io.to(`server-${event.server_id}`).emit(kind, event);
+  // The guild room is the server id itself (join_server); a `server-` prefix
+  // reached nobody, so event changes were never live.
+  io.to(event.server_id).emit(kind, event);
 };
 
 app.get('/api/servers/:serverId/events', requireUser, asyncRoute(async (req, res) => {
@@ -731,7 +797,7 @@ app.put('/api/events/:eventId/interest', requireUser, writeRateLimit, asyncRoute
     eventId: req.params.eventId, userId: req.userId,
     interested: req.body?.interested !== false
   });
-  io.to(`server-${event.server_id}`).emit('event_interest', {
+  io.to(event.server_id).emit('event_interest', {
     event_id: event.id, interested_count: event.interested_count
   });
   res.json(event);
@@ -955,6 +1021,7 @@ app.patch('/api/servers/:serverId/roles/:roleId', requireUser, asyncRoute(async 
     actorId: req.userId, patch: req.body ?? {}
   });
   io.to(req.params.serverId).emit('role_updated', role);
+  refreshRooms({ serverId: req.params.serverId });
   res.json(role);
 }));
 
@@ -963,6 +1030,7 @@ app.delete('/api/servers/:serverId/roles/:roleId', requireUser, asyncRoute(async
     serverId: req.params.serverId, roleId: req.params.roleId, actorId: req.userId
   });
   io.to(req.params.serverId).emit('role_deleted', { roleId: req.params.roleId });
+  refreshRooms({ serverId: req.params.serverId });
   res.json(result);
 }));
 
@@ -1056,7 +1124,7 @@ app.post('/api/channels/:channelId/threads', requireUser, writeRateLimit, asyncR
     userId: req.userId,
     autoArchiveDuration: Number(req.body?.autoArchiveDuration) || 1440
   });
-  if (thread.server_id) io.to(thread.server_id).emit('thread_created', thread);
+  emitChannelEvent(thread, 'thread_created');
   res.json(thread);
 }));
 
@@ -1087,7 +1155,7 @@ app.patch('/api/threads/:threadId', requireUser, asyncRoute(async (req, res) => 
     threadId: req.params.threadId, userId: req.userId,
     archived: Boolean(req.body?.archived), locked: req.body?.locked
   });
-  if (thread?.server_id) io.to(thread.server_id).emit('channel_updated', thread);
+  emitChannelEvent(thread, 'channel_updated');
   res.json(thread);
 }));
 
@@ -1370,6 +1438,8 @@ app.get('/api/users/@me/export', requireUser, asyncRoute(async (req, res) => {
 app.delete('/api/users/@me', requireUser, asyncRoute(async (req, res) => {
   const result = await dataRights.deleteAccount({ userId: req.userId });
   io.to(`user-${req.userId}`).emit('identify_error', { error: 'ACCOUNT_DELETED' });
+  // A deleted account must stop receiving anything at all.
+  io.in(`user-${req.userId}`).disconnectSockets(true);
   res.json(result);
 }));
 
@@ -1403,8 +1473,38 @@ app.post('/api/channels/:channelId/permissions/sync', requireUser, asyncRoute(as
     channelId: req.params.channelId, userId: req.userId
   });
   io.to(req.params.channelId).emit('channel_permissions_synced', result);
+  const synced = await getQuery(`SELECT server_id FROM channels WHERE id = ?`, [req.params.channelId]);
+  if (synced?.server_id) refreshRooms({ serverId: synced.server_id });
   res.json(result);
 }));
+
+// --- voice: ICE servers ------------------------------------------------------
+//
+// STUN is enough on most home networks; behind symmetric NAT or a strict
+// corporate firewall the mesh needs a TURN relay. Credentials use coturn's
+// REST scheme (use-auth-secret): short-lived, per user, derived from a shared
+// secret, so no long-lived TURN password ever reaches a browser.
+
+app.get('/api/voice/ice-servers', requireUser, (req, res) => {
+  const list = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  const stun = list(process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302');
+  const iceServers = stun.length ? [{ urls: stun }] : [];
+
+  const turn = list(process.env.TURN_URLS);
+  const secret = process.env.TURN_SECRET;
+  if (turn.length && secret) {
+    const ttl = Math.max(60, Number.parseInt(process.env.TURN_TTL_SECONDS, 10) || 86400);
+    const username = `${Math.floor(Date.now() / 1000) + ttl}:${req.userId}`;
+    const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
+    iceServers.push({ urls: turn, username, credential });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    iceServers,
+    iceTransportPolicy: process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all'
+  });
+});
 
 // --- calls in DMs ------------------------------------------------------------
 //
@@ -1537,7 +1637,7 @@ app.put('/api/servers/:serverId/onboarding/complete', requireUser, writeRateLimi
 // already fires for new posts; tag/pin changes go out as `forum_post_updated`.
 
 const broadcastForumPost = (post) => {
-  if (post?.server_id) io.to(post.server_id).emit('forum_post_updated', post);
+  if (post?.server_id) emitChannelEvent({ ...post, type: 'thread' }, 'forum_post_updated', post);
 };
 
 app.get('/api/channels/:channelId/forum/tags', requireUser, asyncRoute(async (req, res) => {
@@ -1573,7 +1673,7 @@ app.patch('/api/channels/:channelId/forum', requireUser, asyncRoute(async (req, 
   const channel = await forumService.updateForumSettings({
     channelId: req.params.channelId, userId: req.userId, patch: req.body ?? {}
   });
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  emitChannelEvent(channel, 'channel_updated');
   res.json(channel);
 }));
 
@@ -1599,8 +1699,9 @@ app.post('/api/channels/:channelId/forum/posts', requireUser, writeRateLimit, as
     nonce: req.body?.nonce ?? null
   });
   if (post.server_id) {
-    io.to(post.server_id).emit('thread_created', await threadService.getThread(post.id));
-    io.to(post.server_id).emit('forum_post_created', post);
+    const thread = await threadService.getThread(post.id);
+    emitChannelEvent(thread, 'thread_created');
+    emitChannelEvent(thread, 'forum_post_created', post);
   }
   res.status(201).json({ post, message });
 }));
@@ -1628,7 +1729,9 @@ app.put('/api/forum/posts/:threadId/pin', requireUser, asyncRoute(async (req, re
 
 // --- link embeds -------------------------------------------------------------
 
-app.post('/api/embeds/resolve', requireUser, asyncRoute(async (req, res) => {
+// Each call makes the server fetch third-party URLs, so it spends the write
+// budget rather than the (much larger) read budget.
+app.post('/api/embeds/resolve', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
   const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, 5) : [];
   if (req.body?.content) {
     res.json({ embeds: await linkEmbeds.resolveEmbedsForContent(req.body.content) });
@@ -1785,7 +1888,11 @@ app.put('/api/channels/:channelId/permissions/:targetType/:targetId', requireUse
     allow: req.body?.allow ?? '0', deny: req.body?.deny ?? '0'
   });
   const channel = await getQuery(`SELECT * FROM channels WHERE id = ?`, [req.params.channelId]);
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  if (channel?.server_id) {
+    // Viewers only; then evict sockets that just lost VIEW_CHANNEL here.
+    emitChannelEvent(channel, 'channel_updated');
+    refreshRooms({ serverId: channel.server_id });
+  }
   res.json(result);
 }));
 
@@ -1795,7 +1902,11 @@ app.delete('/api/channels/:channelId/permissions/:targetType/:targetId', require
     targetType: req.params.targetType, targetId: req.params.targetId
   });
   const channel = await getQuery(`SELECT * FROM channels WHERE id = ?`, [req.params.channelId]);
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  if (channel?.server_id) {
+    // Viewers only; then evict sockets that just lost VIEW_CHANNEL here.
+    emitChannelEvent(channel, 'channel_updated');
+    refreshRooms({ serverId: channel.server_id });
+  }
   res.json(result);
 }));
 
