@@ -198,6 +198,60 @@ function assertSafeAttrValue(name, value) {
   }
 }
 
+/**
+ * Splits markup into text runs and tags with a hand-written scanner (every
+ * step is a sticky match of a simple character class, so the whole pass is
+ * linear — a single backtracking tag regex is polynomial on unclosed tags).
+ * Anything that is not a well-formed tag is rejected as malformed.
+ */
+function* tokenizeMarkup(src) {
+  const NAME = /[A-Za-z][\w:.-]*/y;
+  const SPACE = /\s*/y;
+  const ATTR_NAME = /[^\s=/>]+/y;
+  const VALUE = /"[^"]*"|'[^']*'/y;
+  const at = (re, i) => { re.lastIndex = i; const m = re.exec(src); return m ? m[0] : null; };
+  let i = 0;
+  while (i < src.length) {
+    if (src[i] !== '<') {
+      const next = src.indexOf('<', i);
+      const end = next === -1 ? src.length : next;
+      yield { text: src.slice(i, end) };
+      i = end;
+      continue;
+    }
+    let j = i + 1;
+    const closing = src[j] === '/' ? '/' : '';
+    if (closing) j += 1;
+    const rawName = at(NAME, j);
+    if (!rawName) throw unsafe('malformed markup');
+    j += rawName.length;
+    const attrsStart = j;
+    let attrsEnd = j;
+    for (;;) {
+      const ws = at(SPACE, j);
+      if (!ws) break;
+      const attrName = at(ATTR_NAME, j + ws.length);
+      if (!attrName) break;
+      let k = j + ws.length + attrName.length;
+      const beforeEq = at(SPACE, k);
+      if (src[k + beforeEq.length] === '=') {
+        k += beforeEq.length + 1;
+        k += at(SPACE, k).length;
+        const value = at(VALUE, k);
+        if (!value) throw unsafe('malformed markup');
+        k += value.length;
+      }
+      j = attrsEnd = k;
+    }
+    j += at(SPACE, j).length;
+    const selfClosing = src[j] === '/' ? '/' : '';
+    if (selfClosing) j += 1;
+    if (src[j] !== '>') throw unsafe('malformed markup');
+    yield { closing, rawName, rawAttrs: src.slice(attrsStart, attrsEnd), selfClosing };
+    i = j + 1;
+  }
+}
+
 /** Drops <!-- … --> comments in one linear pass; an unterminated one is rejected. */
 function stripComments(src) {
   let out = '';
@@ -231,11 +285,7 @@ export function sanitizeSvg(input) {
   const stack = [];
   let dropDepth = 0;
   let sawRoot = false;
-  const TOKEN = /<(\/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=/>]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)>|([^<]+)|(<)/g;
-  let m;
-  while ((m = TOKEN.exec(src)) !== null) {
-    const [, closing, rawName, rawAttrs, selfClosing, text, stray] = m;
-    if (stray) throw unsafe('malformed markup');
+  for (const { closing, rawName, rawAttrs, selfClosing, text } of tokenizeMarkup(src)) {
     if (text !== undefined) {
       if (dropDepth) continue;
       const parent = stack[stack.length - 1];

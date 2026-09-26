@@ -548,3 +548,14 @@ test('SVG comments are stripped in linear time; unterminated or nested markers a
   assert.throws(() => sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><!-- x -- --></svg><!'));
   assert.throws(() => sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><<!-- -->!DOCTYPE x></svg>'));
 });
+
+test('SVG tokenizer stays linear on unclosed tags and keeps built-in art byte-identical', async () => {
+  const { sanitizeSvg } = await import('../services/cosmetics.js');
+  for (const piece of ['<A ', '<A !="" ', "<A !='' ", '<a b c=']) {
+    const started = Date.now();
+    assert.throws(() => sanitizeSvg(`<svg xmlns="http://www.w3.org/2000/svg">${piece.repeat(20000)}</svg>`));
+    assert.ok(Date.now() - started < 500, `${piece} must not be slow`);
+  }
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><g fill="#fff" ><rect width="1" height=\'1\' /></g></svg>';
+  assert.equal(sanitizeSvg(svg), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><g fill="#fff"><rect width="1" height="1"/></g></svg>');
+});
