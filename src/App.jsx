@@ -924,8 +924,8 @@ export default function App() {
     // change, account deletion). Say so, then take the normal sign-out path;
     // the note survives the reload and is repeated on the login screen.
     const onSessionRevoked = () => {
-      pushToast(t('auth.sessionRevoked'), { type: 'error', ttl: 6000 });
-      try { sessionStorage.setItem(SIGN_OUT_NOTICE_KEY, 'auth.sessionRevoked'); } catch { /* private mode */ }
+      pushToast(t('session.revoked'), { type: 'error', ttl: 6000 });
+      try { sessionStorage.setItem(SIGN_OUT_NOTICE_KEY, 'session.revoked'); } catch { /* private mode */ }
       handleSignOut();
     };
     // The server removed us from a voice room (moved out, kicked, lost
@@ -937,7 +937,7 @@ export default function App() {
       setCurrentVoiceChannel(null);
       setActiveVoiceParticipants([]);
       setScreenSharing(false);
-      pushToast(t('voice.disconnected'), { type: 'info', ttl: 5000 });
+      pushToast(t('voice.disconnectedByServer'), { type: 'info', ttl: 5000 });
     };
 
     const handlers = {
