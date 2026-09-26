@@ -17,11 +17,13 @@
    3. LEGACY aliases, `--color-d-*`, so the ~2 000 existing `bg-d-surface`,
       `text-d-text3` … classes keep working unchanged. They point at layer 2.
 
-   Hooks for later rounds:
-   - Tinted / gradient themes: set `data-tint` on <html> plus `--tint-color`
-     and `--tint-amount` (and `--tint-text-*`). Every surface is then
-     `color-mix(in oklab, tint, raw)`, Discord's own approach, without
-     touching a component. Leave raised/floating opaque for menus.
+   Theme layers on top (src/theme/, applied by theme/engine.js):
+   - Gradient / custom themes: `data-tint="gradient"` + `--tint-*` variables
+     (section "Gradient themes" below). Every surface stays opaque and shows
+     the viewport-wide gradient through a scrim thick enough for 4.5:1.
+   - Seasons (`data-season`), UI font (`data-ui-font`), density
+     (`data-ui-density` scales Tailwind's `--spacing`), corner radius
+     (`data-radius`) and text spacing (`data-text-spacing`).
    - Accessibility › Saturation multiplies the chroma of every accent (brand,
      status, link, danger …) through `--sat` (OKLCH). Unlike a CSS filter it
      leaves avatars, images and video alone, and it does not turn :root into
@@ -207,7 +209,7 @@
      font. CJK faces are deliberately NOT in the generic stack: Han characters
      must be drawn with the Japanese, Korean, Simplified or Traditional forms
      of the text's own language, which the :lang() rules below select. */
-  --font-sans: 'Inter', 'Kanit', system-ui, -apple-system, 'Segoe UI', Roboto,
+  --font-sans: var(--font-ui-lead, 'Inter'), 'Kanit', system-ui, -apple-system, 'Segoe UI', Roboto,
     'Noto Sans', 'Noto Sans Thai', 'Helvetica Neue', Arial, sans-serif,
     'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
   --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
@@ -332,32 +334,240 @@
   --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.08);
 }
 
-/* Tinted themes (gradient / custom themes build on this): pull every surface,
-   border and text token toward a theme colour by a small amount. Off unless
-   <html data-tint> is set, so the common case resolves to plain hex values. */
-:root[data-tint] {
-  --color-bg-app: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-app));
-  --color-bg-sidebar: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-sidebar));
-  --color-bg-chat: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-chat));
-  --color-bg-surface: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-surface));
-  --color-bg-raised: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-raised));
-  --color-bg-input: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-input));
-  --color-bg-hover: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-hover));
-  --color-bg-selected: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-selected));
-  --color-bg-floating: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-floating));
-  --color-bg-panel: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-panel));
-  --color-bg-rowhover: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-rowhover));
-  --color-bg-deep: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-deep));
-  --color-bg-deepest: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-bg-deepest));
-  --color-text-strong: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-strong));
-  --color-text-default: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-default));
-  --color-text-subtle: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-subtle));
-  --color-text-muted: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-muted));
-  --color-text-faint: color-mix(in oklab, var(--tint-text-color) var(--tint-text-amount), var(--base-text-faint));
-  --color-border-subtle: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-border-subtle));
-  --color-border-strong: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-border-strong));
-  --color-control: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-control));
-  --color-control2: color-mix(in oklab, var(--tint-color) var(--tint-amount), var(--base-control2));
+/* ---------------------------------------------------------------------------
+   Gradient themes (12 free presets + custom themes) — src/theme/gradient.js.
+
+   theme/engine.js sets `data-tint="gradient"` and, computed from validated
+   hex stops and numbers only (never user CSS):
+     --tint-gradient        linear-gradient(<angle>deg, <stops>)
+     --tint-scrim-<layer>   the base theme's scrim colour at the layer's opacity
+     --tint-bg-<layer>      the flat equivalent at the gradient's average
+     --tint-overlay         white (dark base) / black (light base) row wash
+   The contrast guard picks the scrim so every text token keeps 4.5:1 at the
+   worst point of the gradient (scripts/test-themes-71.mjs proves it for all
+   presets). Each surface below is OPAQUE — scrim over the fixed, viewport-
+   wide gradient — so dialogs never show text through, yet the whole app
+   reads as one tinted sheet. High contrast and forced colours turn it off.
+   --------------------------------------------------------------------------- */
+:root[data-tint="gradient"] {
+  --color-bg-app: var(--tint-bg-app);
+  --color-bg-sidebar: var(--tint-bg-sidebar);
+  --color-bg-chat: var(--tint-bg-chat);
+  --color-bg-surface: var(--tint-bg-surface);
+  --color-bg-raised: var(--tint-bg-raised);
+  --color-bg-input: var(--tint-bg-input);
+  --color-bg-floating: var(--tint-bg-floating);
+  --color-bg-panel: var(--tint-bg-panel);
+  --color-bg-deep: var(--tint-bg-deep);
+  --color-bg-deepest: var(--tint-bg-deepest);
+  /* Row states wash whatever surface they sit on (guarded as overlays). */
+  --color-bg-rowhover: color-mix(in srgb, var(--tint-overlay) 3%, transparent);
+  --color-bg-hover: color-mix(in srgb, var(--tint-overlay) 5%, transparent);
+  --color-bg-selected: color-mix(in srgb, var(--tint-overlay) 9%, transparent);
+  --color-border-subtle: color-mix(in srgb, var(--tint-overlay) 14%, transparent);
+}
+/* Text on a gradient is a notch stronger than on the flat theme (as Discord
+   tints its text), so the scrim can stay thin and the colours show. The
+   values are src/theme/palettes.js GRADIENT_TEXT (the test checks). */
+:root[data-tint="gradient"][data-theme="dark"] {
+  --color-text-default: #e4e4e7;
+  --color-text-subtle: #cdced3;
+  --color-text-muted: #b8b9bf;
+  --color-text-faint: #adaeb4;
+  --color-text-link: #94c4fa;
+  --color-text-brand: #b0b9ff;
+  --color-text-danger: #ff9893;
+  --color-text-positive: #78d493;
+  --color-text-warning: #f3bf52;
+}
+:root[data-tint="gradient"][data-theme="light"] {
+  --color-text-default: #232428;
+  --color-text-subtle: #35373d;
+  --color-text-muted: #45474f;
+  --color-text-faint: #4c4e56;
+  --color-text-link: #004c80;
+  --color-text-brand: #343fae;
+  --color-text-danger: #951c16;
+  --color-text-positive: #11552d;
+  --color-text-warning: #664200;
+}
+:root[data-tint="gradient"] :is(.bg-d-base, .bg-d-edge, .bg-bg-app) {
+  --tint-layer: var(--tint-scrim-app);
+}
+:root[data-tint="gradient"] :is(.bg-d-surface, .bg-bg-sidebar) { --tint-layer: var(--tint-scrim-sidebar); }
+:root[data-tint="gradient"] :is(.bg-d-canvas, .bg-bg-chat) { --tint-layer: var(--tint-scrim-chat); }
+:root[data-tint="gradient"] .bg-bg-surface { --tint-layer: var(--tint-scrim-surface); }
+:root[data-tint="gradient"] .bg-bg-raised { --tint-layer: var(--tint-scrim-raised); }
+:root[data-tint="gradient"] :is(.bg-d-input, .bg-bg-input) { --tint-layer: var(--tint-scrim-input); }
+:root[data-tint="gradient"] :is(.bg-d-sunken, .bg-bg-floating) { --tint-layer: var(--tint-scrim-floating); }
+:root[data-tint="gradient"] :is(.bg-d-panel, .bg-bg-panel) { --tint-layer: var(--tint-scrim-panel); }
+:root[data-tint="gradient"] :is(.bg-d-base2, .bg-bg-deep) { --tint-layer: var(--tint-scrim-deep); }
+:root[data-tint="gradient"] :is(.bg-d-base3, .bg-bg-deepest) { --tint-layer: var(--tint-scrim-deepest); }
+:root[data-tint="gradient"] :is(
+  .bg-d-base, .bg-d-edge, .bg-d-surface, .bg-d-canvas, .bg-d-input, .bg-d-sunken, .bg-d-panel,
+  .bg-d-base2, .bg-d-base3, .bg-bg-app, .bg-bg-sidebar, .bg-bg-chat, .bg-bg-surface, .bg-bg-raised,
+  .bg-bg-input, .bg-bg-floating, .bg-bg-panel, .bg-bg-deep, .bg-bg-deepest
+) {
+  background-image: linear-gradient(var(--tint-layer), var(--tint-layer)), var(--tint-gradient);
+  background-attachment: fixed;
+}
+/* The settings surface paints its rail/content split itself. */
+:root[data-tint="gradient"] .settings-surface {
+  background-image:
+    linear-gradient(to right,
+      var(--tint-scrim-sidebar) 0 var(--settings-split),
+      var(--tint-scrim-chat) var(--settings-split) 100%),
+    var(--tint-gradient);
+  background-attachment: fixed;
+}
+@media (forced-colors: active) {
+  :root[data-tint="gradient"] * { background-image: none !important; }
+}
+
+/* ---------------------------------------------------------------------------
+   UI density (Appearance › UI density). Tailwind v4 derives every p-*, m-*,
+   gap-*, w-* and h-* step from `--spacing`, so one variable scales rows, icons
+   and bars across the whole app — Discord's Compact / Default / Spacious.
+   Compact never takes a control under 24×24 px (WCAG 2.2 SC 2.5.8).
+   `--density-*` are the named sizes for components that want them.
+   --------------------------------------------------------------------------- */
+:root {
+  --density-row: 32px;       /* channel / member row */
+  --density-icon: 48px;      /* server icon */
+  --density-bar: 48px;       /* header / title bar */
+  --density-panel: 52px;     /* user panel */
+}
+:root[data-ui-density="compact"] {
+  --spacing: 0.21875rem;
+  --density-row: 28px;
+  --density-icon: 40px;
+  --density-bar: 40px;
+  --density-panel: 46px;
+}
+:root[data-ui-density="spacious"] {
+  --spacing: 0.28125rem;
+  --density-row: 36px;
+  --density-icon: 52px;
+  --density-bar: 54px;
+  --density-panel: 58px;
+}
+:root[data-ui-density="compact"]:not([data-large-targets="true"]) :is(
+  button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"],
+  [role="option"], [role="tab"], [role="switch"], [role="radio"], [role="checkbox"], select
+):not(.message-body *) {
+  min-height: 24px;
+  min-width: 24px;
+}
+
+/* ---------------------------------------------------------------------------
+   Corner radius (Appearance › Corners). Re-points Tailwind's radius scale
+   and our own, so rounded-md, rounded-lg … follow. Avatars (rounded-full)
+   stay circles: people are circles, things follow the setting.
+   --------------------------------------------------------------------------- */
+:root[data-radius="sharp"] {
+  --radius: 0.125rem;
+  --radius-xs: 0.0625rem;
+  --radius-sm: 0.125rem;
+  --radius-md: 0.1875rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.375rem;
+  --radius-2xl: 0.5rem;
+  --radius-3xl: 0.625rem;
+  --radius-d-sm: 2px;
+  --radius-d-md: 3px;
+  --radius-d-lg: 4px;
+}
+:root[data-radius="round"] {
+  --radius: 0.375rem;
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --radius-2xl: 1.375rem;
+  --radius-3xl: 1.75rem;
+  --radius-d-sm: 6px;
+  --radius-d-md: 12px;
+  --radius-d-lg: 18px;
+}
+
+/* ---------------------------------------------------------------------------
+   UI font (Appearance › Font). Each face is self-hosted and downloaded only
+   when chosen (theme/engine.js); until then — and for Thai, which none of
+   them cover — the rest of the stack (Kanit, the OS font) is used.
+   --------------------------------------------------------------------------- */
+:root[data-ui-font="system"] { --font-ui-lead: system-ui; }
+:root[data-ui-font="atkinson"] { --font-ui-lead: 'Atkinson Hyperlegible'; }
+:root[data-ui-font="opendyslexic"] { --font-ui-lead: 'OpenDyslexic'; }
+
+/* Text spacing (WCAG 1.4.12). Line height applies to messages always; letter
+   and word spacing, when set, override every tracking class so nothing in
+   the UI is left tighter than the user asked for. */
+.message-body { line-height: var(--message-line-height, 1.375); }
+:root[data-text-spacing="custom"] body,
+:root[data-text-spacing="custom"] body *:not(svg, svg *) {
+  letter-spacing: var(--ui-letter-spacing, 0) !important;
+  word-spacing: var(--ui-word-spacing, 0) !important;
+}
+:root[data-text-spacing="custom"] :is(p, li, .message-body) {
+  line-height: max(var(--message-line-height, 1.375), 1.375) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Seasonal themes (src/theme/seasonal.js). A subtle accent (the brand fill,
+   still ≥4.5:1 behind white labels) and one small original decoration at the
+   foot of the server rail. Off with Appearance › Seasonal themes, under high
+   contrast, and — for the accent — when Saturation is turned down. The
+   decoration only sways when motion is allowed (the reduced-motion blocks
+   above stop it).
+   --------------------------------------------------------------------------- */
+:root[data-season="songkran"] {
+  --season-accent: #0a6aa1;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 5c4 6 7 10 7 14a7 7 0 0 1-14 0c0-4 3-8 7-14z' fill='%233aa8e0'/%3E%3Cpath d='M9 22c2 3 3 5 3 6.5a3 3 0 0 1-6 0C6 27 7 25 9 22zM31 20c2 3 3 5 3 6.5a3 3 0 0 1-6 0c0-1.5 1-3.5 3-6.5z' fill='%2378c6f0'/%3E%3Cpath d='M8 33c4 2 8 2 12 0s8-2 12 0' stroke='%233aa8e0' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='17.5' cy='18' r='1.6' fill='%23fff' opacity='.7'/%3E%3C/svg%3E");
+}
+:root[data-season="loykrathong"] {
+  --season-accent: #8a5300;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 8c1.6 2 2 3.4 2 4.4a2 2 0 0 1-4 0c0-1 .4-2.4 2-4.4z' fill='%23ffc24a'/%3E%3Crect x='19' y='14' width='2' height='7' rx='1' fill='%23f3e6c4'/%3E%3Cpath d='M8 25c3-1 6 0 8 2 1-4 3-6 4-7 1 1 3 3 4 7 2-2 5-3 8-2-1 4-5 7-12 7s-11-3-12-7z' fill='%23e98bb0'/%3E%3Cpath d='M8 25c2 3 6 4 12 4s10-1 12-4' fill='none' stroke='%23c05a86' stroke-width='1.2'/%3E%3Cpath d='M5 34c3 1.5 6 1.5 9 0s6-1.5 9 0 6 1.5 9 0 4-1 5-.5' stroke='%235aa9d6' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+:root[data-season="lunarnewyear"] {
+  --season-accent: #b8232b;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 3v4' stroke='%23d4a017' stroke-width='2'/%3E%3Crect x='15' y='7' width='10' height='3' rx='1' fill='%23d4a017'/%3E%3Cellipse cx='20' cy='19' rx='11' ry='9.5' fill='%23d6312f'/%3E%3Cpath d='M20 9.5v19M14 11c-2 5-2 11 0 16M26 11c2 5 2 11 0 16' stroke='%23a51f1f' stroke-width='1.2' fill='none'/%3E%3Crect x='15' y='28' width='10' height='3' rx='1' fill='%23d4a017'/%3E%3Cpath d='M18 31v6M20 31v7M22 31v6' stroke='%23e8b923' stroke-width='1.4'/%3E%3C/svg%3E");
+}
+:root[data-season="halloween"] {
+  --season-accent: #a94400;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 10c0-3 2-5 4-5' stroke='%234e7a2e' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3Cellipse cx='13' cy='23' rx='8' ry='11' fill='%23e6781e'/%3E%3Cellipse cx='27' cy='23' rx='8' ry='11' fill='%23e6781e'/%3E%3Cellipse cx='20' cy='23' rx='8' ry='12' fill='%23f28c28'/%3E%3Cpath d='M14 20l3 3h-5zM26 20l-3 3h5zM13 28c3 2.5 11 2.5 14 0l-2.5 1.5-2-1.5-2.5 1.5-2.5-1.5-2 1.5z' fill='%23592d0a'/%3E%3C/svg%3E");
+}
+:root[data-season="winter"] {
+  --season-accent: #2a64a8;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cg stroke='%238fc6f2' stroke-width='2.4' stroke-linecap='round' fill='none'%3E%3Cpath d='M20 4v32M6.1 12l27.8 16M6.1 28l27.8-16'/%3E%3Cpath d='M16 7l4 4 4-4M16 33l4-4 4 4M7 17l5.5-1.5L11 10M33 23l-5.5 1.5L29 30M7 23l5.5 1.5L11 30M33 17l-5.5-1.5L29 10'/%3E%3C/g%3E%3C/svg%3E");
+}
+:root[data-season][data-saturation="100"]:not([data-contrast="high"]):not([data-tint]) {
+  --color-fill-brand: var(--season-accent);
+  --color-fill-brandhover: color-mix(in srgb, var(--season-accent) 84%, #000);
+  --color-fill-brandactive: color-mix(in srgb, var(--season-accent) 72%, #000);
+}
+@keyframes season-sway {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+/* The server rail (components/ServerRail.jsx) ends with the decoration; any
+   element can show it with the `season-art` class (theme/SeasonalArt). */
+:root[data-season]:not([data-contrast="high"]) nav[aria-describedby="rail-keyboard-hint"]::after,
+:root[data-season]:not([data-contrast="high"]) .season-art {
+  content: "";
+  display: block;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin: 4px auto 12px;
+  background: var(--season-art) center / contain no-repeat;
+  animation: season-sway 6s ease-in-out infinite;
+  pointer-events: none;
+}
+:root:not([data-season]) .season-art,
+:root[data-contrast="high"] .season-art { display: none; }
+@media (forced-colors: active) {
+  nav[aria-describedby="rail-keyboard-hint"]::after, .season-art { display: none !important; }
 }
 
 /* High contrast: brand fills darken so white labels reach 6.5:1. */
@@ -435,24 +645,24 @@
      Japanese is never shown with Chinese glyph forms (and vice versa). Inter
      stays first for any Latin mixed into the text. */
   :lang(ja) {
-    --font-sans: 'Inter', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI',
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI',
       'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', 'Source Han Sans JP',
       'IPAGothic', 'IPAPGothic', 'Kanit', system-ui, sans-serif;
   }
   :lang(ko) {
-    --font-sans: 'Inter', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR',
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR',
       'Noto Sans CJK KR', 'Source Han Sans KR', 'NanumGothic', 'Kanit', system-ui, sans-serif;
   }
   :lang(zh), :lang(zh-CN), :lang(zh-SG), :lang(zh-Hans) {
-    --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC',
+    --font-sans: var(--font-ui-lead, 'Inter'), 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC',
       'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
   }
   :lang(zh-TW), :lang(zh-HK), :lang(zh-MO), :lang(zh-Hant) {
-    --font-sans: 'Inter', 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC',
+    --font-sans: var(--font-ui-lead, 'Inter'), 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC',
       'Noto Sans CJK TC', 'Source Han Sans TC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
   }
   :lang(th) {
-    --font-sans: 'Inter', 'Kanit', 'Noto Sans Thai', 'Leelawadee UI', 'Thonburi',
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Kanit', 'Noto Sans Thai', 'Leelawadee UI', 'Thonburi',
       system-ui, sans-serif;
   }
 
@@ -882,3 +1092,8 @@ input[type="range"] { height: 1.25rem; }
   font-size: 14px;
 }
 .skip-link:focus { top: 8px; }
+
+/* Tailwind's bare `rounded` is a literal 0.25rem, not a variable, so the
+   corner setting re-points it here (rounded-md/-lg/… follow --radius-*). */
+:root[data-radius="sharp"] .rounded { border-radius: 0.125rem; }
+:root[data-radius="round"] .rounded { border-radius: 0.375rem; }

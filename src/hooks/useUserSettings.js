@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { get, patch, del } from '../api';
-import { setSoundVolumeSource } from '../utils/soundEffects';
+import { setSoundVolumeSource, setSoundPackSource } from '../utils/soundEffects';
+import { applyThemeLayer, writeBootCache } from '../theme/engine.js';
+import { SOUND_PACKS } from '../theme/soundPacks.js';
+import { BASE_THEMES, SYSTEM_LIGHT_CHOICES, SYSTEM_DARK_CHOICES } from '../theme/palettes.js';
 import { localeTag, useLocaleCode } from '../i18n/index.jsx';
 
 /**
@@ -27,10 +30,27 @@ export const PREFERENCE_DEFAULTS = {
     systemDarkTheme: 'dark',
     systemLightTheme: 'light',
     uiDensity: 'default',
+    // Corner shape: sharp | default | round (radius tokens in index.css).
+    radius: 'default',
     messageDisplay: 'cozy',
     zoom: 100,
+    // Percent of 16 px; the settings show it as 12–24 px (Discord's range).
     chatFontScale: 100,
     messageGroupSpacing: 16,
+    // Readable type (WCAG 1.4.12): UI font, chat line height, and letter /
+    // word spacing in em. Fonts other than Inter download only when chosen.
+    uiFont: 'inter',
+    chatLineHeight: 1.375,
+    letterSpacing: 0,
+    wordSpacing: 0,
+    // Gradient theme: 'none', a preset id (theme/presets.js) or
+    // 'custom:<id>' for one of `customThemes` (theme/schema.js).
+    gradient: 'none',
+    customThemes: [],
+    // Seasonal accent + decoration while a season is on ('auto') or never.
+    seasonal: 'auto',
+    // Notification sound pack (theme/soundPacks.js).
+    soundPack: 'classic',
     showSendButton: true,
     syncAcrossDevices: true
   },
@@ -339,8 +359,7 @@ export function applyCategoryFromServer(category, value) {
 
 let mediaQuery = null;
 
-const THEMES = ['light', 'ash', 'dark', 'onyx'];
-const DARK_THEMES = ['ash', 'dark', 'onyx'];
+const THEMES = BASE_THEMES;
 
 /** The concrete theme to paint: "system" becomes the chosen light or dark one. */
 export function resolveTheme(appearance = current.appearance) {
@@ -348,8 +367,8 @@ export function resolveTheme(appearance = current.appearance) {
   if (theme !== 'system') return THEMES.includes(theme) ? theme : 'dark';
   let light = false;
   try { light = Boolean(window.matchMedia?.('(prefers-color-scheme: light)').matches); } catch { /* no matchMedia */ }
-  if (light) return THEMES.includes(appearance.systemLightTheme) ? appearance.systemLightTheme : 'light';
-  return DARK_THEMES.includes(appearance.systemDarkTheme) ? appearance.systemDarkTheme : 'dark';
+  if (light) return SYSTEM_LIGHT_CHOICES.includes(appearance.systemLightTheme) ? appearance.systemLightTheme : 'light';
+  return SYSTEM_DARK_CHOICES.includes(appearance.systemDarkTheme) ? appearance.systemDarkTheme : 'dark';
 }
 let motionQuery = null;
 let resizeBound = false;
@@ -378,7 +397,8 @@ export function applyPreferences(prefs = current) {
   const root = document.documentElement;
   const { appearance, accessibility, streamerMode, chat } = prefs;
 
-  const resolvedTheme = resolveTheme(appearance);
+  // A gradient theme brings its own light or dark base (theme/engine.js).
+  const resolvedTheme = applyThemeLayer(root, prefs, resolveTheme(appearance));
 
   // Suspend transitions across a theme swap: a full-page colour cross-fade
   // looks broken, and Chromium does not reliably repaint transitioned colours
@@ -422,7 +442,6 @@ export function applyPreferences(prefs = current) {
       motionQuery?.addEventListener?.('change', () => applyPreferences());
     } catch { /* matchMedia unavailable */ }
   }
-  root.style.setProperty('--message-font-size', `${Math.round(16 * ((appearance.chatFontScale ?? 100) / 100))}px`);
   root.style.setProperty('--message-group-gap', `${appearance.messageGroupSpacing ?? 16}px`);
   root.style.colorScheme = resolvedTheme === 'light' ? 'light' : 'dark';
 
@@ -431,6 +450,14 @@ export function applyPreferences(prefs = current) {
     mediaQuery = window.matchMedia?.('(prefers-color-scheme: light)');
     mediaQuery?.addEventListener('change', () => applyPreferences());
   }
+
+  // Remember the painted look for index.html's pre-paint script.
+  writeBootCache(root);
+}
+
+/** Re-apply the current preferences (after a transient theme preview changes). */
+export function refreshAppearance() {
+  applyPreferences(current);
 }
 
 /** Apply the cached preferences before React mounts, so there is no flash. */
@@ -438,6 +465,13 @@ export function initPreferences() {
   applyPreferences(current);
   // Interface sounds follow the output-volume slider.
   setSoundVolumeSource(() => (getPreferences().voice.outputVolume ?? 100) / 100);
+  // …and play from the chosen pack (Appearance › Notification sounds).
+  setSoundPackSource(() => {
+    const pack = current.appearance?.soundPack;
+    return SOUND_PACKS.includes(pack) ? pack : 'classic';
+  });
+  // A season can start or end while the app stays open: re-check hourly.
+  if (typeof window !== 'undefined') setInterval(() => applyPreferences(current), 60 * 60 * 1000);
 }
 
 export function useUserSettings() {
