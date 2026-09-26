@@ -7,7 +7,7 @@
 //  content-addressed, so they only ever need to be added to, never rewritten.
 //
 //  Usage:
-//    node scripts/backup.mjs create [--out backups] [--files]
+//    node scripts/backup.mjs create [--out backups] [--files]   (default out: $BACKUP_DIR or ./backups)
 //    node scripts/backup.mjs list [--out backups]
 //    node scripts/backup.mjs prune --keep 7 [--out backups]
 //    node scripts/backup.mjs restore <snapshot.db> [--force]
@@ -36,7 +36,9 @@ const positional = rest.filter((arg, index) => {
 
 const DB_PATH = process.env.DB_PATH || './discord.db';
 const STORAGE_ROOT = process.env.STORAGE_ROOT || './public/uploads';
-const OUT_DIR = flag('out', 'backups');
+// BACKUP_DIR lets the container point this at its own volume (/backups), so a
+// snapshot survives the container being recreated.
+const OUT_DIR = flag('out', process.env.BACKUP_DIR || 'backups');
 
 /** Local time, filename-safe, sorts chronologically. */
 function stamp() {

@@ -1,21 +1,32 @@
 # ============================================================================
 #  Antigravity Discord — production stack
 #
-#  Two services: the app, and Caddy in front of it for automatic HTTPS. Caddy is
-#  the reason this is worth using compose at all — a WebSocket app needs TLS and
-#  correct forwarded headers, and getting a certificate by hand is the step most
-#  likely to be skipped.
+#  The app, and Caddy in front of it for automatic HTTPS. Caddy is the reason
+#  this is worth using compose at all — a WebSocket app needs TLS and correct
+#  forwarded headers, and getting a certificate by hand is the step most likely
+#  to be skipped. (Browsers also refuse microphone access on plain http.)
+#
+#  Optional third service: coturn, the TURN relay voice and video need for
+#  users behind symmetric NAT / CGNAT / strict firewalls. Enable it with the
+#  `turn` profile — see DEPLOYMENT.md, "Voice and video: TURN".
 #
 #  First run:
 #    cp .env.example .env      # then edit: PUBLIC_URL, STORAGE_URL_SECRET, DOMAIN
-#    docker compose up -d
-#    docker compose exec app node db/seed.js     # optional demo data
+#    docker compose up -d                       # or: --profile turn up -d
+#    docker compose exec app node db/seed.js    # optional demo data
 # ============================================================================
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   app:
     build: .
     restart: unless-stopped
+    init: true
     env_file: .env
     environment:
       NODE_ENV: production
@@ -29,20 +40,27 @@ services:
       TRUST_PROXY: 1
       DB_PATH: /data/discord.db
       STORAGE_ROOT: /data/uploads
+      BACKUP_DIR: /backups
     volumes:
       - app-data:/data
+      # Separate from the data volume so deleting one cannot take the other.
+      # Copy it off the host too — a backup on the same disk is not a backup.
+      - app-backups:/backups
     expose:
       - "3001"
     # Not published to the host: only Caddy may reach it.
     networks:
       - edge
+    # server.js drains in-flight requests and checkpoints SQLite on SIGTERM.
     stop_grace_period: 30s
+    logging: *logging
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     environment:
       # Set DOMAIN in .env. Use `localhost` to get a local self-signed cert
       # instead of a public ACME certificate.
@@ -57,9 +75,52 @@ services:
       - caddy-config:/config
     networks:
       - edge
+    logging: *logging
+
+  # TURN relay. Host networking because a relay allocates one UDP port per
+  # participant from a range; publishing thousands of ports through Docker's
+  # proxy is slow and fragile. Open 3478/udp+tcp, 5349/tcp and the relay range
+  # (49160-49200/udp below) in the host firewall / cloud security group.
+  #
+  # Uses the TURN REST shared secret: the app mints short-lived credentials per
+  # user (GET /api/voice/ice-servers), so no static password ships to browsers.
+  coturn:
+    image: coturn/coturn:4.6
+    profiles: ["turn"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_REALM: ${DOMAIN:-localhost}
+      # Set to the host's public IP when it sits behind 1:1 NAT (AWS, GCP…):
+      #   TURN_EXTERNAL_IP=203.0.113.10   or   203.0.113.10/10.0.0.5
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+    # A shell wrapper so a missing secret fails loudly instead of starting an
+    # open relay, and so the external IP is only passed when it is set.
+    # ($$ escapes compose interpolation; the container's shell expands these.)
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        test -n "$$TURN_SECRET" || { echo "coturn: TURN_SECRET is not set" >&2; exit 1; };
+        exec turnserver -n --log-file=stdout --fingerprint
+        --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm="$$TURN_REALM"
+        --listening-port=3478 --tls-listening-port=5349
+        --min-port=49160 --max-port=49200
+        $${TURN_EXTERNAL_IP:+--external-ip=$$TURN_EXTERNAL_IP}
+        --no-cli --no-multicast-peers
+        --denied-peer-ip=0.0.0.0-0.255.255.255
+        --denied-peer-ip=10.0.0.0-10.255.255.255
+        --denied-peer-ip=100.64.0.0-100.127.255.255
+        --denied-peer-ip=127.0.0.0-127.255.255.255
+        --denied-peer-ip=169.254.0.0-169.254.255.255
+        --denied-peer-ip=172.16.0.0-172.31.255.255
+        --denied-peer-ip=192.168.0.0-192.168.255.255
+        --total-quota=300 --stale-nonce=600
+    logging: *logging
 
 volumes:
   app-data:
+  app-backups:
   caddy-data:
   caddy-config:
 

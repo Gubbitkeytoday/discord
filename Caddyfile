@@ -10,6 +10,13 @@
 {$DOMAIN} {
 	encode zstd gzip
 
+	# Upper bound on a request body. The app's own per-category limits are far
+	# lower (attachments: 10 files x 50 MB); this only stops an unbounded body
+	# from being streamed at the process, which buffers uploads in memory.
+	request_body {
+		max_size 520MB
+	}
+
 	# Socket.IO upgrades on this path. Caddy proxies WebSockets natively, so no
 	# special upgrade block is needed — but it must not be compressed or
 	# buffered, hence the separate matcher with its own handler.
@@ -47,8 +54,10 @@
 	}
 
 	header {
-		# HSTS belongs at the edge, where TLS actually terminates.
-		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		# HSTS belongs at the edge, where TLS actually terminates. Add
+		# `; includeSubDomains; preload` only once every subdomain of this
+		# domain serves HTTPS: preload is hard to undo and breaks any that don't.
+		Strict-Transport-Security "max-age=63072000"
 		-Server
 	}
 
