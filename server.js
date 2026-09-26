@@ -44,6 +44,7 @@ import { assertChannelAccess } from './services/access.js';
 import filesRouter from './routes/files.js';
 import mediaRouter from './routes/media.js'; // media pipeline
 import observabilityRouter from './routes/observability.js'; // observability
+import { modAlertEvents } from './services/admin/modAlerts.js'; // admin polish: live mod alerts
 import * as messageService from './services/messages.js';
 import * as guildService from './services/guilds.js';
 import * as userService from './services/users.js';
@@ -134,6 +135,10 @@ const io = new Server(httpServer, {
   // state recovery — see realtime.js.
   ...realtimeServerOptions()
 });
+
+// Moderator alerts (AutoMod "alert", raid detection) are posted as messages;
+// deliver them live like any other message.
+modAlertEvents.on('message', (message) => fanOutMessage(io, message));
 
 // Behind a proxy, req.ip must come from X-Forwarded-For or every rate limit
 // keys on the proxy's own address instead of the real client.
@@ -424,7 +429,9 @@ app.post('/api/servers', requireUser, writeRateLimit, asyncRoute(async (req, res
     name: req.body.name,
     iconUrl: req.body.icon_url ?? null,
     iconFileId: req.body.icon_file_id ?? null,
-    ownerId
+    ownerId,
+    // Default channel/category names follow the creator's language.
+    locale: typeof req.body.locale === 'string' ? req.body.locale.slice(0, 16) : null
   });
   res.json(server);
 }));
@@ -480,7 +487,10 @@ app.get('/api/servers/:serverId/audit-log', asyncRoute(async (req, res) => {
     userId: req.userId, serverId: req.params.serverId, permission: 'VIEW_AUDIT_LOG'
   });
   res.json(await guildService.listAuditLog(req.params.serverId, {
-    limit: parseLimit(req.query.limit), before: req.query.before ?? null
+    limit: parseLimit(req.query.limit), before: req.query.before ?? null,
+    actionType: typeof req.query.action_type === 'string' ? req.query.action_type : null,
+    userId: typeof req.query.user_id === 'string' ? req.query.user_id : null,
+    targetId: typeof req.query.target_id === 'string' ? req.query.target_id : null
   }));
 }));
 

@@ -131,6 +131,82 @@ export function countPermissions(permissions) {
   return count;
 }
 
+/**
+ * Permissions that mean nothing on a single channel (Discord hides them in a
+ * channel's permission editor): server management, membership and moderation.
+ */
+export const SERVER_ONLY_PERMISSIONS = new Set([
+  'ADMINISTRATOR', 'KICK_MEMBERS', 'BAN_MEMBERS', 'MANAGE_GUILD', 'VIEW_AUDIT_LOG',
+  'VIEW_GUILD_INSIGHTS', 'CHANGE_NICKNAME', 'MANAGE_NICKNAMES', 'MANAGE_EMOJIS', 'MODERATE_MEMBERS'
+]);
+
+const TEXT_ONLY = new Set([
+  'SEND_MESSAGES', 'SEND_MESSAGES_IN_THREADS', 'CREATE_PUBLIC_THREADS', 'CREATE_PRIVATE_THREADS',
+  'MANAGE_THREADS', 'EMBED_LINKS', 'ATTACH_FILES', 'ADD_REACTIONS', 'USE_EXTERNAL_EMOJIS',
+  'MENTION_EVERYONE', 'MANAGE_MESSAGES', 'READ_MESSAGE_HISTORY', 'SEND_TTS_MESSAGES'
+]);
+const VOICE_ONLY = new Set([
+  'CONNECT', 'SPEAK', 'STREAM', 'USE_VAD', 'PRIORITY_SPEAKER', 'MUTE_MEMBERS', 'DEAFEN_MEMBERS', 'MOVE_MEMBERS'
+]);
+
+/**
+ * The permission groups for a channel's editor: channel-scoped bits only, and
+ * only those that apply to its type (a category shows both text and voice).
+ */
+export function channelScopedGroups(type = 'text') {
+  const voice = type === 'voice' || type === 'stage';
+  const category = type === 'category';
+  return permissionGroups()
+    .map((group) => ({
+      ...group,
+      items: group.items.filter(([name]) => {
+        if (SERVER_ONLY_PERMISSIONS.has(name)) return false;
+        if (category) return true;
+        if (voice && TEXT_ONLY.has(name)) return false;
+        if (!voice && VOICE_ONLY.has(name)) return false;
+        return true;
+      })
+    }))
+    .filter((group) => group.items.length > 0);
+}
+
+const bitsOf = (...names) => names.reduce((acc, n) => acc | (1n << BigInt(PERMISSION_BITS[n])), 0n).toString();
+
+/**
+ * Starting points for a new role, as Discord's role templates offer. None
+ * includes ADMINISTRATOR: that is always a separate, confirmed choice.
+ */
+export const ROLE_PRESETS = [
+  {
+    key: 'moderator',
+    color: '#e67e22',
+    hoist: true,
+    permissions: bitsOf(
+      'VIEW_CHANNEL', 'SEND_MESSAGES', 'READ_MESSAGE_HISTORY', 'ADD_REACTIONS', 'ATTACH_FILES', 'EMBED_LINKS',
+      'KICK_MEMBERS', 'BAN_MEMBERS', 'MODERATE_MEMBERS', 'MANAGE_MESSAGES', 'MANAGE_THREADS', 'VIEW_AUDIT_LOG',
+      'MANAGE_NICKNAMES', 'MUTE_MEMBERS', 'DEAFEN_MEMBERS', 'MOVE_MEMBERS', 'MENTION_EVERYONE'
+    )
+  },
+  {
+    key: 'helper',
+    color: '#2ecc71',
+    hoist: true,
+    permissions: bitsOf(
+      'VIEW_CHANNEL', 'SEND_MESSAGES', 'READ_MESSAGE_HISTORY', 'ADD_REACTIONS', 'ATTACH_FILES', 'EMBED_LINKS',
+      'MODERATE_MEMBERS', 'MANAGE_MESSAGES', 'MANAGE_THREADS', 'MUTE_MEMBERS'
+    )
+  },
+  {
+    key: 'member',
+    color: '#3498db',
+    hoist: false,
+    permissions: bitsOf(
+      'VIEW_CHANNEL', 'SEND_MESSAGES', 'READ_MESSAGE_HISTORY', 'ADD_REACTIONS', 'ATTACH_FILES', 'EMBED_LINKS',
+      'CONNECT', 'SPEAK', 'USE_VAD', 'STREAM', 'CREATE_PUBLIC_THREADS', 'SEND_MESSAGES_IN_THREADS'
+    )
+  }
+];
+
 export const ROLE_COLOR_PRESETS = [
   '#1abc9c', '#2ecc71', '#3498db', '#9b59b6', '#e91e63', '#f1c40f',
   '#e67e22', '#e74c3c', '#95a5a6', '#607d8b', '#11806a', '#1f8b4c',

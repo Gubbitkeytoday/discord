@@ -20,6 +20,7 @@ import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
 import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
 import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
+import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // admin polish (v41–v42)
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
 
@@ -680,6 +681,13 @@ const MIGRATIONS = [
     up: () => safetyV40Sqlite({ runQuery }),
     postgres: () => safetyV40Postgres({ runQuery })
   }
+  // admin polish (v41–v42): recurring events, moderator alert channel.
+  ,...ADMIN_POLISH_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
 ];
 
 // Applied in array order, so the array order must be the version order — and
