@@ -15,10 +15,14 @@ export default function ConfirmModal({
   danger = true,
   withReason = false,
   reasonLabel,
+  // Ban: "Delete message history" (none / 1 h / 24 h / 7 d). The choice is
+  // passed to onConfirm as the second argument: { deleteMessageSeconds }.
+  withDeleteHistory = false,
   onConfirm,
   onClose
 }) {
   const [reason, setReason] = useState('');
+  const [deleteSeconds, setDeleteSeconds] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const dialogRef = useDialog(onClose);
@@ -28,7 +32,9 @@ export default function ConfirmModal({
     setBusy(true);
     setError(null);
     try {
-      await onConfirm?.(withReason ? reason.trim() || null : undefined);
+      const reasonValue = withReason ? reason.trim() || null : undefined;
+      if (withDeleteHistory) await onConfirm?.(reasonValue, { deleteMessageSeconds: deleteSeconds });
+      else await onConfirm?.(reasonValue);
       onClose();
     } catch (err) {
       setError(err.message);
@@ -63,7 +69,25 @@ export default function ConfirmModal({
               />
             </label>
           )}
-          {error && <p className="text-xs text-d-danger">{error}</p>}
+          {withDeleteHistory && (
+            <label className="block">
+              <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('adm.deleteHistory')}</span>
+              <select
+                value={deleteSeconds}
+                onChange={(e) => setDeleteSeconds(Number(e.target.value))}
+                aria-describedby="confirm-delete-history-hint"
+                className="w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+              >
+                <option value={0}>{t('adm.deleteNone')}</option>
+                <option value={3600}>{t('adm.deleteHour')}</option>
+                <option value={21600}>{t('adm.delete6Hours')}</option>
+                <option value={86400}>{t('adm.deleteDay')}</option>
+                <option value={604800}>{t('adm.deleteWeek')}</option>
+              </select>
+              <span id="confirm-delete-history-hint" className="block text-[11px] text-d-text3 mt-1">{t('adm.deleteHistoryHint')}</span>
+            </label>
+          )}
+          {error && <p className="text-xs text-d-dangertext" role="alert">{error}</p>}
         </div>
         <div className="bg-d-surface px-5 py-3 flex justify-end gap-2">
           <button

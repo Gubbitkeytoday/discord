@@ -474,7 +474,8 @@ export async function registerRealtime(io) {
       try {
         const {
           channel_id: channelId, content,
-          attachments = [], reply_to_id: replyToId, nonce, sticker_id: stickerId
+          attachments = [], reply_to_id: replyToId, nonce, sticker_id: stickerId,
+          forwarded_from: forwardedFrom = null, allowed_mentions: allowedMentions = null
         } = data ?? {};
         const userId = socket.data.userId;
         if (!channelId) return;
@@ -497,7 +498,7 @@ export async function registerRealtime(io) {
         // Bounded concurrency: refuse with RETRY_LATER rather than queue
         // without limit when the database falls behind (lib/admission.js).
         const message = await messageAdmission.run(() => messageService.createMessage({
-          channelId, userId, content, attachments, replyToId, nonce, stickerId
+          channelId, userId, content, attachments, replyToId, nonce, stickerId, forwardedFrom, allowedMentions
         }));
 
         clearTyping(io, channelId, userId);
@@ -506,7 +507,9 @@ export async function registerRealtime(io) {
       } catch (err) {
         log.error({ err, socket_id: socket.id }, 'send_message failed');
         const { error, code } = clientError(err);
-        ack?.({ ok: false, error, code });
+        // The HTTP status tells the client whether a retry can help (a 403
+        // never will — no "Retry" button for it).
+        ack?.({ ok: false, error, code, status: publicError(err).status });
         socket.emit('message_error', { error, code, nonce: data?.nonce });
       }
     });
@@ -1252,9 +1255,7 @@ export async function broadcastVoice(io, channelId) {
       ORDER BY vs.joined_at ASC`,
     [channelId]
   );
-  io.to(`voice-${channelId}`).emit('voice_participants', {
-    channelId,
-    participants: participants.map((p) => ({
+  const shaped = participants.map((p) => ({
       ...p,
       isMuted: Boolean(p.isMuted),
       isDeafened: Boolean(p.isDeafened),
@@ -1265,6 +1266,36 @@ export async function broadcastVoice(io, channelId) {
       isServerDeafened: Boolean(p.server_deaf),
       requestedToSpeakAt: p.request_to_speak_at ?? null,
       isSpeaking: false
+    }));
+  io.to(`voice-${channelId}`).emit('voice_participants', { channelId, participants: shaped });
+  // Everyone in the guild who can see the channel gets its occupant list too,
+  // so the sidebar can show who is in every voice channel, not only yours.
+  broadcastGuildVoiceRoster(io, channelId, shaped).catch((err) =>
+    log.warn({ err: { message: err.message } }, 'voice roster broadcast failed'));
+}
+
+/**
+ * Guild-wide voice roster: `voice_roster { serverId, channelId, participants }`
+ * to the user rooms of every member allowed to VIEW the channel (never the
+ * whole guild room — a private voice channel's occupants stay private).
+ * Only presentation fields travel; socket ids stay inside the voice room.
+ */
+async function broadcastGuildVoiceRoster(io, channelId, participants) {
+  const channel = await getQuery(`SELECT server_id FROM channels WHERE id = ?`, [channelId]);
+  if (!channel?.server_id) return;
+  const ctx = await loadGuildPermissionContext(channel.server_id);
+  if (!ctx) return;
+  const rooms = ctx.members
+    .filter((m) => ctx.can(m.user_id, channelId, 'VIEW_CHANNEL'))
+    .map((m) => `user-${m.user_id}`);
+  if (!rooms.length) return;
+  io.to(rooms).emit('voice_roster', {
+    serverId: channel.server_id,
+    channelId,
+    participants: participants.map((p) => ({
+      userId: p.userId, username: p.username, avatar_url: p.avatar_url ?? null,
+      isMuted: p.isMuted, isDeafened: p.isDeafened, isVideo: p.isVideo, isStreaming: p.isStreaming,
+      isServerMuted: p.isServerMuted, isServerDeafened: p.isServerDeafened, isSuppressed: p.isSuppressed
     }))
   });
 }

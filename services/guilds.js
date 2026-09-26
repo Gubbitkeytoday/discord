@@ -15,7 +15,7 @@ import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { normaliseColor } from '../lib/validate.js';
 import { proxiedImageUrl } from '../lib/mediaUrls.js';
-import { publicStatus } from '../lib/presence.js'; // safety: invisible → offline
+import { publicStatus, maskStatus } from '../lib/presence.js'; // safety: invisible → offline
 import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
@@ -179,7 +179,7 @@ export async function getInitialData(userId) {
         AND u.deleted_at IS NULL
         AND f.status != 'declined'`,
     [userId, userId, userId, userId]
-  );
+  ).then((rows) => rows.map((row) => maskStatus(row, userId)));
 
   const dms = await listDirectMessageChannels(userId);
   const unread = await allQuery(
@@ -363,9 +363,39 @@ export async function getServerDetail(serverId, viewerId = null) {
   const hasOnboarding = Boolean(server.screening_enabled) || Boolean(server.welcome_enabled)
     || Boolean(await getQuery(`SELECT 1 FROM onboarding_prompts WHERE server_id = ? LIMIT 1`, [serverId]));
 
+  // Who is in each voice channel the viewer can see, so the sidebar can list
+  // occupants under every voice channel (kept live by `voice_roster`).
+  const voiceChannelIds = new Set(channels.filter((c) => c.type === 'voice' || c.type === 'stage').map((c) => c.id));
+  const voiceStates = {};
+  if (voiceChannelIds.size) {
+    const rows = await allQuery(
+      `SELECT vs.channel_id, vs.user_id AS "userId", vs.self_mute, vs.self_deaf, vs.self_video, vs.self_stream,
+              vs.server_mute, vs.server_deaf, vs.suppress,
+              COALESCE(sm.nickname, u.display_name, u.username) AS username,
+              COALESCE(sm.avatar_url, u.avatar_url) AS avatar_url
+         FROM voice_states vs
+         JOIN users u ON u.id = vs.user_id
+         LEFT JOIN server_members sm ON sm.server_id = vs.server_id AND sm.user_id = vs.user_id
+        WHERE vs.server_id = ?
+        ORDER BY vs.joined_at ASC`,
+      [serverId]
+    );
+    for (const r of rows) {
+      if (!voiceChannelIds.has(r.channel_id)) continue;
+      (voiceStates[r.channel_id] ??= []).push({
+        userId: r.userId, username: r.username, avatar_url: r.avatar_url ?? null,
+        isMuted: Boolean(r.self_mute), isDeafened: Boolean(r.self_deaf),
+        isVideo: Boolean(r.self_video), isStreaming: Boolean(r.self_stream),
+        isServerMuted: Boolean(r.server_mute), isServerDeafened: Boolean(r.server_deaf),
+        isSuppressed: Boolean(r.suppress)
+      });
+    }
+  }
+
   return {
     server, channels, categories, members, roles, emojis, viewerPermissions,
-    viewer_pending: onboardingRequired, has_onboarding: hasOnboarding
+    viewer_pending: onboardingRequired, has_onboarding: hasOnboarding,
+    voice_states: voiceStates
   };
 }
 
@@ -826,10 +856,12 @@ export async function openDirectMessage({ userId, recipientId }) {
     `SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)`,
     [recipientId, userId, userId, recipientId]
   );
-  if (blocked) throw ApiError.forbidden('Cannot message this user');
+  // The same refusal as every other "can't reach" reason, so a block cannot
+  // be told apart from a privacy setting.
+  const { assertCanDirectMessage, unreachable } = await import('./users.js');
+  if (blocked) throw unreachable();
 
   // Privacy & Safety › who can direct-message you.
-  const { assertCanDirectMessage } = await import('./users.js');
   await assertCanDirectMessage({ senderId: userId, recipientId });
 
   // A DM is the channel of type 'dm' whose recipient set is exactly these two.
@@ -876,8 +908,8 @@ export async function createGroupDM({ userId, recipientIds = [], name = null }) 
       `SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)`,
       [recipientId, userId, userId, recipientId]
     );
-    if (blocked) throw ApiError.forbidden('Cannot start a group with this user');
-    const { assertCanDirectMessage } = await import('./users.js');
+    const { assertCanDirectMessage, unreachable } = await import('./users.js');
+    if (blocked) throw unreachable();
     await assertCanDirectMessage({ senderId: userId, recipientId });
   }
   recipientIds = unique;
@@ -907,7 +939,7 @@ export async function getDirectMessageChannel(channelId, viewerId) {
        FROM channel_recipients cr JOIN users u ON u.id = cr.user_id
       WHERE cr.channel_id = ? AND u.id != ?`,
     [channelId, viewerId]
-  );
+  ).then((rows) => rows.map((row) => maskStatus(row, viewerId)));
   return {
     ...channel,
     recipients,
@@ -1139,7 +1171,11 @@ export async function acceptInvite({ code, userId }) {
       throw new ApiError('This invite has been used up', { status: 410, code: 'INVITE_EXHAUSTED' });
     }
   };
-  return joinServer({ serverId: invite.server_id, userId, claim });
+  const detail = await joinServer({ serverId: invite.server_id, userId, claim });
+  // Land where the invite points — when the new member can see that channel
+  // (detail.channels holds only the visible ones).
+  const visible = Array.isArray(detail?.channels) && detail.channels.some((c) => c.id === invite.channel_id);
+  return { ...detail, channel_id: visible ? invite.channel_id : null };
 }
 
 // --- moderation --------------------------------------------------------------

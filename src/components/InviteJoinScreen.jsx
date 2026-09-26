@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, Users, Circle, AlertTriangle } from 'lucide-react';
 import { get, post } from '../api';
 import { t } from '../i18n/index.jsx';
-import { serverIconOf } from '../utils/avatar';
+import { serverIconOf, serverInitials } from '../utils/avatar';
 
 // Written by LoginScreen when "Sign up & join" / "Log in & join" succeeds.
 const AUTO_JOIN_KEY = 'antigravity.autoJoinInvite';
@@ -79,7 +79,7 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
               />
             ) : (
               <div className="w-20 h-20 rounded-2xl bg-d-surface flex items-center justify-center mx-auto mb-4 text-2xl font-bold text-d-strong">
-                {preview.server.name.slice(0, 2).toUpperCase()}
+                {serverInitials(preview.server.name)}
               </div>
             )}
 

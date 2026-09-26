@@ -1,6 +1,7 @@
 import React, { useRef } from 'react';
 import {
-  Reply, Pencil, Trash2, Pin, PinOff, Copy, Link2, SmilePlus, MessagesSquare, Forward, MailOpen, Flag, Megaphone
+  Reply, Pencil, Trash2, Pin, PinOff, Copy, Link2, SmilePlus, MessagesSquare, Forward, MailOpen, Flag, Megaphone,
+  ShieldOff
 } from 'lucide-react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useBackClose } from '../../chat/useBackClose';
@@ -43,6 +44,8 @@ export default function ActionSheet({
     { icon: MailOpen, label: t('chat.markUnread'), action: () => actions.markUnread(msg) },
     { icon: Link2, label: t('chat.copyLink'), action: () => actions.copyLink(msg) },
     !isOwn && actions.canReport && { icon: Flag, label: t('chat.reportMessage'), danger: true, action: () => actions.report(msg) },
+    // Safety within reach of a thumb: block the author from the same sheet.
+    !isOwn && actions.canBlock(msg) && { icon: ShieldOff, label: t('dm.block'), danger: true, action: () => actions.blockAuthor(msg) },
     canDelete && { icon: Trash2, label: t('chat.deleteMessage'), danger: true, action: () => actions.remove(msg) }
   ].filter(Boolean);
 

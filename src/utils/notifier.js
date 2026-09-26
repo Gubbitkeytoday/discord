@@ -15,6 +15,7 @@ import {
 } from './soundEffects';
 import { speak } from './speech';
 import { proxiedImageUrl } from './media';
+import { t } from '../i18n/index.jsx';
 
 const SOUND_PLAYERS = {
   message: playMessageIncomingSound,
@@ -112,17 +113,22 @@ export function notifyMessage({ title, body, icon, tag, muted = false, status, o
   if (status === 'dnd') return false;
   if (streamerMode.enabled && streamerMode.disableNotifications) return false;
   if (silencedByStream(prefs)) return false;
-  flashAttention(title);
+  flashAttention(streamerMode.enabled && streamerMode.hideUsernames !== false ? t('notif.newMessage') : title);
   if (!notifications.desktopEnabled) return false;
   if (notificationPermission() !== 'granted') return false;
   // A notification for the window you are already looking at is just noise.
   if (document.visibilityState === 'visible' && document.hasFocus()) return false;
 
+  // Streamer mode › hide usernames: a notification that does get through
+  // (streamer mode on, notifications allowed) names nobody and quotes nothing.
+  const masked = streamerMode.enabled && streamerMode.hideUsernames !== false;
   try {
     // Remote avatars go through our image proxy (the CSP allows same-origin
     // images only); no avatar → the app icon.
-    const notification = new Notification(title, {
-      body, icon: icon ? proxiedImageUrl(icon) : '/icons/icon-192.png', tag, silent: true
+    const notification = new Notification(masked ? 'Antigravity' : title, {
+      body: masked ? t('notif.newMessage') : body,
+      icon: icon && !masked ? proxiedImageUrl(icon) : '/icons/icon-192.png',
+      tag, silent: true
     });
     notification.onclick = () => {
       window.focus();
@@ -164,9 +170,11 @@ export function speakTtsMessage({ author, content }) {
  * (installed PWA on desktop Chromium, iOS/macOS home-screen apps), on the app
  * icon — if the user wants a badge.
  */
-export function applyUnreadBadge(mentionCount) {
+export function applyUnreadBadge(mentionCount, baseTitle = 'Antigravity') {
   const prefs = getPreferences();
-  const base = 'Antigravity';
+  // The caller's title ("#general | Server — Antigravity") is kept, so the
+  // badge never wipes out where you are (WCAG 2.4.2).
+  const base = baseTitle || 'Antigravity';
   const show = prefs.notifications.unreadBadge && mentionCount > 0;
   const title = show ? `(${mentionCount}) ${base}` : base;
   if (flashTimer) flashBaseTitle = title;

@@ -1,7 +1,7 @@
 import React, { forwardRef, memo, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import {
   Hash, Bell, BellOff, Pin, Users, Search, Inbox, UserPlus, MessagesSquare, Archive, Megaphone, Volume2, Lock,
-  ChevronRight, Menu, Phone, Video, MoreVertical
+  ChevronRight, Menu, Phone, Video, MoreVertical, MoreHorizontal
 } from 'lucide-react';
 import ContextMenu from '../ContextMenu';
 import { t } from '../../i18n/index.jsx';
@@ -34,7 +34,7 @@ const ChatHeader = forwardRef(function ChatHeader({
   channel, title, isDM, parentChannel, muted, pinsCount, showPins, showMemberList, inboxCount,
   onOpenMobileSidebar, onStartCall, onFollowChannel, onArchiveThread, onAddGroupRecipients,
   onOpenNotificationSettings, onTogglePins, onToggleMemberList, onOpenInbox, onSearch, onOpenMobileSearch,
-  onSelectChannel, isArchived
+  onSelectChannel, isArchived, dmMenuItems = null
 }, ref) {
   const rootRef = useRef(null);
   const searchRef = useRef(null);
@@ -86,6 +86,11 @@ const ChatHeader = forwardRef(function ChatHeader({
       action: () => onOpenNotificationSettings(Math.max(8, (menu?.x ?? 200) - 120), menu?.y ?? 48)
     }
   ].filter(Boolean);
+  // A 1:1 DM's own actions (Block / Report / Close DM) live in the same "⋯"
+  // menu, after the header buttons that did not fit.
+  const menuItems = dmMenuItems?.length
+    ? [...overflow, ...(overflow.length ? [{ separator: true }] : []), ...dmMenuItems]
+    : overflow;
 
   return (
     <header
@@ -222,7 +227,7 @@ const ChatHeader = forwardRef(function ChatHeader({
             <Search className="w-5 h-5" aria-hidden="true" />
           </button>
         )}
-        {overflow.length > 0 && (
+        {menuItems.length > 0 && (
           <button
             type="button"
             onClick={openAt((rect) => setMenu({ x: rect.right - 224, y: rect.bottom + 6 }))}
@@ -232,7 +237,9 @@ const ChatHeader = forwardRef(function ChatHeader({
             aria-haspopup="menu"
             aria-expanded={Boolean(menu)}
           >
-            <MoreVertical className="w-5 h-5" aria-hidden="true" />
+            {dmMenuItems?.length
+              ? <MoreHorizontal className="w-5 h-5" aria-hidden="true" />
+              : <MoreVertical className="w-5 h-5" aria-hidden="true" />}
             {!wide && inboxCount > 0 && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-d-danger" aria-hidden="true" />}
           </button>
         )}
@@ -240,7 +247,7 @@ const ChatHeader = forwardRef(function ChatHeader({
           <form
             role="search"
             onSubmit={(e) => { e.preventDefault(); onSearch?.(term); }}
-            className="relative ml-1"
+            className="focus-ring relative ml-1 rounded"
           >
             <input
               ref={searchRef}
@@ -250,7 +257,7 @@ const ChatHeader = forwardRef(function ChatHeader({
               placeholder={t('common.search')}
               aria-label={t('chat.searchMessages')}
               aria-keyshortcuts="Control+F"
-              className="bg-d-base text-sm text-d-strong placeholder-d-text3 pl-2 pr-8 h-8 rounded w-36 focus:w-56 transition-[width] focus:outline-none focus-visible:ring-2 focus-visible:ring-d-brand"
+              className="bg-d-base text-sm text-d-strong placeholder-d-text3 pl-2 pr-8 h-8 rounded w-36 focus:w-56 motion-safe:transition-[width] focus:outline-none"
             />
             <button type="submit" className="absolute right-0 top-0 w-8 h-8 inline-flex items-center justify-center text-d-text3 hover:text-d-strong" title={t('chat.searchMessages')} aria-label={t('chat.searchSubmit')}>
               <Search className="w-4 h-4" aria-hidden="true" />
@@ -259,7 +266,7 @@ const ChatHeader = forwardRef(function ChatHeader({
         )}
       </div>
 
-      {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={overflow} />}
+      {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={menuItems} />}
     </header>
   );
 });

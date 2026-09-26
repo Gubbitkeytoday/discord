@@ -63,6 +63,13 @@ const Composer = forwardRef(function Composer({
   convertEmoticonsPref, ttsEnabled, showSendButton, currentUserId
 }, ref) {
   const [text, setText] = useState(() => drafts.get(channelId) ?? '');
+  // Reply "@ ON / OFF": whether the reply pings the author (Discord's toggle,
+  // on by default, reset for every new reply target).
+  const [pingReply, setPingReply] = useState(true);
+  useEffect(() => { setPingReply(true); }, [replyTo?.id]);
+  const replyPingable = Boolean(replyTo) && replyTo.user_id !== currentUserId && !replyTo.is_webhook;
+  const sendOut = (content, files, replyId, extra = {}) =>
+    onSend(content, files, replyId, replyId ? { ...extra, mentionReply: replyPingable ? pingReply : false } : extra);
   const [attachments, setAttachments] = useState([]);
   const [jobs, setJobs] = useState([]);                    // uploads: in flight or failed
   const [sendQueued, setSendQueued] = useState(false);
@@ -270,13 +277,13 @@ const Composer = forwardRef(function Composer({
         return;
       }
       if (command.empty) { clear(); return; }
-      onSend(toWire(command.content), attachments, replyTo?.id, { tts: Boolean(command.tts && ttsEnabled) });
+      sendOut(toWire(command.content), attachments, replyTo?.id, { tts: Boolean(command.tts && ttsEnabled) });
       playMessageIncomingSound();
       clear();
       return;
     }
 
-    onSend(toWire(value), attachments, replyTo?.id);
+    sendOut(toWire(value), attachments, replyTo?.id);
     playMessageIncomingSound();
     clear();
   };
@@ -352,12 +359,12 @@ const Composer = forwardRef(function Composer({
   };
 
   const sendSticker = (sticker) => {
-    onSend('', [], replyTo?.id, { sticker });
+    sendOut('', [], replyTo?.id, { sticker });
     onCancelReply?.();
   };
 
   const sendGif = (gif) => {
-    onSend('', [gif], replyTo?.id);
+    sendOut('', [gif], replyTo?.id);
     onCancelReply?.();
   };
 
@@ -381,9 +388,23 @@ const Composer = forwardRef(function Composer({
             <Reply className="w-3.5 h-3.5 text-d-brand shrink-0" aria-hidden="true" />
             <span className="truncate">{t('chat.replyingTo', { name: replyTo.display_name ?? replyTo.username ?? '' })}</span>
           </div>
-          <button type="button" onClick={() => { onCancelReply?.(); focus(); }} className={ICON_BTN} title={t('common.cancel')} aria-label={t('chat.cancelReply')}>
-            <X className="w-4 h-4" aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {replyPingable && (
+              <button
+                type="button"
+                onClick={() => setPingReply((v) => !v)}
+                aria-pressed={pingReply}
+                title={t('integration.mentionReplyHint')}
+                aria-label={t('integration.mentionReply')}
+                className={`min-h-6 px-1.5 rounded font-bold text-[11px] hover:bg-d-hover/60 ${pingReply ? 'text-d-link' : 'text-d-text3'}`}
+              >
+                @ {pingReply ? t('integration.on') : t('integration.off')}
+              </button>
+            )}
+            <button type="button" onClick={() => { onCancelReply?.(); focus(); }} className={ICON_BTN} title={t('common.cancel')} aria-label={t('chat.cancelReply')}>
+              <X className="w-4 h-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -504,7 +525,7 @@ const Composer = forwardRef(function Composer({
 
       <form
         onSubmit={send}
-        className={`bg-d-input rounded-lg px-2 py-1 focus-within:ring-2 focus-within:ring-d-brand/60 ${disabled ? 'opacity-60' : ''}`}
+        className={`focus-ring bg-d-input rounded-lg px-2 py-1 ${disabled ? 'opacity-60' : ''}`}
       >
         {showFormatting && !recording && (
           <div className="flex flex-wrap items-center gap-0.5 pb-1 mb-1 border-b border-d-divider" role="toolbar" aria-label={t('chat.formatting')}>

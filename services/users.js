@@ -14,6 +14,7 @@ import {
   getCategory, getAgeGroup, checkBirthdate, applyMinorDefaults, ageGroupOf
 } from './userSettings.js';
 import { publicStatus } from '../lib/presence.js';
+import { forgetAgeGroup } from './access.js';
 
 /**
  * The one refusal for "you cannot reach this person": blocked, DMs limited to
@@ -491,7 +492,7 @@ export { getStorageUsage };
 
 const REQUEST_PREVIEW_CHARS = 200;
 
-function pendingRequestRows(userId) {
+function pendingRequestRows(userId, channelId = null) {
   return allQuery(
     `SELECT c.id AS channel_id, other.user_id AS other_id
        FROM channels c
@@ -505,8 +506,8 @@ function pendingRequestRows(userId) {
         AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.user_id = ? AND b.blocked_id = other.user_id)
         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.user_id = ?)
         AND EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.user_id = other.user_id
-                      AND m.deleted_at IS NULL)`,
-    [userId, userId, userId, userId, userId, userId, userId]
+                      AND m.deleted_at IS NULL)${channelId ? ' AND c.id = ?' : ''}`,
+    [userId, userId, userId, userId, userId, userId, userId, ...(channelId ? [channelId] : [])]
   );
 }
 
@@ -551,6 +552,20 @@ export async function pendingRequestChannelIds(userId) {
   const privacy = await getCategory(userId, 'privacy');
   if (!privacy.messageRequests) return [];
   return (await pendingRequestRows(userId)).map((r) => r.channel_id);
+}
+
+/**
+ * Of `userIds` (recipients of 1:1 DM `channelId`), those for whom it is still a
+ * pending message request — they get the unread, but no ping or push.
+ */
+export async function pendingRequestRecipients(channelId, userIds) {
+  const out = new Set();
+  for (const uid of userIds) {
+    const privacy = await getCategory(uid, 'privacy');
+    if (!privacy.messageRequests) continue;
+    if ((await pendingRequestRows(uid, channelId)).length) out.add(uid);
+  }
+  return out;
 }
 
 async function assertDmRecipient(userId, channelId) {
@@ -610,6 +625,7 @@ export async function setBirthdate({ userId, year, month, day }) {
   }
   const checked = checkBirthdate({ year, month, day });
   await runQuery(`UPDATE users SET birth_year = ?, birth_month = ? WHERE id = ?`, [checked.year, checked.month, userId]);
+  forgetAgeGroup(userId);
   const status = await getAgeStatus(userId);
   if (status.age_group === 'minor') await applyMinorDefaults(userId);
   return status;

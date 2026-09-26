@@ -6,6 +6,7 @@ import {
   Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox, Menu
 } from 'lucide-react';
 import UserStatusMenu from './UserStatusMenu';
+import StatusIndicator from './ui/StatusIndicator.jsx';
 import { proxiedImageUrl } from '../utils/media';
 import { useMessageRequests, MessageRequestRow, MessageRequestBar } from './admin/MessageRequests';
 import { BirthdateCard } from './admin/BirthdatePrompt';
@@ -13,13 +14,6 @@ import { useStreamerMask, useAccountFlags } from './admin/safety';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
-const STATUS_COLORS = {
-  online: 'bg-d-online',
-  idle: 'bg-d-idle',
-  dnd: 'bg-d-danger',
-  offline: 'bg-d-text4',
-  invisible: 'bg-d-text4'
-};
 
 const statusLabels = () => ({
   online: t('status.online'), idle: t('status.idle'), dnd: t('status.dnd'),
@@ -73,6 +67,7 @@ export default function HomeDirectMessages({
   onCreateServer,
   onJoinServer,
   onToast,
+  onPrefetchChannel,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -235,6 +230,8 @@ export default function HomeDirectMessages({
                 )}
                 <button
                   onClick={() => onSelectDm?.(dm.id)}
+                  onPointerEnter={() => onPrefetchChannel?.(dm.id)}
+                  onFocus={() => onPrefetchChannel?.(dm.id)}
                   onContextMenu={(e) => {
                     if (dm.type !== 'dm' || !recipient || !onUserContextMenu) return;
                     e.preventDefault();
@@ -249,9 +246,9 @@ export default function HomeDirectMessages({
                   <div className="relative shrink-0">
                     <img src={proxiedImageUrl(dm.avatar_url || defaultAvatar(dm.recipients?.[0]?.id ?? dm.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
                     {dm.type === 'dm' && (
-                      <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-d-surface ${
-                        STATUS_COLORS[recipient?.status] ?? STATUS_COLORS.offline
-                      }`} />
+                      <span className="absolute -bottom-0.5 -right-0.5">
+                        <StatusIndicator status={recipient?.status} size={8} ring="var(--color-d-surface)" />
+                      </span>
                     )}
                   </div>
 
@@ -309,15 +306,15 @@ export default function HomeDirectMessages({
         <div className="h-14 bg-d-panel px-2 flex items-center justify-between shrink-0 relative">
           <button
             onClick={() => setShowStatusMenu((v) => !v)}
-            aria-haspopup="menu"
+            aria-haspopup="dialog"
             aria-expanded={showStatusMenu}
             className="flex items-center gap-2 px-1 py-1 hover:bg-d-hover/60 rounded-md flex-1 min-w-0 transition-colors text-left"
           >
             <div className="relative shrink-0">
               <img src={proxiedImageUrl(currentUser?.avatar_url || defaultAvatar(currentUser?.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
-              <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-panel ${
-                STATUS_COLORS[currentUser?.status] ?? STATUS_COLORS.offline
-              }`} />
+              <span className="absolute -bottom-0.5 -right-0.5">
+                <StatusIndicator status={currentUser?.status} size={10} ring="var(--color-d-panel)" />
+              </span>
             </div>
             <div className="flex flex-col min-w-0">
               <span className="text-sm font-semibold text-d-strong truncate leading-tight">
@@ -390,7 +387,8 @@ export default function HomeDirectMessages({
           </div>
         ) : children
       ) : (
-        <div className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
+        <main id="main-content" aria-labelledby="friends-title" className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
+          <h1 id="friends-title" className="sr-only">{t('dm.friends')}</h1>
           <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 max-md:gap-2 bg-d-canvas shrink-0 min-w-0">
             {onOpenMobile && (
               <button
@@ -402,7 +400,7 @@ export default function HomeDirectMessages({
                 <Menu className="w-5 h-5" />
               </button>
             )}
-            <div className="flex items-center gap-2 pr-4 border-r border-d-divider shrink-0 max-sm:hidden">
+            <div aria-hidden="true" className="flex items-center gap-2 pr-4 border-r border-d-divider shrink-0 max-sm:hidden">
               <Users className="w-5 h-5 text-d-text4" />
               <span className="font-bold text-d-strong">{t('dm.friends')}</span>
             </div>
@@ -565,9 +563,9 @@ export default function HomeDirectMessages({
                           <div className="relative shrink-0">
                             <img src={proxiedImageUrl(friend.avatar_url || defaultAvatar(friend.id))} alt="" className="w-10 h-10 rounded-full object-cover" />
                             {!isBlockedTab && (
-                              <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-canvas ${
-                                STATUS_COLORS[friend.status] ?? STATUS_COLORS.offline
-                              }`} />
+                              <span className="absolute -bottom-0.5 -right-0.5">
+                                <StatusIndicator status={friend.status} size={10} ring="var(--color-d-canvas)" decorative />
+                              </span>
                             )}
                           </div>
                           <div className="min-w-0">
@@ -666,7 +664,7 @@ export default function HomeDirectMessages({
               </>
             )}
           </div>
-        </div>
+        </main>
       )}
     </div>
   );

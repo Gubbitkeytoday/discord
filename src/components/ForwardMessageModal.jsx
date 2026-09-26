@@ -7,7 +7,9 @@ import { t, useLocaleCode } from '../i18n/index.jsx';
  * Forward a message to another channel or conversation, the way Discord's
  * Forward dialog works: pick one or more destinations, send, done.
  */
-export default function ForwardMessageModal({ message, channels = [], dms = [], servers = [], onForward, onClose }) {
+export default function ForwardMessageModal({
+  message, channels = [], dms = [], servers = [], onForward, onClose, onDone, maxDestinations = 5
+}) {
   const [filter, setFilter] = useState('');
   const [selected, setSelected] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -29,7 +31,13 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channels, dms, filter, servers, locale]);
 
-  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  // One forward goes to at most `maxDestinations` places (the server holds
+  // the same line), so a message cannot be sprayed across every channel.
+  const atLimit = selected.length >= maxDestinations;
+  const toggle = (id) => setSelected((prev) => {
+    if (prev.includes(id)) return prev.filter((x) => x !== id);
+    return prev.length >= maxDestinations ? prev : [...prev, id];
+  });
 
   const submit = async () => {
     if (!selected.length) return;
@@ -37,6 +45,7 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
     setError(null);
     try {
       for (const channelId of selected) await onForward(channelId);
+      onDone?.(selected.length);
       onClose();
     } catch (err) {
       setError(err.message);
@@ -76,9 +85,12 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
           {options.map((option) => (
             <button
               key={option.id}
+              type="button"
               onClick={() => toggle(option.id)}
+              aria-pressed={selected.includes(option.id)}
+              disabled={atLimit && !selected.includes(option.id)}
               className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded text-left transition-colors ${
-                selected.includes(option.id) ? 'bg-d-active' : 'hover:bg-d-hover/60'
+                selected.includes(option.id) ? 'bg-d-active' : 'hover:bg-d-hover/60 disabled:opacity-50 disabled:hover:bg-transparent'
               }`}
             >
               <option.icon className="w-4 h-4 text-d-text4 shrink-0" />
@@ -95,7 +107,10 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
           <div className="text-[11px] text-d-text3 mb-2 line-clamp-2 whitespace-pre-wrap break-words">
             {message.content || t('chat.attachmentCount', { count: message.attachments?.length ?? 0 })}
           </div>
-          {error && <p className="text-xs text-d-danger mb-2">{error}</p>}
+          <p className={`text-[11px] mb-2 ${atLimit ? 'text-d-text2 font-semibold' : 'text-d-text3'}`} aria-live="polite">
+            {t('integration.forwardLimit', { count: maxDestinations })}
+          </p>
+          {error && <p className="text-xs text-d-dangertext mb-2" role="alert">{error}</p>}
           <button
             onClick={submit}
             disabled={busy || selected.length === 0}

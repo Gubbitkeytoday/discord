@@ -21,7 +21,10 @@ import MessageActions from './MessageActions';
 import SystemMessage, { SYSTEM_TYPES } from './SystemMessage';
 
 // Errors a retry cannot fix: offering "Retry" there only repeats the refusal.
-const FINAL_ERRORS = new Set(['MISSING_PERMISSIONS', 'FORBIDDEN', 'AUTOMOD_BLOCKED', 'AUTOMOD', 'SLOWMODE', 'ARCHIVED', 'BLOCKED']);
+const FINAL_ERRORS = new Set([
+  'MISSING_PERMISSIONS', 'FORBIDDEN', 'AUTOMOD_BLOCKED', 'AUTOMOD', 'SLOWMODE', 'ARCHIVED', 'BLOCKED',
+  'YOU_BLOCKED_USER', 'USER_UNREACHABLE', 'AGE_RESTRICTED', 'TIMED_OUT', 'CHANNEL_LOCKED', 'THREAD_ARCHIVED'
+]);
 
 /** Date divider and the red "New" line that sit above a message. */
 function Dividers({ dateDivider, firstUnread }) {
@@ -147,7 +150,8 @@ function MessageRow({
     body: `msg-body-${msg.id}`,
     time: `msg-time-${msg.id}`
   };
-  const finalError = msg.failed && FINAL_ERRORS.has(msg.errorCode);
+  // Any 403 is a refusal, not a hiccup: retrying cannot change the answer.
+  const finalError = msg.failed && (FINAL_ERRORS.has(msg.errorCode) || msg.errorStatus === 403);
   // Two or more plain images (no spoilers, previews on, not held for safety)
   // become one mosaic; everything else renders one by one.
   const attachments = msg.attachments ?? [];

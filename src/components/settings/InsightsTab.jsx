@@ -56,7 +56,7 @@ function Sparkline({ points, label }) {
       </svg>
       <div className="flex justify-between text-[10px] text-d-text3 mt-1">
         <span>{points[0]?.day}</span>
-        <span>{t('insights.peak', { n: formatNumber(max), count: max })}</span>
+        <span>{t('insights.peak', { count: max })}</span>
         <span>{points[points.length - 1]?.day}</span>
       </div>
     </figure>
@@ -118,7 +118,7 @@ export default function InsightsTab({ server, channels = [], onToast, onOpenSafe
             aria-pressed={days === w}
             className={`text-xs font-semibold px-3 py-1.5 rounded-md ${days === w ? 'bg-d-brand text-white' : 'bg-d-surface text-d-text2 hover:text-d-strong'}`}
           >
-            {t('insights.lastDays', { n: w, count: w })}
+            {t('insights.lastDays', { count: w })}
           </button>
         ))}
       </div>
@@ -163,7 +163,7 @@ export default function InsightsTab({ server, channels = [], onToast, onOpenSafe
                     <span className="text-d-text3">#</span>
                     <span className="text-d-strong truncate flex-1">{c.name}</span>
                     <span className="text-d-text3 text-xs tabular-nums">
-                      {t('insights.messagesCount', { n: formatNumber(c.messages), count: c.messages })} · {t('insights.authorsCount', { n: formatNumber(c.authors), count: c.authors })}
+                      {t('insights.messagesCount', { count: c.messages })} · {t('insights.authorsCount', { count: c.authors })}
                     </span>
                   </li>
                 ))}
@@ -181,7 +181,7 @@ export default function InsightsTab({ server, channels = [], onToast, onOpenSafe
                     <img src={avatarOf(m)} alt="" className="w-5 h-5 rounded-full object-cover" />
                     <span className="text-d-strong truncate flex-1">{m.display_name || m.username}</span>
                     {Boolean(m.is_bot) && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
-                    <span className="text-d-text3 text-xs tabular-nums">{t('insights.messagesCount', { n: formatNumber(m.messages), count: m.messages })}</span>
+                    <span className="text-d-text3 text-xs tabular-nums">{t('insights.messagesCount', { count: m.messages })}</span>
                   </li>
                 ))}
               </ol>

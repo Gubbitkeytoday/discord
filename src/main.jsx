@@ -14,10 +14,11 @@ import '@fontsource/inter/500.css';
 import '@fontsource/inter/600.css';
 import '@fontsource/inter/700.css';
 import '@fontsource/inter/800.css';
-import '@fontsource/kanit/400.css';
-import '@fontsource/kanit/500.css';
-import '@fontsource/kanit/600.css';
-import '@fontsource/kanit/700.css';
+// Kanit is only for Thai (Latin text is Inter), so only its Thai subset loads.
+import '@fontsource/kanit/thai-400.css';
+import '@fontsource/kanit/thai-500.css';
+import '@fontsource/kanit/thai-600.css';
+import '@fontsource/kanit/thai-700.css';
 import './index.css';
 import './pwa/register.js'; // PWA: service worker, Web Push, install, update prompt
 

@@ -233,6 +233,13 @@ async function register(page, username) {
   await page.getByRole('button', { name: 'Sign up' }).click();
   await page.getByLabel(/Username/).fill(username);
   await page.getByLabel(/^Password/).fill(PASSWORD);
+  // Date of birth (safety round): three selects, when the sign-up form asks.
+  const month = page.getByLabel('Month', { exact: true });
+  if (await month.count()) {
+    await month.selectOption({ index: 1 });
+    await page.getByLabel('Day', { exact: true }).selectOption({ index: 1 });
+    await page.getByLabel('Year', { exact: true }).selectOption(String(new Date().getUTCFullYear() - 25));
+  }
   await page.locator('form button[type=submit]').click();
   await visible(page.getByRole('navigation', { name: 'Servers' }), 'app shell after register');
 }

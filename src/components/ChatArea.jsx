@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Hash, Lock, Megaphone, Volume2, MessagesSquare, PlusCircle } from 'lucide-react';
+import { Hash, Lock, Megaphone, Volume2, MessagesSquare, PlusCircle, ShieldOff, Flag, X } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { defaultAvatar } from '../utils/avatar';
 import { formatTypingText } from '../utils/messageGrouping';
@@ -215,6 +215,13 @@ export default function ChatArea(props) {
       openForwardSource: (source) => h().onJumpToMessage?.({ id: source.message_id, channel_id: source.channel_id }),
       markUnread: (msg) => h().onMarkUnread?.(msg),
       report: (msg) => h().onReport?.(msg),
+      // Block the author (long-press sheet). Not for bots/webhooks, yourself,
+      // or someone already blocked.
+      canBlock: (msg) => Boolean(h().onBlockUser) && Boolean(msg?.user_id) && !msg.is_webhook
+        && msg.user_id !== h().currentUser?.id && !h().blockedIds?.has?.(msg.user_id),
+      blockAuthor: (msg) => h().onBlockUser?.({
+        id: msg.user_id, username: msg.username, display_name: msg.display_name, avatar_url: msg.avatar_url
+      }),
       get canForward() { return Boolean(h().onForward); },
       get canReport() { return Boolean(h().onReport); },
       copyText: (msg) => copy(msg.content ?? ''),
@@ -398,6 +405,18 @@ export default function ChatArea(props) {
     );
   }
 
+  // A 1:1 DM: the other person, whether you blocked them (then the composer
+  // becomes an "Unblock" bar, as on Discord), and the header's "⋯" actions.
+  const dmPeer = channel.type === 'dm' ? channel.recipients?.[0] ?? null : null;
+  const youBlocked = Boolean(dmPeer && (blockedIds?.has?.(dmPeer.id) || props.sendBlocked));
+  const dmMenuItems = dmPeer ? [
+    youBlocked
+      ? props.onUnblockUser && { icon: ShieldOff, label: t('dm.unblock'), action: () => props.onUnblockUser(dmPeer) }
+      : props.onBlockUser && { icon: ShieldOff, label: t('dm.block'), danger: true, action: () => props.onBlockUser(dmPeer) },
+    props.onReportUser && { icon: Flag, label: t('safety.reportUser'), danger: true, action: () => props.onReportUser(dmPeer) },
+    props.onCloseDm && { icon: X, label: t('dm.closeConversation'), action: () => props.onCloseDm() }
+  ].filter(Boolean) : null;
+
   const title = isDM ? channel.display_name : channel.name;
   const channelLabel = isDM ? `@${title}` : `#${title}`;
   const parentChannel = channel.type === 'thread' && channel.parent_id
@@ -443,7 +462,7 @@ export default function ChatArea(props) {
           showMemberList={showMemberList}
           inboxCount={inboxCount}
           onOpenMobileSidebar={onOpenMobileSidebar}
-          onStartCall={onStartCall}
+          onStartCall={youBlocked ? null : onStartCall}
           onFollowChannel={onFollowChannel}
           onArchiveThread={onArchiveThread}
           onAddGroupRecipients={onAddGroupRecipients}
@@ -454,6 +473,7 @@ export default function ChatArea(props) {
           onSearch={onSearch}
           onOpenMobileSearch={() => setShowMobileSearch(true)}
           onSelectChannel={props.onSelectChannel}
+          dmMenuItems={dmMenuItems}
         />
       )}
 
@@ -484,6 +504,23 @@ export default function ChatArea(props) {
         use24Hour={chatPrefs.use24HourClock}
       />
 
+      {youBlocked ? (
+        <div role="status" className="mx-4 max-sm:mx-2 mb-2 px-4 py-3 rounded-lg bg-d-input text-sm text-d-text2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+          <span>{t('integration.youBlocked')}</span>
+          {props.onUnblockUser && (
+            <>
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={() => props.onUnblockUser(dmPeer)}
+                className="font-semibold text-d-link hover:underline min-h-6"
+              >
+                {t('dm.unblock')}
+              </button>
+            </>
+          )}
+        </div>
+      ) : (
       <Composer
         key={`composer-${channelId}`}
         ref={composerRef}
@@ -516,6 +553,7 @@ export default function ChatArea(props) {
         onArrowUpEmpty={composerCallbacks.onArrowUpEmpty}
         getRecentGifs={composerCallbacks.getRecentGifs}
       />
+      )}
 
       {/* Typing indicator in the composer's gutter, as in Discord. The live
           announcer speaks it; this line is visual only. */}
