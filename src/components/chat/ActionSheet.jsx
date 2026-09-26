@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import {
   Reply, Pencil, Trash2, Pin, PinOff, Copy, Link2, SmilePlus, MessagesSquare, Forward, MailOpen, Flag, Megaphone
 } from 'lucide-react';
@@ -19,7 +19,14 @@ export default function ActionSheet({
   const ref = useFocusTrap(true, onClose);
   useBackClose(true, onClose);
 
-  const run = (fn) => () => { onClose(); fn(); };
+  // The finger that long-pressed is still down when the sheet appears; the
+  // click it sends on release must not hit the backdrop (closing the sheet)
+  // or whichever action ended up under it.
+  // Only a click from a fresh touch inside the sheet, or from the keyboard
+  // (detail 0), counts.
+  const armed = useRef(false);
+  const accept = (event) => armed.current || event?.detail === 0;
+  const run = (fn) => (event) => { if (!accept(event)) return; onClose(); fn(); };
   const rows = [
     canReply && { icon: Reply, label: t('chat.reply'), action: () => actions.reply(msg) },
     { icon: SmilePlus, label: t('chat.addReaction'), action: () => actions.openReactionPicker(msg) },
@@ -40,8 +47,12 @@ export default function ActionSheet({
   ].filter(Boolean);
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col justify-end" data-testid="message-action-sheet">
-      <button type="button" aria-label={t('common.close')} onClick={onClose} className="absolute inset-0 bg-black/50 cursor-default" tabIndex={-1} />
+    <div
+      className="fixed inset-0 z-[60] flex flex-col justify-end"
+      data-testid="message-action-sheet"
+      onPointerDownCapture={() => { armed.current = true; }}
+    >
+      <button type="button" aria-label={t('common.close')} onClick={(event) => { if (accept(event)) onClose(); }} className="absolute inset-0 bg-black/50 cursor-default" tabIndex={-1} />
       <div
         ref={ref}
         role="dialog"
