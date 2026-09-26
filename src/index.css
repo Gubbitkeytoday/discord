@@ -412,3 +412,31 @@ input[type="range"] { height: 1.25rem; }
   animation-fill-mode: both;
   will-change: transform, opacity;
 }
+
+/* ---------------------------------------------------------------------------
+   Chat ergonomics.
+   --------------------------------------------------------------------------- */
+
+/* `scrollbar-none` is used by the rail and the friends tabs but Tailwind v4
+   ships no such utility — without this the rail grew a scrollbar gutter. */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+/* The message action bar is revealed by hover, by keyboard focus inside the
+   row, and — on touch screens, which have no hover — by the row a long-press
+   selected. Without the last two it was unreachable from a keyboard or phone. */
+.message-row:focus-within .message-actions,
+.message-row[data-actions-open="true"] .message-actions { display: flex; }
+
+/* A jumped-to message flashes, like Discord's highlight. */
+@keyframes messageFlash {
+  0%, 60% { background-color: color-mix(in srgb, var(--color-d-brand) 20%, transparent); }
+  100%    { background-color: transparent; }
+}
+.message-flash { animation: messageFlash 1.6s ease-out; }
+
+/* Loading skeleton for a channel's first page. */
+@keyframes skeletonPulse { 50% { opacity: 0.45; } }
+.skeleton { animation: skeletonPulse 1.4s ease-in-out infinite; }

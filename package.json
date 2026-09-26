@@ -20,6 +20,7 @@
     "test:watch": "node --test --watch scripts/test.mjs scripts/test-part2.mjs scripts/test-part3.mjs scripts/test-part4.mjs scripts/test-part5.mjs",
     "a11y": "node scripts/a11y-audit.mjs",
     "i18n:audit": "node scripts/i18n-audit.mjs",
+    "i18n:report": "node scripts/i18n-report.mjs",
     "seed": "node db/seed.js",
     "backup": "node scripts/backup.mjs create --files",
     "backup:list": "node scripts/backup.mjs list",
@@ -32,7 +33,8 @@
     "docker:up": "docker compose up -d --build",
     "docker:logs": "docker compose logs -f app",
     "docker:down": "docker compose down",
-    "jsx:check": "node scripts/jsx-check.mjs"
+    "jsx:check": "node scripts/jsx-check.mjs",
+    "e2e": "node scripts/e2e/run.mjs"
   },
   "optionalDependencies": {
     "sharp": "^0.33.5"

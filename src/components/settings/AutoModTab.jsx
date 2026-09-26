@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, ShieldAlert, AlertTriangle, Pencil } from 'lucide-react';
 import { t } from '../../i18n/index.jsx';
+import ConfirmModal from '../ConfirmModal';
 
 const triggers = () => [
   { key: 'keyword', label: t('automod.keyword'), hint: t('automod.keywordHint') },
@@ -16,6 +17,7 @@ const actionLabels = () => ({ block: t('automod.actionBlock'), alert: t('automod
 export default function AutoModTab({ rules, api, reload, channels, roles, onToast }) {
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const blank = (trigger) => ({
     name: triggers().find((entry) => entry.key === trigger)?.label ?? t('automod.newRule'),
@@ -65,14 +67,14 @@ export default function AutoModTab({ rules, api, reload, channels, roles, onToas
       if (draft.trigger_type === 'spam') metadata.max_messages = Number(draft.max_messages);
       if (draft.actions.includes('timeout')) metadata.timeout_seconds = Number(draft.timeout_seconds);
 
-      const body = JSON.stringify({
+      const body = {
         name: draft.name,
         trigger_type: draft.trigger_type,
         trigger_metadata: metadata,
         actions: draft.actions,
         exempt_roles: draft.exempt_roles,
         exempt_channels: draft.exempt_channels
-      });
+      };
       // An existing rule is patched in place; only a new one is POSTed.
       if (draft.id) await api(`/automod/${draft.id}`, { method: 'PATCH', body });
       else await api('/automod', { method: 'POST', body });
@@ -89,18 +91,31 @@ export default function AutoModTab({ rules, api, reload, channels, roles, onToas
   const toggle = async (rule) => {
     try {
       await api(`/automod/${rule.id}`, {
-        method: 'PATCH', body: JSON.stringify({ enabled: !rule.enabled })
+        method: 'PATCH', body: { enabled: !rule.enabled }
       });
       await reload();
     } catch (err) { onToast?.(err.message, { type: 'error' }); }
   };
 
+  // Throws so the confirm dialog stays open with the reason on failure.
   const remove = async (rule) => {
-    try {
-      await api(`/automod/${rule.id}`, { method: 'DELETE' });
-      await reload();
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    await api(`/automod/${rule.id}`, { method: 'DELETE' });
+    await reload();
   };
+
+  /**
+   * What stops the draft from being saved, if anything. A keyword rule with no
+   * keywords (or a regex rule with no pattern) saved fine before and then
+   * matched nothing — a filter that looks on but is not.
+   */
+  const problem = (() => {
+    if (!draft) return null;
+    if (!draft.name.trim()) return t('automod.needName');
+    if (draft.trigger_type === 'keyword' && !draft.keywords.split(',').some((k) => k.trim())) return t('automod.needKeywords');
+    if (draft.trigger_type === 'regex' && !draft.pattern.trim()) return t('automod.needPattern');
+    if (draft.actions.length === 0) return t('automod.needAction');
+    return null;
+  })();
 
   return (
     <div>
@@ -267,13 +282,14 @@ export default function AutoModTab({ rules, api, reload, channels, roles, onToas
             />
           </div>
 
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex items-center justify-end gap-2 pt-1">
+            {problem && <span className="mr-auto text-[11px] text-d-idle" role="status">{problem}</span>}
             <button onClick={() => setDraft(null)} className="text-xs text-d-strong px-3 py-1.5 hover:underline">
               {t('common.cancel')}
             </button>
             <button
               onClick={save}
-              disabled={busy || draft.actions.length === 0}
+              disabled={busy || Boolean(problem)}
               className="bg-d-success hover:bg-d-successhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-1.5 rounded transition-colors"
             >
               {busy ? t('common.saving') : draft.id ? t('common.saveChanges') : t('automod.createRule')}
@@ -331,7 +347,7 @@ export default function AutoModTab({ rules, api, reload, channels, roles, onToas
               </button>
 
               <button
-                onClick={() => remove(rule)}
+                onClick={() => setConfirmDelete(rule)}
                 className="shrink-0 text-d-text3 hover:text-d-danger transition-colors p-1"
                 aria-label={t('common.deleteNamed', { name: rule.name })}
               >
@@ -349,6 +365,16 @@ export default function AutoModTab({ rules, api, reload, channels, roles, onToas
             {t('automod.timeoutWarning')}
           </p>
         </div>
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={t('automod.deleteTitle', { name: confirmDelete.name })}
+          body={t('automod.deleteBody')}
+          confirmLabel={t('common.delete')}
+          onConfirm={() => remove(confirmDelete)}
+          onClose={() => setConfirmDelete(null)}
+        />
       )}
     </div>
   );

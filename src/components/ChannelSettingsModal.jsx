@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Hash, Volume2, Trash2, X, Loader2, Megaphone, Check } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 // Discord's slowmode presets, in seconds.
@@ -26,7 +26,7 @@ export default function ChannelSettingsModal({ channel, canManage, onSave, onDel
   const [userLimit, setUserLimit] = useState(Number(channel.user_limit) || 0);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const isVoice = channel.type === 'voice' || channel.type === 'stage';
   const Icon = isVoice ? Volume2 : channel.type === 'announcement' ? Megaphone : Hash;

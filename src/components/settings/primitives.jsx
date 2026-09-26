@@ -14,8 +14,57 @@
 //    control column   never wraps; the text column shrinks instead
 // ============================================================================
 
-import React, { useId } from 'react';
-import { Check, X, RotateCcw } from 'lucide-react';
+import React, { useEffect, useId, useRef } from 'react';
+import { Check, X, RotateCcw, Loader2 } from 'lucide-react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { t } from '../../i18n/index.jsx';
+
+/* --- dialogs ---------------------------------------------------------------- */
+
+/**
+ * Escape closes the *top-most* dialog only.
+ *
+ * useFocusTrap listens for Escape on `document` in the capture phase, and every
+ * open trap gets the event in the order it was mounted — so pressing Escape in
+ * a confirm box opened from Server Settings closed Server Settings as well.
+ * Layers registered here share one window-level capture listener (window runs
+ * before document) that only calls the most recently opened layer.
+ */
+const escapeLayers = [];
+function onLayerKeyDown(event) {
+  if (event.key !== 'Escape' || escapeLayers.length === 0) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  escapeLayers[escapeLayers.length - 1].current?.();
+}
+
+export function useEscapeLayer(onEscape, active = true) {
+  const handler = useRef(onEscape);
+  handler.current = onEscape;
+  useEffect(() => {
+    if (!active) return undefined;
+    escapeLayers.push(handler);
+    if (escapeLayers.length === 1) window.addEventListener('keydown', onLayerKeyDown, true);
+    return () => {
+      const index = escapeLayers.lastIndexOf(handler);
+      if (index !== -1) escapeLayers.splice(index, 1);
+      if (escapeLayers.length === 0) window.removeEventListener('keydown', onLayerKeyDown, true);
+    };
+  }, [active]);
+}
+
+/**
+ * Focus trap + Escape layer for a modal. Use this instead of
+ * `useFocusTrap(true, onClose)`: that form re-runs the trap whenever `onClose`
+ * changes identity — and callers pass inline arrows, so every parent re-render
+ * (an incoming message is enough) yanked focus to the dialog's first field
+ * mid-typing. Here the trap's dependencies never change and Escape reads the
+ * latest handler through a ref.
+ */
+export function useDialog(onClose, { active = true } = {}) {
+  useEscapeLayer(onClose, active);
+  return useFocusTrap(active);
+}
 
 /* --- page ------------------------------------------------------------------ */
 
@@ -313,6 +362,67 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+/** Tell the settings shell whether this page is holding unsaved edits. */
+export function useReportDirty(dirty, onDirtyChange) {
+  useEffect(() => { onDirtyChange?.(Boolean(dirty)); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+}
+
+/**
+ * Discord's "You have unsaved changes" bar. Sticky to the bottom of the page.
+ * Each time `nudge` increases (someone tried to leave with edits pending) it
+ * turns red, says so, and shakes — Discord's way of refusing navigation
+ * without a modal.
+ */
+export function UnsavedBar({
+  nudge = 0, onReset, onSave, saving = false, saveDisabled = false, saveLabel, resetLabel
+}) {
+  const ref = useRef(null);
+  const baseline = useRef(nudge);
+  const warned = nudge > baseline.current;
+
+  useEffect(() => {
+    if (nudge <= baseline.current) return;
+    ref.current?.scrollIntoView?.({ block: 'nearest' });
+    ref.current?.animate?.(
+      [0, -10, 10, -8, 8, -4, 0].map((x) => ({ transform: `translateX(${x}px)` })),
+      { duration: 420, easing: 'ease-in-out' }
+    );
+  }, [nudge]);
+
+  return (
+    <div
+      ref={ref}
+      role="status"
+      className={`sticky bottom-4 z-10 mt-6 flex items-center justify-between gap-4 rounded-lg px-4 py-3
+        shadow-xl ring-1 ring-black/20 transition-colors ${warned ? 'bg-d-danger' : 'bg-d-base3'}`}
+    >
+      <span className={`text-sm font-medium ${warned ? 'text-white' : 'text-d-strong'}`}>
+        {warned ? t('common.unsavedCareful') : t('common.unsavedChanges')}
+      </span>
+      <div className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={saving}
+          className={`text-sm font-medium hover:underline disabled:opacity-50 ${warned ? 'text-white' : 'text-d-strong'}`}
+        >
+          {resetLabel ?? t('common.resetChanges')}
+        </button>
+        <Button
+          variant="primary"
+          onClick={onSave}
+          disabled={saving || saveDisabled}
+          className="bg-d-success hover:bg-d-successhover"
+        >
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saveLabel ?? t('common.saveChanges')}
+        </Button>
+      </div>
+    </div>
   );
 }
 

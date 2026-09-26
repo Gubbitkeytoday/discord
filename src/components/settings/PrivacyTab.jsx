@@ -33,7 +33,7 @@ const FRIEND_REQUESTS = () => [
  * rules here are also enforced on the server — a client that ignored them would
  * still be refused at the API.
  */
-export default function PrivacyTab({ currentUser, onSaveProfile }) {
+export default function PrivacyTab({ currentUser, onSaveProfile, onToast }) {
   const { prefs, update, reset } = useUserSettings();
   // Profile visibility lives on the user row, not in preferences, because the
   // server reads it when *other people* look at you — it is theirs to obey.
@@ -64,7 +64,8 @@ export default function PrivacyTab({ currentUser, onSaveProfile }) {
         <RadioList
           label={t('privacy.profileVisibility')}
           value={visibility}
-          onChange={(value) => onSaveProfile?.({ profile_visibility: value })}
+          onChange={(value) => Promise.resolve(onSaveProfile?.({ profile_visibility: value }))
+            .catch((err) => onToast?.(err.message, { type: 'error' }))}
           options={PROFILE_VISIBILITY()}
         />
       </Section>
@@ -100,24 +101,25 @@ export default function PrivacyTab({ currentUser, onSaveProfile }) {
           checked={privacy.allowServerMemberDms}
           onChange={(value) => set({ allowServerMemberDms: value })}
         />
+        {/* There used to be a "usage analytics" switch here. Nothing collects
+            analytics, so it changed nothing either way — the note below says
+            so honestly instead of offering a control with no effect. */}
         <SettingToggle
           label={t('privacy.showActivity')}
           hint={t('privacy.showActivityHint')}
           checked={privacy.showCurrentActivity}
           onChange={(value) => set({ showCurrentActivity: value })}
-        />
-        <SettingToggle
-          label={t('privacy.analytics')}
-          hint={t('privacy.analyticsHint')}
-          checked={privacy.allowAnalytics}
-          onChange={(value) => set({ allowAnalytics: value })}
           last
         />
       </Section>
 
       <Note>{t('privacy.selfHostedNote')}</Note>
 
-      <ResetButton onClick={() => reset('privacy')}>{t('privacy.resetDefaults')}</ResetButton>
+      <ResetButton
+        onClick={() => reset('privacy').catch((err) => onToast?.(err.message, { type: 'error' }))}
+      >
+        {t('privacy.resetDefaults')}
+      </ResetButton>
     </div>
   );
 }
