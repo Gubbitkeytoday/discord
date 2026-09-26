@@ -48,13 +48,17 @@ server {
     ssl_session_timeout 1d;
 
     # TLS terminates here, so HSTS belongs here.
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header Strict-Transport-Security "max-age=63072000" always;
     server_tokens off;
 
     # Uploads. The app enforces its own per-file and per-user quotas; this only
-    # has to be generous enough not to reject them first.
-    client_max_body_size 60m;
+    # has to be generous enough not to reject them first. Videos go up to
+    # 100 MB and one message can carry 10 x 50 MB attachments — 60m returned a
+    # bare 413 for both.
+    client_max_body_size 520m;
     client_body_timeout 300s;
+    # Stream bodies to the app instead of spooling them to a temp file first.
+    proxy_request_buffering off;
 
     gzip on;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;

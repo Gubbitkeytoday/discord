@@ -28,6 +28,12 @@ function saveJson(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
 }
 
+/** A translation, or English when the key has not been added yet. */
+function tr(key, fallback, values) {
+  const text = t(key, values);
+  return text === key ? fallback : text;
+}
+
 export default function VoiceRoom({
   headerActions = null,
   channel,
@@ -44,7 +50,11 @@ export default function VoiceRoom({
   socket,
   viewerPermissions = [],
   isOwner = false,
-  onToast
+  onToast,
+  // Keep the call running without drawing it. The media and peer hooks live in
+  // this component, so unmounting it hangs up the audio; a parent that lets the
+  // user browse other channels mid-call renders it with `hidden` instead.
+  hidden = false
 }) {
   const [showSoundboard, setShowSoundboard] = useState(false);
   const [lastSound, setLastSound] = useState(null);
@@ -211,6 +221,15 @@ export default function VoiceRoom({
   const nameFor = (userId) =>
     participants.find((p) => p.userId === userId)?.username ?? t('dm.unknownUser');
 
+  if (hidden) return null;
+
+  const peerStateLabel = (state) => {
+    if (state === 'new' || state === 'connecting') return t('voice.connecting');
+    if (state === 'disconnected') return tr('voice.reconnecting', 'Reconnecting…');
+    if (state === 'failed') return tr('voice.connectionFailed', 'Can\u2019t connect');
+    return state;
+  };
+
   return (
     <div className="flex-1 bg-d-sunken flex flex-col h-full min-w-0 select-none z-10">
       {/* Header */}
@@ -260,7 +279,19 @@ export default function VoiceRoom({
       {media.error && (
         <div className="mx-4 mt-3 px-3 py-2 bg-d-danger/10 border border-d-danger/40 rounded flex items-start gap-2 text-xs text-d-danger">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span className="flex-1">{media.error}</span>
+          <span className="flex-1">
+            {media.error}
+            {!media.hasMic && (
+              <span className="block text-d-text2 mt-0.5">
+                {tr('voice.noMicHint', 'You are connected, but nobody can hear you until a microphone works.')}
+              </span>
+            )}
+          </span>
+          {onOpenVoiceSettings && (
+            <button onClick={onOpenVoiceSettings} className="underline font-semibold shrink-0">
+              {t('settings.voiceTitle')}
+            </button>
+          )}
           <button onClick={media.clearError} aria-label={t('common.close')}><X className="w-3.5 h-3.5" /></button>
         </div>
       )}
@@ -355,8 +386,15 @@ export default function VoiceRoom({
                 )}
 
                 {!isSelf && mesh.peerStates[p.socketId] && mesh.peerStates[p.socketId] !== 'connected' && (
-                  <span className="absolute top-2 left-2 text-[10px] bg-d-idle/20 text-d-idle px-1.5 py-0.5 rounded font-semibold">
-                    {mesh.peerStates[p.socketId] === 'connecting' ? t('voice.connecting') : mesh.peerStates[p.socketId]}
+                  <span
+                    className={`absolute top-2 left-2 text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                      mesh.peerStates[p.socketId] === 'failed' ? 'bg-d-danger/20 text-d-danger' : 'bg-d-idle/20 text-d-idle'
+                    }`}
+                    title={mesh.peerStates[p.socketId] === 'failed'
+                      ? tr('voice.connectionFailedHint', 'No network route to this person. The server needs a TURN relay for some networks.')
+                      : undefined}
+                  >
+                    {peerStateLabel(mesh.peerStates[p.socketId])}
                   </span>
                 )}
 
@@ -516,7 +554,7 @@ export default function VoiceRoom({
             channelId={channel?.id}
             socket={socket}
             onClose={() => setShowSoundboard(false)}
-            onToast={undefined}
+            onToast={onToast}
           />
         )}
 
@@ -527,8 +565,7 @@ export default function VoiceRoom({
               text-[11px] text-d-text2 shadow-lg"
           >
             {t('soundboard.played', {
-              name: participants.find((p) => p.userId === lastSound.userId)?.displayName
-                ?? t('voice.youLabel'),
+              name: lastSound.userId === selfId ? t('voice.youLabel') : nameFor(lastSound.userId),
               sound: lastSound.name
             })}
           </div>
@@ -540,6 +577,7 @@ export default function VoiceRoom({
             isMuted ? 'bg-d-danger text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
           }`}
           title={isMuted ? t('sidebar.unmute') : t('sidebar.mute')}
+          aria-label={t('sidebar.mute')}
           aria-pressed={isMuted}
         >
           {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
@@ -551,6 +589,7 @@ export default function VoiceRoom({
             isDeafened ? 'bg-d-danger text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
           }`}
           title={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
+          aria-label={t('sidebar.deafen')}
           aria-pressed={isDeafened}
         >
           {isDeafened ? <HeadphoneOff className="w-6 h-6" /> : <Headphones className="w-6 h-6" />}
@@ -640,6 +679,7 @@ export default function VoiceRoom({
           onClick={handleLeaveClick}
           className="p-3.5 bg-d-danger hover:bg-d-dangerhover text-white rounded-full transition-all shadow-lg hover:scale-105"
           title={t('sidebar.disconnect')}
+          aria-label={t('sidebar.disconnect')}
         >
           <PhoneOff className="w-6 h-6" />
         </button>

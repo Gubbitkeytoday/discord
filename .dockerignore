@@ -15,7 +15,12 @@ dist
 public/uploads
 backups
 
-# Development-only material.
+# Development-only material. .claude can hold whole agent worktrees — copies
+# of the repository, node_modules included — which would balloon the context.
+.claude
+.github
+settings-preview.html
+start-discord.bat
 scripts/themeify*.mjs
 scripts/i18n-remaining.mjs
 *.log
