@@ -329,7 +329,8 @@ export async function translateMessage({ userId, messageId, targetLang }) {
         failures.push(err instanceof ProviderError ? err.message : `${name}: failed`);
       }
     }
-    console.warn(`⚠️  translation failed for message ${id} → ${target} (${failures.join('; ')})`);
+    // The id logged is the database row's, not the request's copy of it.
+    console.warn(`⚠️  translation failed for message ${message.id} → ${target} (${failures.join('; ')})`);
     throw new ApiError('Translation is temporarily unavailable', { status: 502, code: 'TRANSLATION_FAILED' });
   })();
   inflight.set(key, work);

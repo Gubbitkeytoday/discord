@@ -14,7 +14,7 @@ import {
 } from './testHarness.mjs';
 import { generateCode } from '../lib/totp.js';
 import { computeChannelPermissions, PERMISSIONS, has } from '../lib/permissions.js';
-import { isPrivateAddress } from '../services/linkEmbeds.js';
+import { isPrivateAddress, decodeEntities } from '../services/linkEmbeds.js';
 
 // The harness forwards this process's environment to the server it spawns,
 // so TURN can be configured for the ICE endpoint test.
@@ -94,6 +94,13 @@ describe('pure rules', () => {
     assert.ok(!has(result, 'EMBED_LINKS'));
     assert.ok(!has(result, 'MENTION_EVERYONE'));
     assert.ok(has(result, 'ADD_REACTIONS'));
+  });
+
+  test('unfurl entity decoding is single-pass (no double unescaping)', () => {
+    assert.equal(decodeEntities('Tom &amp; Jerry &lt;3 &quot;hi&quot; &#39;x&#039; &#x41;&#66;'), 'Tom & Jerry <3 "hi" \'x\' AB');
+    assert.equal(decodeEntities('&amp;lt;script&amp;gt;'), '&lt;script&gt;');
+    assert.equal(decodeEntities('&#38;lt;'), '&lt;');
+    assert.equal(decodeEntities('&bogus; &#x110000;'), '&bogus; &#x110000;');
   });
 
   test('SSRF guard refuses mapped, private and reserved addresses', () => {

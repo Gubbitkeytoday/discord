@@ -66,6 +66,10 @@ async function allocateDiscriminator(username) {
   throw usernameTaken();
 }
 
+// Each attempt runs a deliberately slow password hash, and a stolen session
+// must not get the global read budget (600/min) of current-password guesses.
+const passwordChangeRateLimit = rateLimit({ name: 'password-change', limit: 10, windowMs: 15 * 60_000 });
+
 router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => {
   const username = String(req.body?.username ?? '').trim();
   const displayName = String(req.body?.display_name ?? username).trim().slice(0, 80);
@@ -231,7 +235,7 @@ router.delete('/auth/sessions/:sessionId', asyncRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-router.post('/auth/change-password', asyncRoute(async (req, res) => {
+router.post('/auth/change-password', passwordChangeRateLimit, asyncRoute(async (req, res) => {
   if (!req.userId) throw ApiError.unauthorized();
   const user = await getQuery(`SELECT password_hash FROM users WHERE id = ?`, [req.userId]);
 

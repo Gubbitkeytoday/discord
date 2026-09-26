@@ -172,13 +172,16 @@ function extract(html, patterns) {
   return null;
 }
 
-function decodeEntities(text) {
-  return text
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)));
+// One pass over the text: decoding entity by entity in sequence would turn a
+// literal "&amp;lt;" into "<" (double unescaping) instead of "&lt;".
+const NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+export function decodeEntities(text) {
+  return text.replace(/&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));/gi, (entity, hex, dec, name) => {
+    if (name !== undefined) return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : entity;
+    const codePoint = hex !== undefined ? parseInt(hex, 16) : Number(dec);
+    return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+  });
 }
 
 /**

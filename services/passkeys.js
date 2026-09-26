@@ -353,9 +353,14 @@ async function verifyAssertion({ cfg, challenge, response, ip, userAgent }) {
   );
   if (!row || row.user_deleted) throw authFailed();
 
-  // When the authenticator returns the user handle it must be this account's.
-  const handle = response?.response?.userHandle;
-  if (handle && handle !== Buffer.from(userHandle(row.user_id)).toString('base64url')) throw authFailed();
+  // The user handle must be this account's. Whether it may be absent is
+  // decided by the server-side challenge, not by the request: a discoverable
+  // sign-in (no allowCredentials) always returns it (WebAuthn §7.2 step 6),
+  // while step-up names the credentials and the handle is optional there.
+  const expectedHandle = Buffer.from(userHandle(row.user_id)).toString('base64url');
+  const handleRequired = challenge.purpose === 'login';
+  const presentedHandle = response?.response?.userHandle ?? (handleRequired ? null : expectedHandle);
+  if (presentedHandle !== expectedHandle) throw authFailed();
 
   const { verifyAuthenticationResponse } = await lib();
   let verification;
