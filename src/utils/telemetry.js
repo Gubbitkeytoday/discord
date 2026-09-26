@@ -89,8 +89,8 @@ function startVitals() {
     if (sent) setTimeout(flush, 0);
   };
 
-  addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
-  addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+  window.addEventListener('pagehide', flush);
 
   import('web-vitals').then(({ onLCP, onINP, onCLS, onFCP, onTTFB }) => {
     onLCP(report);
@@ -105,8 +105,8 @@ function startVitals() {
 
 function startErrors(cfg) {
   const remember = (event) => captureException(event.reason ?? event.error ?? new Error(scrub(event.message)));
-  addEventListener('error', remember);
-  addEventListener('unhandledrejection', remember);
+  window.addEventListener('error', remember);
+  window.addEventListener('unhandledrejection', remember);
 
   import('@sentry/browser').then((Sentry) => {
     Sentry.init({
@@ -121,8 +121,8 @@ function startErrors(cfg) {
       // No session tracking, replay or feedback widgets: errors only.
       integrations: (defaults) => defaults.filter((i) => !['BrowserSession', 'BrowserTracing', 'Replay', 'Feedback'].includes(i.name))
     });
-    removeEventListener('error', remember);
-    removeEventListener('unhandledrejection', remember);
+    window.removeEventListener('error', remember);
+    window.removeEventListener('unhandledrejection', remember);
     sentry = Sentry;
     for (const error of early.splice(0)) Sentry.captureException(error);
   }).catch(() => {});
