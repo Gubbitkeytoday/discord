@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import ErrorBoundary from './components/ErrorBoundary';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';
 import { DEFAULT_AVATAR } from './utils/avatar';
@@ -42,7 +43,9 @@ document.addEventListener('error', (event) => {
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <I18nProvider>
-      <App />
+      <ErrorBoundary variant="app" region="app">
+        <App />
+      </ErrorBoundary>
     </I18nProvider>
   </React.StrictMode>
 );

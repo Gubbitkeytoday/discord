@@ -5,23 +5,34 @@ import React, { Component, Suspense, lazy } from 'react';
  * not take the whole app down: the surface simply does not open, and the next
  * attempt retries the download.
  */
+const CHUNK_ERROR = /dynamically imported module|Importing a module script failed|Loading chunk|Loading CSS chunk|ChunkLoadError/i;
+export const isChunkLoadError = (error) =>
+  error?.name === 'ChunkLoadError' || CHUNK_ERROR.test(String(error?.message ?? ''));
+
 class ChunkBoundary extends Component {
   constructor(props) {
     super(props);
-    this.state = { failed: false };
+    this.state = { error: null };
   }
 
-  static getDerivedStateFromError() {
-    return { failed: true };
+  static getDerivedStateFromError(error) {
+    return { error };
   }
 
   componentDidCatch(error) {
+    if (!isChunkLoadError(error)) return;
     console.error('Failed to load a part of the app:', error);
     this.props.onError?.();
   }
 
   render() {
-    return this.state.failed ? null : this.props.children;
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    // Only a failed download is swallowed here. A render error inside the
+    // loaded component goes on up to the nearest ErrorBoundary, which can
+    // say so and offer a retry instead of the surface silently vanishing.
+    if (!isChunkLoadError(error)) throw error;
+    return null;
   }
 }
 
