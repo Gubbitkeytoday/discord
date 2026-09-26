@@ -270,6 +270,16 @@ export function useVoiceMedia({ enabled, isMuted, pushToTalk: pushToTalkProp, on
     };
   }, [pushToTalk, enabled, PTT_KEY]);
 
+  /**
+   * The on-screen hold-to-talk button (touch screens have no key to hold).
+   * Pressing opens the mic exactly like the key does; the caller releases it
+   * on pointerup / pointercancel / lostpointercapture. A no-op outside PTT.
+   */
+  const holdToTalk = useCallback((held) => {
+    if (!pushToTalk || !enabled) return;
+    setPttHeld(Boolean(held));
+  }, [pushToTalk, enabled]);
+
   // --- camera ---------------------------------------------------------------
 
   /**
@@ -445,6 +455,8 @@ export function useVoiceMedia({ enabled, isMuted, pushToTalk: pushToTalkProp, on
     transmitting: transmitting && Boolean(micStream),
     hasMic: Boolean(micStream),
     pttHeld,
+    pushToTalk,
+    holdToTalk,
     cameraStream,
     screenStream,
     toggleCamera,

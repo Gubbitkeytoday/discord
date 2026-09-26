@@ -312,6 +312,7 @@ export default function VoiceSettings({ onToast }) {
 
         {settings.inputMode === 'ptt' && (
           <div className="mt-4 border-l-2 border-d-divider pl-4">
+            <p className="text-sm text-d-text2 pt-2" data-testid="ptt-touch-hint">{t('voice.pttTouchHint')}</p>
             <Row2 label={t('voice.keybind')}>
               <button
                 type="button"
@@ -382,7 +383,7 @@ export default function VoiceSettings({ onToast }) {
         />
         <SettingToggle
           label={t('voice.noiseSuppression')}
-          hint={t('voice.noiseSuppressionHint')}
+          hint={`${t('voice.noiseSuppressionHint')} ${t('voice.noiseSuppressionInCall')}`}
           checked={settings.noiseSuppression}
           onChange={(value) => update({ noiseSuppression: value })}
         />
@@ -534,9 +535,26 @@ export default function VoiceSettings({ onToast }) {
           onChange={(value) => update({ silenceWarning: value })}
         />
         <SettingToggle
+          label={t('voice.announceSpeaking')}
+          hint={t('voice.announceSpeakingHint')}
+          checked={Boolean(settings.announceSpeaking)}
+          onChange={(value) => update({ announceSpeaking: value })}
+        />
+        <SettingToggle
           label={t('voice.joinLeaveSounds')}
           checked={settings.voiceJoinSound}
           onChange={(value) => update({ voiceJoinSound: value })}
+        />
+        <SettingToggle
+          label={t('voice.muteSounds')}
+          checked={settings.muteSounds !== false}
+          onChange={(value) => update({ muteSounds: value })}
+        />
+        <SettingToggle
+          label={t('voice.callControlLabels')}
+          hint={t('voice.callControlLabelsHint')}
+          checked={settings.callControlLabels !== false}
+          onChange={(value) => update({ callControlLabels: value })}
         />
         <SettingToggle
           label={t('voice.spatialAudio')}
