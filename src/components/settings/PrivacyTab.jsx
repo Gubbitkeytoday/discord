@@ -100,17 +100,11 @@ export default function PrivacyTab({ currentUser, onSaveProfile, onToast }) {
           hint={t('privacy.serverMemberDmsHint')}
           checked={privacy.allowServerMemberDms}
           onChange={(value) => set({ allowServerMemberDms: value })}
-        />
-        {/* There used to be a "usage analytics" switch here. Nothing collects
-            analytics, so it changed nothing either way — the note below says
-            so honestly instead of offering a control with no effect. */}
-        <SettingToggle
-          label={t('privacy.showActivity')}
-          hint={t('privacy.showActivityHint')}
-          checked={privacy.showCurrentActivity}
-          onChange={(value) => set({ showCurrentActivity: value })}
           last
         />
+        {/* There used to be a "usage analytics" switch here, and a "show
+            current activity" one that duplicated Activity Privacy's switch
+            without doing anything. That switch lives (and works) there. */}
       </Section>
 
       <Note>{t('privacy.selfHostedNote')}</Note>

@@ -6,6 +6,7 @@ import { get, post, del } from '../../api';
 import { localeTag, t } from '../../i18n/index.jsx';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { PageHeader, Divider } from './primitives';
+import QrCode from './QrCode';
 
 /**
  * Account and security: password, two-factor with recovery codes, e-mail
@@ -175,7 +176,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               {currentUser?.email || t('security.noEmail')}
             </p>
           </div>
-          {currentUser?.email && (
+          {Boolean(currentUser?.email) && (
             <button
               onClick={verifyEmail}
               disabled={busy === 'email'}
@@ -273,22 +274,35 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
           {enrolment && (
             <form onSubmit={confirmMfa} className="space-y-3">
               <p className="text-xs text-d-text2">{t('security.scanHint')}</p>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 bg-d-surface text-xs text-d-strong px-3 py-2 rounded break-all font-mono">
-                  {enrolment.secret}
-                </code>
-                <button
-                  type="button"
-                  onClick={() => { navigator.clipboard?.writeText(enrolment.secret); onToast?.(t('common.copied'), { type: 'success', ttl: 2000 }); }}
-                  className="p-2 bg-d-surface hover:bg-d-hover rounded text-d-text2"
-                  aria-label={t('common.copy')}
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                </button>
+              <div className="flex flex-col sm:flex-row gap-4 sm:items-start">
+                {Boolean(enrolment.otpauth_uri) && (
+                  <QrCode value={enrolment.otpauth_uri} label={t('security.qrLabel')} />
+                )}
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p className="text-[11px] font-bold text-d-text2 uppercase">{t('security.manualKey')}</p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 bg-d-surface text-sm text-d-strong px-3 py-2 rounded break-all font-mono tracking-wider select-all">
+                      {enrolment.secret.replace(/(.{4})/g, '$1 ').trim()}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => { navigator.clipboard?.writeText(enrolment.secret); onToast?.(t('common.copied'), { type: 'success', ttl: 2000 }); }}
+                      className="p-2 bg-d-surface hover:bg-d-hover rounded text-d-text2"
+                      aria-label={t('security.copyKey')}
+                      title={t('security.copyKey')}
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {Boolean(enrolment.otpauth_uri) && (
+                    // On a phone the authenticator is on the same device, so
+                    // there is nothing to scan — the otpauth: link opens it.
+                    <a href={enrolment.otpauth_uri} className="inline-block text-xs text-d-link hover:underline">
+                      {t('security.openInAuthenticator')}
+                    </a>
+                  )}
+                </div>
               </div>
-              {enrolment.otpauth_uri && (
-                <p className="text-[11px] text-d-text4 break-all">{enrolment.otpauth_uri}</p>
-              )}
               <label className="block">
                 <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
                 <input
@@ -331,7 +345,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
             </div>
           )}
 
-          {mfa?.enabled && (
+          {Boolean(mfa?.enabled) && (
             <form onSubmit={disableMfa} className="flex items-end gap-2 pt-2 border-t border-d-divider">
               <label className="block">
                 <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('security.sixDigitCode')}</span>
@@ -380,7 +394,7 @@ export default function AccountSecurityTab({ currentUser, onToast, onSignOut }) 
               <div className="min-w-0">
                 <p className="text-sm text-d-strong truncate">
                   {session.device_name || session.user_agent || t('security.unknownDevice')}
-                  {session.current && (
+                  {Boolean(session.current) && (
                     <span className="ml-2 text-[10px] bg-d-online/20 text-d-online px-1.5 py-0.5 rounded">
                       {t('security.thisDevice')}
                     </span>

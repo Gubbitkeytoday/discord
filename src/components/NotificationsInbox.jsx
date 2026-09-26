@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { Inbox, AtSign, Check } from 'lucide-react';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
@@ -12,17 +13,7 @@ export default function NotificationsInbox({
 }) {
   const ref = useRef(null);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const channelName = (id) => {
     const channel = channels.find((c) => c.id === id);

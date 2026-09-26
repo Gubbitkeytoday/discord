@@ -93,6 +93,8 @@ export const PREFERENCE_DEFAULTS = {
     markServerRead: 'Shift+Escape',
     navigateChannelUp: 'Alt+ArrowUp',
     navigateChannelDown: 'Alt+ArrowDown',
+    navigateUnreadUp: 'Alt+Shift+ArrowUp',
+    navigateUnreadDown: 'Alt+Shift+ArrowDown',
     toggleStreamerMode: 'Ctrl+Shift+S',
     disconnectVoice: 'Ctrl+Shift+H',
     navigateServerUp: 'Ctrl+Alt+ArrowUp',
@@ -105,7 +107,8 @@ export const PREFERENCE_DEFAULTS = {
     toggleEmojiPicker: 'Ctrl+E',
     openEvents: 'Ctrl+Shift+E',
     toggleFormatting: 'Ctrl+Shift+F',
-    jumpToHome: 'Ctrl+Shift+Home'
+    jumpToHome: 'Ctrl+Shift+Home',
+    openShortcuts: 'Ctrl+Slash'
   },
   voice: {
     inputMode: 'voice',
@@ -174,8 +177,21 @@ function writeCache(value) {
 // Module-level store so non-React code (sound effects, the hotkey engine, the
 // notification manager) can read the current values without prop drilling.
 let current = readCache();
+// The last value per category the server has confirmed. A failed save rolls
+// the category back to this, so the UI never shows a setting as saved when
+// it is not.
+let confirmed = structuredClone(current);
 const listeners = new Set();
+const errorListeners = new Set();
 const pending = new Map();     // category -> timer
+const inFlight = new Map();    // category -> request sequence number
+let sequence = 0;
+
+/** Subscribe to failed saves: `fn({ category, error })`. Returns an unsubscribe. */
+export function onPreferenceSaveError(fn) {
+  errorListeners.add(fn);
+  return () => errorListeners.delete(fn);
+}
 
 export function getPreferences() {
   return current;
@@ -194,20 +210,40 @@ export function updatePreferences(category, patchValue, { persist = true } = {})
   publish(next);
 
   if (!persist) return;
+  // Appearance › "Sync across devices" off: this device's look stays local.
+  if (!syncsAppearance(category, next)) return;
   // Debounced per category, so dragging a slider is one request, not fifty.
   clearTimeout(pending.get(category));
   pending.set(category, setTimeout(() => {
     pending.delete(category);
-    patch(`/api/settings/preferences/${category}`, current[category]).catch(() => {
-      // Offline or signed out: the local value still applies for this session.
-    });
+    const sent = current[category];
+    const seq = ++sequence;
+    inFlight.set(category, seq);
+    patch(`/api/settings/preferences/${category}`, sent)
+      .then((saved) => {
+        confirmed = { ...confirmed, [category]: mergeCategory(PREFERENCE_DEFAULTS[category], saved ?? sent) };
+      })
+      .catch((error) => {
+        // Only the newest request for a category may roll it back, and not
+        // while a newer edit is still waiting to be sent.
+        if (inFlight.get(category) !== seq || pending.has(category)) return;
+        publish({ ...current, [category]: confirmed[category] });
+        for (const fn of errorListeners) fn({ category, error });
+      })
+      .finally(() => { if (inFlight.get(category) === seq) inFlight.delete(category); });
   }, SAVE_DEBOUNCE_MS));
 }
 
 export async function resetPreferences(category) {
   const value = await del(`/api/settings/preferences/${category}`);
-  publish({ ...current, [category]: mergeCategory(PREFERENCE_DEFAULTS[category], value) });
+  const merged = mergeCategory(PREFERENCE_DEFAULTS[category], value);
+  confirmed = { ...confirmed, [category]: merged };
+  publish({ ...current, [category]: merged });
   return value;
+}
+
+function syncsAppearance(category, prefs = current) {
+  return category !== 'appearance' || prefs.appearance?.syncAcrossDevices !== false;
 }
 
 /** Replace everything from a server payload (sign-in, or another device saved). */
@@ -215,14 +251,19 @@ export function hydratePreferences(payload) {
   if (!payload) return;
   const next = {};
   for (const [category, defaults] of Object.entries(PREFERENCE_DEFAULTS)) {
-    next[category] = mergeCategory(defaults, payload[category]);
+    next[category] = syncsAppearance(category)
+      ? mergeCategory(defaults, payload[category])
+      : current[category];
   }
+  confirmed = structuredClone(next);
   publish(next);
 }
 
 export function applyCategoryFromServer(category, value) {
-  if (!PREFERENCE_DEFAULTS[category]) return;
-  publish({ ...current, [category]: mergeCategory(PREFERENCE_DEFAULTS[category], value) });
+  if (!PREFERENCE_DEFAULTS[category] || !syncsAppearance(category)) return;
+  const merged = mergeCategory(PREFERENCE_DEFAULTS[category], value);
+  confirmed = { ...confirmed, [category]: merged };
+  publish({ ...current, [category]: merged });
 }
 
 // --- applying to the document ------------------------------------------------

@@ -190,7 +190,7 @@ export default function InsightsTab({ server, channels = [], onToast }) {
                   <li key={m.id} className="flex items-center gap-2 text-sm">
                     <img src={avatarOf(m)} alt="" className="w-5 h-5 rounded-full object-cover" />
                     <span className="text-d-strong truncate flex-1">{m.display_name || m.username}</span>
-                    {m.is_bot && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
+                    {Boolean(m.is_bot) && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
                     <span className="text-d-text3 text-xs tabular-nums">{t('insights.messagesCount', { n: m.messages })}</span>
                   </li>
                 ))}
@@ -216,7 +216,7 @@ export default function InsightsTab({ server, channels = [], onToast }) {
                 className="w-4 h-4 accent-d-brand"
               />
             </label>
-            {widget.enabled && (
+            {Boolean(widget.enabled) && (
               <>
                 <label htmlFor="widget-channel" className="block text-[11px] font-bold uppercase tracking-wide text-d-text3 mb-1.5">
                   {t('insights.widgetChannel')}
@@ -251,7 +251,7 @@ export default function InsightsTab({ server, channels = [], onToast }) {
       <Section title={t('insights.raid')} description={t('insights.raidHint')}>
         {raid && (
           <>
-            {raid.lockdown && (
+            {Boolean(raid.lockdown) && (
               <Note tone="danger">
                 {t('insights.lockedDown', {
                   reason: raid.lockdown.reason,
@@ -273,7 +273,7 @@ export default function InsightsTab({ server, channels = [], onToast }) {
               />
             </label>
 
-            {raid.enabled && (
+            {Boolean(raid.enabled) && (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label htmlFor="raid-threshold" className="block text-[11px] font-bold uppercase tracking-wide text-d-text3 mb-1.5">

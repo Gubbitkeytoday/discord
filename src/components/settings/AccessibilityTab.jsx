@@ -117,7 +117,7 @@ export default function AccessibilityTab({ onToast }) {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-d-strong">{mode.label}</span>
-                  {mode.hint && <span className="mt-0.5 block text-xs text-d-text2">{mode.hint}</span>}
+                  {Boolean(mode.hint) && <span className="mt-0.5 block text-xs text-d-text2">{mode.hint}</span>}
                 </span>
                 <span className="shrink-0 text-sm font-medium" aria-hidden="true">{mode.sample}</span>
               </button>

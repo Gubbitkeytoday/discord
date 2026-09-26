@@ -1,22 +1,19 @@
-import React, { useEffect } from 'react';
+import React from 'react';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import { X, Download, ExternalLink } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 
 export default function ImageLightboxModal({ imageUrl, altText, onClose }) {
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  const dialogRef = useFocusTrap(Boolean(imageUrl), onClose);
 
   if (!imageUrl) return null;
 
   return (
-    <div 
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={altText || t('files.openOriginal')}
       className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-4 animate-in fade-in duration-200"
       onClick={onClose}
     >

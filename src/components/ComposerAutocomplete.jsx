@@ -93,7 +93,8 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         secondary: `@${m.username}`,
         avatar: m.avatar_url,
         color: m.role_color,
-        insert: `<@${m.id}> `
+        // Readable in the composer; resolved to <@id> on send.
+        insert: m.username ? `@${m.username} ` : `<@${m.id}> `
       }));
   }
 
@@ -105,7 +106,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         id: c.id,
         primary: c.name,
         secondary: c.category ?? '',
-        insert: `<#${c.id}> `
+        insert: /^[\p{L}\p{N}_-]+$/u.test(c.name ?? '') ? `#${c.name} ` : `<#${c.id}> `
       }));
   }
 
@@ -117,7 +118,7 @@ export function buildOptions(trigger, { members = [], channels = [], customEmoji
         primary: `:${e.name}:`,
         secondary: t('autocomplete.serverEmoji'),
         image: e.url,
-        insert: `<:${e.name}:${e.id}> `
+        insert: `:${e.name}: `
       }));
     const unicode = EMOJI_TABLE
       .filter((e) => e.name.includes(q))
@@ -197,11 +198,11 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
               index === activeIndex ? 'bg-d-active' : 'hover:bg-d-hover'
             }`}
           >
-            {option.avatar && (
+            {Boolean(option.avatar) && (
               <img src={option.avatar || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
             )}
-            {option.image && <img src={option.image} alt="" className="w-6 h-6 object-contain shrink-0" />}
-            {option.emoji && <span className="w-6 text-center text-lg shrink-0">{option.emoji}</span>}
+            {Boolean(option.image) && <img src={option.image} alt="" className="w-6 h-6 object-contain shrink-0" />}
+            {Boolean(option.emoji) && <span className="w-6 text-center text-lg shrink-0">{option.emoji}</span>}
 
             <span
               className="text-sm font-medium truncate"
@@ -209,7 +210,7 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
             >
               {option.primary}
             </span>
-            {option.secondary && (
+            {Boolean(option.secondary) && (
               <span className="text-xs text-d-text3 truncate ml-auto pl-2">{option.secondary}</span>
             )}
           </button>

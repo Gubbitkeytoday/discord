@@ -1,13 +1,15 @@
 import React from 'react';
+import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Pin, X } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
 /** Discord's pinned-messages popover, anchored under the pin icon. */
 export default function PinnedMessagesPopover({ messages = [], canUnpin = true, onClose, onJump, onUnpin }) {
+  useEscapeLayer(onClose);
   return (
     <>
       {/* Click-away layer, so the popover closes like Discord's does. */}
@@ -18,7 +20,7 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
           <span className="text-sm font-bold text-d-strong flex items-center gap-2">
             <Pin className="w-4 h-4" /> {t('chat.pinnedMessages')}
           </span>
-          <button onClick={onClose} className="text-d-text3 hover:text-d-strong transition-colors">
+          <button type="button" onClick={onClose} aria-label={t('common.close')} className="text-d-text3 hover:text-d-strong transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -41,7 +43,7 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
             >
               <div className="flex gap-2">
                 <img
-                  src={msg.avatar_url || FALLBACK_AVATAR}
+                  src={msg.avatar_url || defaultAvatar(msg.user_id)}
                   alt=""
                   className="w-8 h-8 rounded-full object-cover shrink-0"
                 />

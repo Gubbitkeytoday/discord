@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { t } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -88,7 +88,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                 >
                   <div className="relative shrink-0">
                     <img
-                      src={member.avatar_url || FALLBACK_AVATAR}
+                      src={member.avatar_url || defaultAvatar(member.id)}
                       alt=""
                       className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale' : ''}`}
                     />
@@ -130,7 +130,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       >
                         {member.display_name || member.username}
                       </span>
-                      {member.role_icon?.url && (
+                      {Boolean(member.role_icon?.url) && (
                         <img
                           src={member.role_icon.url}
                           alt=""
@@ -141,7 +141,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       {(member.is_bot || member.role === 'bot') && (
                         <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded shrink-0">BOT</span>
                       )}
-                      {member.pending && (
+                      {Boolean(member.pending) && (
                         <span className="bg-d-surface text-d-text3 text-[9px] font-bold px-1 rounded shrink-0" title={t('onboarding.pendingHint')}>
                           {t('onboarding.pendingBadge')}
                         </span>

@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { X, Hash, Users, Paperclip } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -36,7 +36,12 @@ export default function SearchResultsPanel({ query, results = [], channels = [],
   ), [results, channelFilter, authorFilter, attachmentsOnly]);
 
   return (
-    <aside className="w-80 bg-d-surface border-l border-d-edge/40 flex flex-col shrink-0 hidden xl:flex">
+    <aside
+      aria-label={t('chat.searchMessages')}
+      // Beside the chat on wide screens; a sheet over it below xl, where
+      // there is no room for a third column (it used to be hidden entirely).
+      className="w-80 bg-d-surface border-l border-d-edge/40 flex flex-col shrink-0 max-xl:fixed max-xl:inset-y-0 max-xl:right-0 max-xl:z-50 max-xl:shadow-2xl max-sm:w-full"
+    >
       <div className="h-12 px-4 border-b border-d-edge flex items-center justify-between shrink-0">
         <h2 className="text-sm font-bold text-d-strong truncate">
           {t('search.resultsCount', { count: visible.length })}
@@ -95,7 +100,7 @@ export default function SearchResultsPanel({ query, results = [], channels = [],
               <span className="ml-auto shrink-0">{formatFullTimestamp(message.created_at)}</span>
             </div>
             <div className="flex items-start gap-2">
-              <img src={message.avatar_url || FALLBACK_AVATAR} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+              <img src={message.avatar_url || defaultAvatar(message.user_id)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
               <div className="min-w-0">
                 <span className="block text-xs font-semibold text-d-strong truncate">
                   {message.display_name || message.username}

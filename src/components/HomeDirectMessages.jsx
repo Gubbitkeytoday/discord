@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import {
   Users, MessageSquare, X, UserPlus, Check, ShieldOff, ShieldAlert, UserMinus,
   Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox, Menu
@@ -65,6 +65,9 @@ export default function HomeDirectMessages({
   mobileOpen = false,
   onOpenMobile,
   onCloseMobile,
+  serverCount = 0,
+  onCreateServer,
+  onJoinServer,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -158,7 +161,7 @@ export default function HomeDirectMessages({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5">
+        <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5 focus:outline-none">
           <div className="px-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider mb-1 mt-2">
             <span>{t('dm.directMessages')}</span>
             <button
@@ -200,7 +203,7 @@ export default function HomeDirectMessages({
                   }`}
                 >
                   <div className="relative shrink-0">
-                    <img src={dm.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover" />
+                    <img src={dm.avatar_url || defaultAvatar(dm.recipients?.[0]?.id ?? dm.id)} alt="" className="w-8 h-8 rounded-full object-cover" />
                     {dm.type === 'dm' && (
                       <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-d-surface ${
                         STATUS_COLORS[recipient?.status] ?? STATUS_COLORS.offline
@@ -248,7 +251,7 @@ export default function HomeDirectMessages({
               </span>
               <span className="text-[11px] text-d-text3 truncate max-w-[130px]">{currentVoiceChannel.name}</span>
             </div>
-            <button
+            <button aria-label={t('sidebar.disconnect')}
               onClick={onLeaveVoice}
               className="p-1.5 bg-d-danger/20 hover:bg-d-danger text-d-danger hover:text-white rounded-full transition-colors shrink-0"
               title={t('sidebar.disconnect')}
@@ -267,7 +270,7 @@ export default function HomeDirectMessages({
             className="flex items-center gap-2 px-1 py-1 hover:bg-d-hover/60 rounded-md flex-1 min-w-0 transition-colors text-left"
           >
             <div className="relative shrink-0">
-              <img src={currentUser?.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover" />
+              <img src={currentUser?.avatar_url || defaultAvatar(currentUser?.id)} alt="" className="w-8 h-8 rounded-full object-cover" />
               <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-panel ${
                 STATUS_COLORS[currentUser?.status] ?? STATUS_COLORS.offline
               }`} />
@@ -300,7 +303,7 @@ export default function HomeDirectMessages({
             >
               {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
-            <button
+            <button aria-label={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
               onClick={onToggleDeafen}
               aria-pressed={isDeafened}
               className={`p-1.5 hover:bg-d-hover hover:text-white rounded transition-colors ${isDeafened ? 'text-d-danger' : ''}`}
@@ -308,7 +311,7 @@ export default function HomeDirectMessages({
             >
               <Headphones className="w-5 h-5" />
             </button>
-            <button
+            <button aria-label={t('sidebar.userSettings')}
               onClick={onOpenUserSettingsModal}
               className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"
               title={t('sidebar.userSettings')}
@@ -340,7 +343,32 @@ export default function HomeDirectMessages({
               <span className="font-bold text-d-strong">{t('dm.friends')}</span>
             </div>
 
-            <div className="flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
+            {/* Phones: one compact select instead of a sideways-scrolling strip. */}
+            <div className="sm:hidden flex items-center gap-2 min-w-0 flex-1">
+              <select
+                value={activeTab === 'add' ? 'add' : activeTab}
+                onChange={(e) => setActiveTab(e.target.value)}
+                aria-label={t('dm.friends')}
+                className="min-w-0 flex-1 bg-d-surface text-sm font-semibold text-d-strong rounded px-2 py-1.5 border border-d-edge focus:outline-none focus:border-d-brand"
+              >
+                {tabs().map((tab) => (
+                  <option key={tab.key} value={tab.key}>
+                    {tab.label}{tab.key === 'pending' && pendingIncoming.length > 0 ? ` (${pendingIncoming.length})` : ''}
+                  </option>
+                ))}
+                <option value="add">{t('dm.addFriend')}</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setActiveTab('add')}
+                aria-label={t('dm.addFriend')}
+                className="shrink-0 p-2 rounded bg-d-success text-white hover:bg-d-successhover"
+              >
+                <UserPlus className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-sm:hidden flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
               {tabs().map((tab) => (
                 <button
                   key={tab.key}
@@ -414,7 +442,34 @@ export default function HomeDirectMessages({
                   {tabs().find((tab) => tab.key === activeTab)?.label} — {visibleFriends.length}
                 </h2>
 
-                {visibleFriends.length === 0 && (
+                {visibleFriends.length === 0 && friends.length === 0 && (activeTab === 'online' || activeTab === 'all') ? (
+                  // First run: nothing here yet, so say what to do next
+                  // instead of "Nobody in this list".
+                  <div className="max-w-md mx-auto text-center py-10">
+                    <Users className="w-12 h-12 mx-auto mb-3 text-d-text4" aria-hidden="true" />
+                    <h3 className="text-lg font-bold text-d-strong mb-1">
+                      {serverCount === 0 ? t('home.welcomeTitle') : t('home.noFriendsTitle')}
+                    </h3>
+                    <p className="text-sm text-d-text2 mb-6">
+                      {serverCount === 0 ? t('home.welcomeBody') : t('home.noFriendsBody')}
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2 justify-center">
+                      {onCreateServer && (
+                        <button type="button" onClick={onCreateServer} className="bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.createServer')}
+                        </button>
+                      )}
+                      {onJoinServer && (
+                        <button type="button" onClick={onJoinServer} className="bg-d-surface hover:bg-d-hover text-d-strong text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.joinServer')}
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setActiveTab('add')} className="bg-d-success hover:bg-d-successhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                        {t('dm.addFriend')}
+                      </button>
+                    </div>
+                  </div>
+                ) : visibleFriends.length === 0 && (
                   <div className="text-center py-16 text-d-text3">
                     <Inbox className="w-10 h-10 mx-auto mb-3 opacity-40" />
                     <p className="text-sm">{t('dm.nobodyHere')}</p>
@@ -441,7 +496,7 @@ export default function HomeDirectMessages({
                           className="flex items-center gap-3 min-w-0 text-left flex-1"
                         >
                           <div className="relative shrink-0">
-                            <img src={friend.avatar_url || FALLBACK_AVATAR} alt="" className="w-10 h-10 rounded-full object-cover" />
+                            <img src={friend.avatar_url || defaultAvatar(friend.id)} alt="" className="w-10 h-10 rounded-full object-cover" />
                             {!isBlockedTab && (
                               <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-canvas ${
                                 STATUS_COLORS[friend.status] ?? STATUS_COLORS.offline

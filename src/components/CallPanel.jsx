@@ -17,8 +17,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 import { playSound } from '../utils/notifier';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
-const FALLBACK_AVATAR = '/avatar-placeholder.svg';
+const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
 /** mm:ss for a call that started at `startedAt`. */
 function useElapsed(startedAt) {
@@ -64,7 +65,7 @@ export function IncomingCall({ call, channel, onAccept, onDecline }) {
     >
       <div className="flex items-center gap-3">
         <img
-          src={caller?.avatar_url || FALLBACK_AVATAR}
+          src={caller?.avatar_url || defaultAvatar(caller?.id)}
           alt=""
           className="w-11 h-11 rounded-full object-cover shrink-0"
         />
@@ -117,7 +118,7 @@ export function CallBar({ call, currentUserId, isMuted, onToggleMute, isVideo, o
         {inCall.map((p) => (
           <img
             key={p.user_id}
-            src={p.avatar_url || FALLBACK_AVATAR}
+            src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
             alt={p.display_name || p.username}
             title={p.display_name || p.username}
             className="w-6 h-6 rounded-full object-cover ring-2 ring-d-canvas"

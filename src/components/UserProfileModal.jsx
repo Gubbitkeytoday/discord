@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { useDialog } from './settings/primitives';
 import { localeTag, t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -55,7 +55,7 @@ export default function UserProfileModal({
           <div className="relative -top-10 mb-[-2rem] flex justify-between items-end">
             <div className="relative">
               <img
-                src={user.avatar_url || FALLBACK_AVATAR}
+                src={user.avatar_url || defaultAvatar(user.id)}
                 alt=""
                 className="w-20 h-20 rounded-full border-4 border-d-panel object-cover"
               />
@@ -76,8 +76,8 @@ export default function UserProfileModal({
               <p className="text-xs text-d-text3">
                 @{user.username}{user.discriminator ? `#${user.discriminator}` : ''}
               </p>
-              {user.pronouns && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
-              {user.custom_status && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
+              {Boolean(user.pronouns) && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
+              {Boolean(user.custom_status) && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
             </div>
 
             <div className="w-full h-[1px] bg-d-surface" />
@@ -129,7 +129,7 @@ export default function UserProfileModal({
                   {new Date(joined).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}
                 </div>
               )}
-              {user.created_at && (
+              {Boolean(user.created_at) && (
                 <div>
                   <span className="block font-bold text-d-text2 uppercase">{t('profile.discordSince')}</span>
                   {new Date(user.created_at).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}
@@ -173,7 +173,7 @@ export default function UserProfileModal({
                     </button>
                   )}
                   {friend?.friend_status === 'accepted' && (
-                    <button
+                    <button aria-label={t('dm.removeFriend')}
                       onClick={() => onRemoveFriend(user)}
                       className="flex items-center justify-center gap-1.5 bg-d-surface hover:bg-d-hover text-d-text2 text-xs font-semibold px-3 py-2 rounded transition-colors"
                       title={t('dm.removeFriend')}

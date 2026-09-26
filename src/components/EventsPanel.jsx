@@ -166,7 +166,7 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
               onInterest={() => toggleInterest(event)}
               onEdit={() => setEditing(event)}
               onCancel={() => setConfirmCancel(event)}
-              onJoin={event.channel_id && onJoinVoice ? () => onJoinVoice(event.channel_id) : null}
+              onJoin={Boolean(event.channel_id) && onJoinVoice ? () => onJoinVoice(event.channel_id) : null}
             />
           ))}
         </div>
@@ -248,7 +248,7 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
 
           <h3 className="text-base font-semibold leading-snug text-d-strong">{event.name}</h3>
 
-          {event.description && (
+          {Boolean(event.description) && (
             <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-d-text2">{event.description}</p>
           )}
 
@@ -261,13 +261,13 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
             <span className="flex items-center gap-1">
               <Users className="h-3.5 w-3.5" /> {t('events.interestedCount', { count: event.interested_count })}
             </span>
-            {event.creator && (
+            {Boolean(event.creator) && (
               <span>{t('events.by', { name: event.creator.display_name || event.creator.username })}</span>
             )}
           </div>
         </div>
 
-        {event.image_url && (
+        {Boolean(event.image_url) && (
           <img src={event.image_url} alt="" className="h-20 w-32 shrink-0 rounded-md object-cover" />
         )}
       </div>

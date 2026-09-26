@@ -9,7 +9,7 @@ import ContextMenu from './ContextMenu';
 import UserStatusMenu from './UserStatusMenu';
 import { t } from '../i18n/index.jsx';
 import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -231,7 +231,7 @@ export default function ChannelSidebar({
       </div>
 
       {/* Channels */}
-      <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+      <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 py-3 space-y-4 focus:outline-none">
         {grouped.map(([category, list]) => {
           const isCollapsed = collapsed[category];
           const visible = isCollapsed
@@ -251,7 +251,7 @@ export default function ChannelSidebar({
                   <span className="truncate">{category}</span>
                 </button>
                 {can('MANAGE_CHANNELS') && (
-                  <button
+                  <button aria-label={isVoiceCategory ? t('sidebar.createVoiceChannel') : t('sidebar.createTextChannel')}
                     onClick={() => onOpenCreateChannelModal(isVoiceCategory ? 'voice' : 'text')}
                     className="opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-d-strong transition-opacity shrink-0"
                     title={isVoiceCategory ? t('sidebar.createVoiceChannel') : t('sidebar.createTextChannel')}
@@ -349,13 +349,13 @@ export default function ChannelSidebar({
                           {activeVoiceParticipants.map((p) => (
                             <div key={p.userId} className="flex items-center gap-2 py-0.5 px-1 rounded text-xs text-d-text">
                               <img
-                                src={p.avatar_url || FALLBACK_AVATAR}
+                                src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
                                 alt=""
                                 className={`w-5 h-5 rounded-full ${p.isSpeaking ? 'ring-2 ring-d-online' : ''}`}
                               />
                               <span className="truncate flex-1">{p.username}</span>
-                              {p.isMuted && <MicOff className="w-3 h-3 text-d-danger" />}
-                              {p.isDeafened && <Headphones className="w-3 h-3 text-d-danger" />}
+                              {Boolean(p.isMuted) && <MicOff className="w-3 h-3 text-d-danger" />}
+                              {Boolean(p.isDeafened) && <Headphones className="w-3 h-3 text-d-danger" />}
                             </div>
                           ))}
                         </div>
@@ -379,7 +379,7 @@ export default function ChannelSidebar({
             </div>
             <span className="text-[11px] text-d-text3 truncate max-w-[130px]">{currentVoiceChannel.name}</span>
           </div>
-          <button
+          <button aria-label={t('sidebar.disconnect')}
             onClick={onLeaveVoice}
             className="p-1.5 bg-d-danger/20 hover:bg-d-danger text-d-danger hover:text-white rounded-full transition-colors shrink-0"
             title={t('sidebar.disconnect')}
@@ -399,7 +399,7 @@ export default function ChannelSidebar({
         >
           <div className="relative shrink-0">
             <img
-              src={currentUser?.avatar_url || FALLBACK_AVATAR}
+              src={currentUser?.avatar_url || defaultAvatar(currentUser?.id)}
               alt=""
               className="w-8 h-8 rounded-full object-cover"
             />
@@ -437,7 +437,7 @@ export default function ChannelSidebar({
           >
             {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
           </button>
-          <button
+          <button aria-label={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
             onClick={onToggleDeafen}
             aria-pressed={isDeafened}
             className={`p-1.5 hover:bg-d-hover hover:text-white rounded transition-colors ${isDeafened ? 'text-d-danger' : ''}`}
@@ -445,7 +445,7 @@ export default function ChannelSidebar({
           >
             <Headphones className="w-5 h-5" />
           </button>
-          <button
+          <button aria-label={t('sidebar.userSettings')}
             onClick={onOpenUserSettingsModal}
             className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"
             title={t('sidebar.userSettings')}

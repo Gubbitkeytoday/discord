@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Search, Clock, Star, X } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 
@@ -78,11 +79,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
 
   useEffect(() => { searchRef.current?.focus(); }, []);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useEscapeLayer(() => onClose?.());
 
   const pick = (entry) => {
     saveRecent(entry);

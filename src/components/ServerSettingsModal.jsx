@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   X, Shield, Users, Smile, Link2, Ban, ScrollText, Settings as SettingsIcon,
   Plus, Trash2, Search, Upload, Check, AlertTriangle, Crown, GripVertical,
-  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3
+  ShieldAlert, Webhook, KeyRound, Sticker, Clock, Pencil, Flag, Music, Loader2, Hand, BarChart3,
+  ChevronUp, ChevronDown
 } from 'lucide-react';
 
 import { useDialog, UnsavedBar, useReportDirty } from './settings/primitives';
@@ -14,7 +15,7 @@ import OnboardingTab from './settings/OnboardingTab';
 import InsightsTab from './settings/InsightsTab';
 import { t, localeTag } from '../i18n/index.jsx';
 import { api as httpApi, upload as httpUpload } from '../api';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
   permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
 } from '../utils/permissionCatalog';
@@ -392,14 +393,21 @@ function OverviewTab({
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-6">{t('settings.serverOverview')}</h1>
 
-      <div className="flex gap-6 mb-8">
+      <div className="flex max-sm:flex-col gap-6 mb-8">
         <label className={`shrink-0 group ${uploadingIcon ? 'cursor-wait' : 'cursor-pointer'}`}>
           <span className="relative block w-24 h-24">
-            <img
-              src={form.icon_url || FALLBACK_AVATAR}
-              alt=""
-              className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
-            />
+            {serverIconOf(form) ? (
+              <img
+                src={serverIconOf(form)}
+                alt=""
+                className="w-24 h-24 rounded-full object-cover border-4 border-d-surface group-hover:opacity-70 transition-opacity"
+              />
+            ) : (
+              // Same initials tile as the server rail, not a person silhouette.
+              <span className="w-24 h-24 rounded-full border-4 border-d-surface bg-d-brand text-white text-2xl font-semibold flex items-center justify-center group-hover:opacity-70 transition-opacity">
+                {serverInitials(form.name || server.name)}
+              </span>
+            )}
             {uploadingIcon && (
               <span className="absolute inset-0 flex items-center justify-center rounded-full bg-black/55">
                 <Loader2 className="w-5 h-5 animate-spin text-white" aria-label={t('common.uploading')} />
@@ -438,7 +446,7 @@ function OverviewTab({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
         <Field label={t('settings.systemChannel')}>
           <ChannelSelect
             value={form.system_channel_id}
@@ -453,7 +461,7 @@ function OverviewTab({
             onChange={(v) => setForm({ ...form, afk_channel_id: v })}
           />
         </Field>
-        {form.afk_channel_id && (
+        {Boolean(form.afk_channel_id) && (
           <Field label={t('settings.afkTimeout')}>
             <select
               value={form.afk_timeout}
@@ -697,18 +705,34 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
    * first. The server rejects any move that would put a role at or above the
    * actor's own highest role, so hierarchy stays enforced server-side.
    */
-  const dropOn = async (targetId) => {
-    if (!dragId || dragId === targetId) { setDragId(null); return; }
+  const moveRole = async (roleId, to) => {
     const ordered = roles.filter((r) => !r.is_everyone).map((r) => r.id);
-    const from = ordered.indexOf(dragId);
-    const to = ordered.indexOf(targetId);
-    if (from === -1 || to === -1) { setDragId(null); return; }
+    const from = ordered.indexOf(roleId);
+    if (from === -1 || to < 0 || to >= ordered.length || from === to) return false;
     ordered.splice(to, 0, ordered.splice(from, 1)[0]);
-    setDragId(null);
     try {
       await api('/roles/order', { method: 'PUT', body: { order: ordered } });
       await reload();
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+      return true;
+    } catch (err) { onToast?.(err.message, { type: 'error' }); return false; }
+  };
+
+  const dropOn = async (targetId) => {
+    const source = dragId;
+    setDragId(null);
+    if (!source || source === targetId) return;
+    const to = roles.filter((r) => !r.is_everyone).findIndex((r) => r.id === targetId);
+    await moveRole(source, to);
+  };
+
+  /** Keyboard alternative to dragging: Move up / Move down, and Alt+↑/↓. */
+  const nudgeRole = async (roleId, delta) => {
+    const list = roles.filter((r) => !r.is_everyone);
+    const from = list.findIndex((r) => r.id === roleId);
+    const moved = await moveRole(roleId, from + delta);
+    if (moved) {
+      onToast?.(t('roles.moved', { name: list[from].name, position: from + delta + 1 }), { type: 'success', ttl: 1500 });
+    }
   };
 
   const selected = roles.find((r) => r.id === selectedId) ?? null;
@@ -784,18 +808,27 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
           onClick={createRole}
           className="flex items-center gap-1 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-1.5 rounded transition-colors"
         >
-          <Plus className="w-3.5 h-3.5" /> {t('audit.ROLE_CREATE')}
+          <Plus className="w-3.5 h-3.5" /> {t('roles.create')}
         </button>
       </div>
 
       <div className="flex gap-6">
         {/* Role list, highest first — the same order that decides hierarchy. */}
         <div className="w-52 shrink-0 space-y-0.5">
-          {roles.map((role) => (
+          {roles.map((role, index) => {
+            const movable = !role.is_everyone;
+            const lastMovable = roles.filter((r) => !r.is_everyone).length - 1;
+            return (
+            <div key={role.id} className="group/role relative flex items-center">
             <button
-              key={role.id}
               onClick={() => selectRole(role.id)}
+              onKeyDown={(e) => {
+                if (!movable || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                e.preventDefault();
+                nudgeRole(role.id, e.key === 'ArrowUp' ? -1 : 1);
+              }}
               aria-current={selectedId === role.id ? 'true' : undefined}
+              aria-keyshortcuts={movable ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
               draggable={!role.is_everyone}
               onDragStart={() => setDragId(role.id)}
               onDragOver={(e) => { if (dragId && !role.is_everyone) e.preventDefault(); }}
@@ -812,15 +845,41 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
                 style={{ backgroundColor: role.color || '#99aab5' }}
               />
               <span className="text-sm text-d-strong truncate flex-1">{role.name}</span>
-              <span className="text-[10px] text-d-text3 shrink-0">{role.member_count}</span>
+              <span className="text-[10px] text-d-text3 shrink-0 group-hover/role:invisible group-focus-within/role:invisible">{role.member_count}</span>
             </button>
-          ))}
+            {movable && (
+              <span className="absolute right-1 flex opacity-0 group-hover/role:opacity-100 group-focus-within/role:opacity-100">
+                <button
+                  type="button"
+                  onClick={() => nudgeRole(role.id, -1)}
+                  disabled={index === 0}
+                  aria-label={t('roles.moveUp', { name: role.name })}
+                  title={t('roles.moveUp', { name: role.name })}
+                  className="p-0.5 rounded text-d-text3 hover:text-d-strong hover:bg-d-hover disabled:opacity-30"
+                >
+                  <ChevronUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => nudgeRole(role.id, 1)}
+                  disabled={index >= lastMovable}
+                  aria-label={t('roles.moveDown', { name: role.name })}
+                  title={t('roles.moveDown', { name: role.name })}
+                  className="p-0.5 rounded text-d-text3 hover:text-d-strong hover:bg-d-hover disabled:opacity-30"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+              </span>
+            )}
+            </div>
+            );
+          })}
         </div>
 
         {/* Editor */}
         {draft && (
           <div className="flex-1 min-w-0">
-            {draft.is_everyone && (
+            {Boolean(draft.is_everyone) && (
               <p className="text-xs text-d-text3 bg-d-surface rounded p-2.5 mb-4">
                 {t('roles.everyoneNote')}
               </p>
@@ -1092,13 +1151,13 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
         {filtered.map((member) => (
           <div key={member.id} className="bg-d-surface rounded-lg p-3">
             <div className="flex items-center gap-3">
-              <img src={member.avatar_url || FALLBACK_AVATAR} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+              <img src={member.avatar_url || defaultAvatar(member.id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-d-strong truncate flex items-center gap-1.5">
                   {member.nickname || member.display_name}
                   {server.owner_id === member.id && <Crown className="w-3.5 h-3.5 text-d-idle" title={t('members.ownerTitle')} />}
                   {Boolean(member.is_bot) && <span className="bg-d-brand text-white text-[9px] font-bold px-1 rounded">BOT</span>}
-                  {member.timeout_until && member.timeout_until > new Date().toISOString() && (
+                  {Boolean(member.timeout_until) && member.timeout_until > new Date().toISOString() && (
                     <span className="bg-d-idle/20 text-d-idle text-[9px] font-bold px-1 rounded flex items-center gap-0.5">
                       <Clock className="w-2.5 h-2.5" />
                       {t('members.timedOutUntil', { time: new Date(member.timeout_until).toLocaleString(localeTag()) })}
@@ -1451,6 +1510,8 @@ function InvitesTab({ invites, api, reload, channels, onToast }) {
 // --- Bans --------------------------------------------------------------------
 
 function BansTab({ bans, api, reload, onToast }) {
+  // Unbanning lets someone straight back in; ask first, as Discord does.
+  const [confirmUnban, setConfirmUnban] = useState(null);
   return (
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-5">{t('bans.count', { count: bans.length })}</h1>
@@ -1458,7 +1519,7 @@ function BansTab({ bans, api, reload, onToast }) {
       <div className="space-y-1">
         {bans.map((ban) => (
           <div key={ban.user_id} className="bg-d-surface rounded-lg p-3 flex items-center gap-3">
-            <img src={ban.avatar_url || FALLBACK_AVATAR} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+            <img src={ban.avatar_url || defaultAvatar(ban.user_id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-d-strong truncate">{ban.display_name}</p>
               <p className="text-[11px] text-d-text3 truncate">
@@ -1468,10 +1529,9 @@ function BansTab({ bans, api, reload, onToast }) {
               </p>
             </div>
             <button
-              onClick={async () => {
-                try { await api(`/bans/${ban.user_id}`, { method: 'DELETE' }); await reload(); onToast?.(t('bans.unbanned'), { type: 'success', ttl: 2500 }); }
-                catch (err) { onToast?.(err.message, { type: 'error' }); }
-              }}
+              type="button"
+              onClick={() => setConfirmUnban(ban)}
+              aria-label={`${t('bans.unban')} ${ban.display_name ?? ban.username}`}
               className="text-xs text-d-link hover:underline shrink-0"
             >
               {t('bans.unban')}
@@ -1479,6 +1539,20 @@ function BansTab({ bans, api, reload, onToast }) {
           </div>
         ))}
       </div>
+      {confirmUnban && (
+        <ConfirmModal
+          title={t('bans.unbanTitle', { name: confirmUnban.display_name ?? confirmUnban.username })}
+          body={t('bans.unbanBody')}
+          confirmLabel={t('bans.unban')}
+          danger={false}
+          onConfirm={async () => {
+            await api(`/bans/${confirmUnban.user_id}`, { method: 'DELETE' });
+            await reload();
+            onToast?.(t('bans.unbanned'), { type: 'success', ttl: 2500 });
+          }}
+          onClose={() => setConfirmUnban(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1493,7 +1567,7 @@ function AuditTab({ entries }) {
       <div className="space-y-1">
         {entries.map((entry) => (
           <div key={entry.id} className="bg-d-surface rounded-lg p-3 flex gap-3">
-            <img src={entry.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+            <img src={entry.avatar_url || defaultAvatar(entry.id)} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
             <div className="min-w-0">
               <p className="text-sm text-d-strong">
                 <strong>{entry.display_name ?? t('audit.system')}</strong>{' '}
@@ -1754,12 +1828,12 @@ function ReportsTab({ reports, reload, onToast }) {
             <p className="text-[11px] text-d-text3">
               {t('reports.by', { name: report.reporter_name ?? report.reporter_id })} · {report.target_type}
             </p>
-            {report.target?.content && (
+            {Boolean(report.target?.content) && (
               <p className="text-xs text-d-text bg-d-base rounded p-2 whitespace-pre-wrap break-words">
                 {report.target.author ? `${report.target.author}: ` : ''}{report.target.content}
               </p>
             )}
-            {report.details && <p className="text-[11px] text-d-text2">{report.details}</p>}
+            {Boolean(report.details) && <p className="text-[11px] text-d-text2">{report.details}</p>}
             <div className="flex gap-3">
               <button
                 onClick={() => resolve(report, 'resolved')}

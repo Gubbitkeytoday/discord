@@ -19,12 +19,19 @@ export default function ActivityTab({ currentUser, onSetStatus }) {
   const [draft, setDraft] = useState(activity.customActivity ?? currentUser?.custom_status ?? '');
   const [saved, setSaved] = useState(false);
 
+  // The activity line is what others see under your name. With sharing off
+  // it is kept on this account but never published.
   const save = () => {
     const value = draft.trim() || null;
     update('activity', { customActivity: value });
-    onSetStatus?.(currentUser?.status ?? 'online', value ?? '');
+    if (activity.shareActivity) onSetStatus?.(currentUser?.status ?? 'online', value ?? '');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const setSharing = (value) => {
+    update('activity', { shareActivity: value });
+    onSetStatus?.(currentUser?.status ?? 'online', value ? (activity.customActivity ?? '') : '');
   };
 
   return (
@@ -36,7 +43,7 @@ export default function ActivityTab({ currentUser, onSetStatus }) {
           label={t('activity.share')}
           hint={t('activity.shareHint')}
           checked={activity.shareActivity}
-          onChange={(value) => update('activity', { shareActivity: value })}
+          onChange={setSharing}
           last
         />
       </Section>

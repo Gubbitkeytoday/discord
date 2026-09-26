@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { Bell, BellOff, Check } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 
@@ -34,17 +35,7 @@ export default function NotificationSettingsPopover({
   const ref = useRef(null);
   const [showDurations, setShowDurations] = useState(false);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const muted = Boolean(settings?.muted);
   const level = settings?.notification_level ?? (kind === 'channel' ? 'inherit' : 'all_messages');
@@ -104,7 +95,7 @@ export default function NotificationSettingsPopover({
         </button>
       </div>
 
-      {settings?.muted_until && muted && (
+      {Boolean(settings?.muted_until) && muted && (
         <p className="px-3 pb-1 text-[10px] text-d-text4">
           {t('notif.mutedUntil', { time: new Date(settings.muted_until).toLocaleString() })}
         </p>

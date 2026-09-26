@@ -261,7 +261,13 @@ async function main() {
       const name = a.getByPlaceholder('e.g. Chill Squad HQ');
       await name.fill(serverName);
       await a.getByRole('button', { name: /^Create$/ }).click();
-      await visible(a.getByText(serverName), 'server name in sidebar');
+      await visible(a.getByText(serverName).first(), 'server name in sidebar');
+      // A new server offers its invite dialog straight away; dismiss it here.
+      const offer = a.getByRole('dialog', { name: /Invite friends/ });
+      if (await offer.waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) {
+        await a.keyboard.press('Escape');
+        await hidden(offer, 'invite dialog closed', 3000);
+      }
     }, { critical: true });
 
     await step('alice creates a text channel', async () => {
@@ -275,13 +281,12 @@ async function main() {
     await step('alice creates an invite link', async () => {
       await a.getByText(serverName).first().click(); // server dropdown
       await a.getByRole('menuitem', { name: 'Invite people' }).or(a.getByRole('button', { name: 'Invite people' })).first().click();
-      const toast = a.getByText(/Invite link copied/);
-      await visible(toast, 'invite toast');
-      inviteUrl = await a.evaluate(() => navigator.clipboard.readText()).catch(() => null);
-      if (!inviteUrl || !inviteUrl.includes('/invite/')) {
-        const code = (await toast.first().textContent()).match(/copied:\s*(\S+)/)?.[1];
-        inviteUrl = code ? `${BASE}/invite/${code}` : null;
-      }
+      // The invite dialog shows the link itself (it used to be copied silently).
+      const field = a.getByRole('dialog', { name: /Invite friends/ }).getByLabel('Invite link');
+      await visible(field, 'invite dialog');
+      await a.waitForFunction(() => /\/invite\//.test(document.getElementById('invite-link')?.value ?? ''), null, { timeout: T });
+      inviteUrl = await field.inputValue();
+      await a.keyboard.press('Escape');
       assert(inviteUrl && /\/invite\/\w+/.test(inviteUrl), `no invite url (got ${inviteUrl})`);
     }, { critical: true });
 
@@ -505,6 +510,10 @@ async function main() {
     await step('logout then log back in', async () => {
       await a.getByRole('button', { name: 'User settings' }).first().click();
       await a.getByRole('button', { name: 'Sign out' }).click();
+      // Sign-out asks for confirmation first (as Discord's "Log Out" does).
+      const confirmOut = a.getByRole('alertdialog').or(a.getByRole('dialog', { name: 'Sign out' }))
+        .getByRole('button', { name: 'Sign out' });
+      if (await confirmOut.first().isVisible().catch(() => false)) await confirmOut.first().click();
       await visible(a.getByRole('button', { name: 'Log in' }).or(a.getByText('Welcome back!')), 'login screen');
       const me = await a.evaluate(async () => (await fetch('/api/auth/me')).status);
       assert(me === 401, `session still valid after logout (/api/auth/me → ${me})`);
@@ -590,6 +599,13 @@ async function main() {
         const el = document.elementFromPoint(x, y);
         return `${x},${y}: <${el?.tagName} class="${String(el?.className).slice(0, 160)}" label=${el?.getAttribute?.('aria-label')}> rect=${JSON.stringify(el?.getBoundingClientRect())}`;
       }).join('\n')));
+      // Picking a server on a phone opens the channel drawer (Discord's own
+      // behaviour), so the header's "Show channels" button is behind it. Close
+      // it via its backdrop first; the button below must reopen it.
+      if (await m.getByText(channelName).first().isVisible()) {
+        await m.touchscreen.tap(380, 400); // drawer backdrop
+        await m.waitForTimeout(400);
+      }
       // The closed channel drawer must be fully off-canvas, not peeking over the rail.
       const drawer = m.locator('div.w-60').filter({ has: m.getByText(serverName) }).first();
       const closedBox = await drawer.boundingBox();

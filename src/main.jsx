@@ -4,6 +4,18 @@ import App from './App.jsx';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';
 import { DEFAULT_AVATAR } from './utils/avatar';
+// Self-hosted fonts: no request to a font CDN (privacy, offline installs).
+// Each weight file declares per-script @font-face rules with unicode-range,
+// so a browser only downloads the subsets a page actually uses.
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
+import '@fontsource/inter/800.css';
+import '@fontsource/kanit/400.css';
+import '@fontsource/kanit/500.css';
+import '@fontsource/kanit/600.css';
+import '@fontsource/kanit/700.css';
 import './index.css';
 
 // Apply the cached appearance and accessibility preferences before React

@@ -16,55 +16,21 @@
 
 import React, { useEffect, useId, useRef } from 'react';
 import { Check, X, RotateCcw, Loader2 } from 'lucide-react';
-import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useFocusTrap, useEscapeLayer } from '../../hooks/useFocusTrap';
 import { t } from '../../i18n/index.jsx';
 
 /* --- dialogs ---------------------------------------------------------------- */
 
 /**
- * Escape closes the *top-most* dialog only.
- *
- * useFocusTrap listens for Escape on `document` in the capture phase, and every
- * open trap gets the event in the order it was mounted — so pressing Escape in
- * a confirm box opened from Server Settings closed Server Settings as well.
- * Layers registered here share one window-level capture listener (window runs
- * before document) that only calls the most recently opened layer.
- */
-const escapeLayers = [];
-function onLayerKeyDown(event) {
-  if (event.key !== 'Escape' || escapeLayers.length === 0) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  escapeLayers[escapeLayers.length - 1].current?.();
-}
-
-export function useEscapeLayer(onEscape, active = true) {
-  const handler = useRef(onEscape);
-  handler.current = onEscape;
-  useEffect(() => {
-    if (!active) return undefined;
-    escapeLayers.push(handler);
-    if (escapeLayers.length === 1) window.addEventListener('keydown', onLayerKeyDown, true);
-    return () => {
-      const index = escapeLayers.lastIndexOf(handler);
-      if (index !== -1) escapeLayers.splice(index, 1);
-      if (escapeLayers.length === 0) window.removeEventListener('keydown', onLayerKeyDown, true);
-    };
-  }, [active]);
-}
-
-/**
- * Focus trap + Escape layer for a modal. Use this instead of
- * `useFocusTrap(true, onClose)`: that form re-runs the trap whenever `onClose`
- * changes identity — and callers pass inline arrows, so every parent re-render
- * (an incoming message is enough) yanked focus to the dialog's first field
- * mid-typing. Here the trap's dependencies never change and Escape reads the
- * latest handler through a ref.
+ * Focus trap + Escape layer for a modal. The trap's dependencies never change
+ * and Escape reads the latest handler through a ref, so passing an inline
+ * `onClose` is safe (see hooks/useFocusTrap.js).
  */
 export function useDialog(onClose, { active = true } = {}) {
-  useEscapeLayer(onClose, active);
-  return useFocusTrap(active);
+  return useFocusTrap(active, onClose);
 }
+
+export { useEscapeLayer };
 
 /* --- page ------------------------------------------------------------------ */
 
@@ -225,7 +191,7 @@ export function RadioList({ value, onChange, options, label }) {
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-d-strong">{option.label}</span>
-              {option.hint && (
+              {Boolean(option.hint) && (
                 <span className="mt-0.5 block text-xs text-d-text2 leading-relaxed">{option.hint}</span>
               )}
             </span>

@@ -419,7 +419,7 @@ export default function VoiceSettings({ onToast }) {
             className={`h-full w-full object-cover ${settings.blurCamera ? 'invisible absolute' : ''}
               ${settings.mirrorCamera ? 'scale-x-[-1]' : ''}`}
           />
-          {settings.blurCamera && (
+          {Boolean(settings.blurCamera) && (
             <canvas
               ref={blurCanvasRef}
               className={`h-full w-full object-cover ${settings.mirrorCamera ? 'scale-x-[-1]' : ''}`}
@@ -481,7 +481,7 @@ export default function VoiceSettings({ onToast }) {
           onChange={(value) => update({ blurCamera: value })}
           last={!settings.blurCamera}
         />
-        {settings.blurCamera && (
+        {Boolean(settings.blurCamera) && (
           <Slider
             label={t('voice.blurStrength')}
             value={settings.blurStrength}

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { t } from '../i18n/index.jsx';
 import { getPreferences } from '../hooks/useUserSettings';
 import {
@@ -10,35 +11,33 @@ import {
  * permission are hidden rather than disabled — a menu full of greyed-out rows
  * tells members what they are missing but not why.
  */
+const SETTINGS_PERMISSIONS = [
+  'MANAGE_GUILD', 'MANAGE_CHANNELS', 'MANAGE_ROLES', 'MANAGE_EMOJIS', 'MANAGE_WEBHOOKS',
+  'MANAGE_MESSAGES', 'VIEW_AUDIT_LOG', 'BAN_MEMBERS', 'KICK_MEMBERS', 'MODERATE_MEMBERS'
+];
+
 export default function ServerDropdown({
   server, permissions, isOwner, muted, onClose,
   onOpenSettings, onCreateChannel, onCreateInvite, onOpenNotifications, onOpenEvents, onLeave, onDelete, onToast
 }) {
   const ref = useRef(null);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    // Deferred so the click that opened the menu does not immediately close it.
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const can = (name) => permissions?.includes(name) || permissions?.includes('ADMINISTRATOR') || isOwner;
 
   const run = (fn) => () => { fn?.(); onClose(); };
+
+  // Server Settings is not only for admins: moderators need Bans, Reports and
+  // the Audit log, and the modal itself hides every tab they cannot use.
+  const canOpenSettings = SETTINGS_PERMISSIONS.some(can);
 
   const items = [
     can('CREATE_INSTANT_INVITE') && {
       icon: UserPlus, label: t('server.invitePeople'), accent: true, action: run(onCreateInvite)
     },
     onOpenEvents && { icon: Calendar, label: t('events.title'), action: run(onOpenEvents) },
-    can('MANAGE_GUILD') && { icon: Settings, label: t('server.settings'), action: run(onOpenSettings) },
+    canOpenSettings && { icon: Settings, label: t('server.settings'), action: run(onOpenSettings) },
     can('MANAGE_CHANNELS') && { icon: Plus, label: t('server.createChannel'), action: run(() => onCreateChannel('text')) },
     can('MANAGE_CHANNELS') && { icon: FolderPlus, label: t('sidebar.createVoiceChannel'), action: run(() => onCreateChannel('voice')) },
     { separator: true },

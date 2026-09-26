@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { Settings, Smile, Circle, Moon, MinusCircle, EyeOff } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 
@@ -14,17 +15,7 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
   const ref = useRef(null);
   const [customStatus, setCustomStatus] = useState(currentUser?.custom_status ?? '');
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const saveCustom = (e) => {
     e.preventDefault();
@@ -49,7 +40,7 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
           <option.icon className={`w-4 h-4 mt-0.5 shrink-0 ${option.tint}`} />
           <span className="min-w-0">
             <span className="block truncate">{option.label}</span>
-            {option.hint && <span className="block text-[10px] opacity-70">{option.hint}</span>}
+            {Boolean(option.hint) && <span className="block text-[10px] opacity-70">{option.hint}</span>}
           </span>
         </button>
       ))}

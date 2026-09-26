@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Plus, Compass, Folder, FolderOpen } from 'lucide-react';
 import { useUserSettings } from '../hooks/useUserSettings';
 import { t } from '../i18n/index.jsx';
+import { serverIconOf, serverInitials } from '../utils/avatar';
 
 const FOLDER_COLORS = ['#5865f2', '#57f287', '#fee75c', '#eb459e', '#ed4245', '#f47b67', '#3ba55c', '#faa61a'];
 
@@ -190,7 +191,7 @@ export default function ServerRail({
                   <ServerIcon
                     server={server}
                     active={activeServerId === server.id}
-                    unread={state.unread && !muted}
+                    unread={Boolean(state.unread) && !muted}
                     badge={muted ? 0 : state.mentions}
                     dim={muted}
                     onSelect={() => onSelectServer(server.id)}
@@ -228,8 +229,8 @@ export default function ServerRail({
                   ) : (
                     <div className="grid grid-cols-2 gap-0.5 p-2 w-full h-full" style={{ color: folder.color ?? undefined }}>
                       {members.slice(0, 4).map((sv) => (
-                        sv.icon_url
-                          ? <img key={sv.id} src={sv.icon_url} alt="" className="w-full h-full rounded-full object-cover" />
+                        serverIconOf(sv)
+                          ? <img key={sv.id} src={serverIconOf(sv)} alt="" className="w-full h-full rounded-full object-cover" />
                           : <span key={sv.id} className="w-full h-full rounded-full bg-current opacity-60" />
                       ))}
                     </div>
@@ -243,7 +244,7 @@ export default function ServerRail({
                       <ServerIcon
                         server={server}
                         active={activeServerId === server.id}
-                        unread={state.unread && !muted}
+                        unread={Boolean(state.unread) && !muted}
                         badge={muted ? 0 : state.mentions}
                         dim={muted}
                         onSelect={() => onSelectServer(server.id)}
@@ -278,21 +279,14 @@ export default function ServerRail({
   );
 }
 
-/** Discord's acronym for an icon-less guild: first letter of each word. */
-function serverInitials(name = '') {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  const letters = words.map((w) => Array.from(w)[0]).filter((c) => /[\p{L}\p{N}]/u.test(c));
-  return (letters.slice(0, 3).join("") || "?").toUpperCase();
-}
-
 function ServerIcon({ server, active, unread, badge, dim, onSelect, onContextMenu }) {
   // A dead icon URL must not leave a broken-image glyph in the rail; the
   // acronym is what Discord shows for a guild without an icon anyway.
   const [iconFailed, setIconFailed] = useState(false);
   return (
     <RailButton active={active} unread={unread} badge={badge} onClick={onSelect} onContextMenu={onContextMenu} title={server.name} dim={dim}>
-      {server.icon_url && !iconFailed ? (
-        <img src={server.icon_url} alt="" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
+      {serverIconOf(server) && !iconFailed ? (
+        <img src={serverIconOf(server)} alt="" onError={() => setIconFailed(true)} className="w-full h-full object-cover pointer-events-none" />
       ) : (
         <span className="font-semibold text-sm">{serverInitials(server.name)}</span>
       )}

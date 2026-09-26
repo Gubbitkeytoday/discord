@@ -5,47 +5,60 @@ import { Volume2, Pin, Bell, Users } from 'lucide-react';
 import ServerRail from './components/ServerRail';
 import ChannelSidebar from './components/ChannelSidebar';
 import ChatArea from './components/ChatArea';
-import VoiceRoom from './components/VoiceRoom';
-import ForumView from './components/ForumView';
-import OnboardingModal from './components/OnboardingModal';
-import FollowChannelModal from './components/FollowChannelModal';
 import MemberList from './components/MemberList';
 import HomeDirectMessages from './components/HomeDirectMessages';
-import UserSettingsModal from './components/UserSettingsModal';
-import EventsPanel from './components/EventsPanel';
-import CreateServerModal from './components/CreateServerModal';
-import CreateChannelModal from './components/CreateChannelModal';
-import UserProfileModal from './components/UserProfileModal';
-import SearchResultsPanel from './components/SearchResultsPanel';
-import QuickSwitcher from './components/QuickSwitcher';
 import ToastStack, { useToasts } from './components/ToastStack';
-import ServerSettingsModal from './components/ServerSettingsModal';
-import LoginScreen from './components/LoginScreen';
 import ConfirmModal from './components/ConfirmModal';
 import InputModal from './components/InputModal';
-import InviteJoinScreen from './components/InviteJoinScreen';
-import ChannelSettingsModal from './components/ChannelSettingsModal';
 import NotificationSettingsPopover from './components/NotificationSettingsPopover';
 import MemberContextMenu from './components/MemberContextMenu';
-import ForwardMessageModal from './components/ForwardMessageModal';
-import CreateGroupDmModal from './components/CreateGroupDmModal';
-import NotificationsInbox from './components/NotificationsInbox';
 import { IncomingCall, CallBar } from './components/CallPanel';
 import ChannelGate from './components/ChannelGate';
-import EditHistoryModal from './components/EditHistoryModal';
-import { api, get, post, put, patch, del, upload, setApiIdentity } from './api';
+import { api, get, post, put, patch, del, upload, setApiIdentity, localizeError } from './api';
 import { maskOf } from './utils/permissionCatalog';
 import {
   useUserSettings, loadPreferences, hydratePreferences, applyCategoryFromServer,
-  updatePreferences
+  updatePreferences, onPreferenceSaveError
 } from './hooks/useUserSettings';
 import { useKeybinds } from './hooks/useKeybinds';
-import { playSound, notifyMessage, speakMessage, applyUnreadBadge } from './utils/notifier';
-import { t } from './i18n/index.jsx';
+import { playSound, notifyMessage, speakMessage, speakTtsMessage, applyUnreadBadge, setScreenSharing } from './utils/notifier';
+import { t, adoptAccountLocale } from './i18n/index.jsx';
+import { lazyComponent, preloadWhenIdle } from './utils/lazyComponent';
+
+// Code-split: each of these is a separate chunk, fetched on first use (and
+// warmed on idle after sign-in), so the first paint only pays for the chat.
+const VoiceRoom = lazyComponent(() => import('./components/VoiceRoom'));
+const ForumView = lazyComponent(() => import('./components/ForumView'));
+const OnboardingModal = lazyComponent(() => import('./components/OnboardingModal'));
+const FollowChannelModal = lazyComponent(() => import('./components/FollowChannelModal'));
+const UserSettingsModal = lazyComponent(() => import('./components/UserSettingsModal'));
+const EventsPanel = lazyComponent(() => import('./components/EventsPanel'));
+const CreateServerModal = lazyComponent(() => import('./components/CreateServerModal'));
+const UserProfileModal = lazyComponent(() => import('./components/UserProfileModal'));
+const ServerSettingsModal = lazyComponent(() => import('./components/ServerSettingsModal'));
+const InviteJoinScreen = lazyComponent(() => import('./components/InviteJoinScreen'));
+const ChannelSettingsModal = lazyComponent(() => import('./components/ChannelSettingsModal'));
+const ForwardMessageModal = lazyComponent(() => import('./components/ForwardMessageModal'));
+const CreateGroupDmModal = lazyComponent(() => import('./components/CreateGroupDmModal'));
+const EditHistoryModal = lazyComponent(() => import('./components/EditHistoryModal'));
+const SearchResultsPanel = lazyComponent(() => import('./components/SearchResultsPanel'));
+const InviteModal = lazyComponent(() => import('./components/InviteModal'));
+const ShortcutsModal = lazyComponent(() => import('./components/ShortcutsModal'));
+const CreateChannelModal = lazyComponent(() => import('./components/CreateChannelModal'));
+const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
+const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
+const NotificationsInbox = lazyComponent(() => import('./components/NotificationsInbox'));
 
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
 const socket = io({ withCredentials: true, autoConnect: true });
+
+// The session outlives App: I18nProvider remounts the tree on a language
+// switch, and App's state starts over. Without this the remounted App
+// identified the gateway with a null token (the socket was opened before the
+// session cookie existed), the gateway refused, and the user was signed out
+// the moment they picked a language.
+const session = { user: null, token: null };
 
 const PAGE_SIZE = 50;
 
@@ -75,11 +88,11 @@ function parseLocation() {
 }
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(null);
-  const [currentUserId, setCurrentUserId] = useState(null);
+  const [currentUser, setCurrentUser] = useState(() => session.user);
+  const [currentUserId, setCurrentUserId] = useState(() => session.user?.id ?? null);
   // null = still checking, false = not signed in, true = signed in
-  const [authState, setAuthState] = useState(null);
-  const [authToken, setAuthToken] = useState(null);
+  const [authState, setAuthState] = useState(() => (session.user ? true : null));
+  const [authToken, setAuthToken] = useState(() => session.token);
   const [devAccounts, setDevAccounts] = useState([]);
 
   const [servers, setServers] = useState([]);
@@ -137,7 +150,11 @@ export default function App() {
   // rather than two columns, so they need an explicit open state; on desktop
   // they are always shown and this value is ignored. A phone opens onto the
   // navigation, as Discord's app does, since there is nothing to read yet.
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(() => isNarrowViewport('(max-width: 767px)'));
+  // A link or reload that names a channel opens on that conversation instead
+  // (the drawer used to cover it on every load).
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(
+    () => isNarrowViewport('(max-width: 767px)') && !parseLocation().channelId
+  );
   // True while the open channel's first page is in flight, so the chat can
   // show a skeleton instead of the previous channel's history.
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
@@ -181,8 +198,14 @@ export default function App() {
   const [activeCall, setActiveCall] = useState(null);       // { channelId, call }
   const [showGroupDmModal, setShowGroupDmModal] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
+  const [inviteFor, setInviteFor] = useState(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);   // { server, channelId } for the invite dialog
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const { prefs } = useUserSettings();
+  // A preference that failed to save has already been rolled back; say so.
+  useEffect(() => onPreferenceSaveError(({ error }) => {
+    pushToast(t('settings.saveFailedReverted', { reason: error?.message ?? '' }), { type: 'error', ttl: 6000 });
+  }), [pushToast]);
 
   // The gateway will not let an unidentified socket join a room, and `identify`
   // is async server-side — so joins must wait for the `identified` reply rather
@@ -198,6 +221,7 @@ export default function App() {
   activeServerIdRef.current = activeServerId;
   const currentUserRef = useRef(null);
   currentUserRef.current = currentUser;
+  if (currentUser) session.user = currentUser;
   const channelSettingsRef = useRef({});
   channelSettingsRef.current = channelSettings;
   const serverSettingsRef = useRef({});
@@ -218,7 +242,9 @@ export default function App() {
     get('/api/auth/me')
       .then((data) => {
         if (data?.user) {
-          setApiIdentity({ userId: data.user.id });
+          setApiIdentity({ userId: data.user.id, token: session.token });
+          session.user = data.user;
+          adoptAccountLocale(data.user.locale);
           setCurrentUser(data.user);
           setCurrentUserId(data.user.id);
           setAuthState(true);
@@ -245,16 +271,29 @@ export default function App() {
   }, []);
 
   const handleAuthenticated = useCallback((user, token) => {
+    session.user = user;
+    session.token = token ?? null;
     setApiIdentity({ userId: user.id, token });
     setCurrentUser(user);
     setCurrentUserId(user.id);
     setAuthToken(token);
     setAuthState(true);
+    // Re-open the gateway so its handshake carries the new session cookie;
+    // the `connect` handler identifies again once it is up.
+    socket.disconnect();
+    socket.connect();
     socket.emit('identify', { userId: user.id, token });
+    adoptAccountLocale(user.locale);
   }, []);
 
   const handleSignOut = useCallback(async () => {
     try { await post('/api/auth/logout'); } catch { /* offline */ }
+    // The gateway socket was identified as this user: drop it at once so a
+    // signed-out tab stops receiving their DMs and channel traffic.
+    identifiedRef.current = false;
+    socket.disconnect();
+    session.user = null;
+    session.token = null;
     setApiIdentity({});
     setAuthState(false);
     setCurrentUser(null);
@@ -262,7 +301,11 @@ export default function App() {
     setAuthToken(null);
     setServers([]); setChannels([]); setMessages([]); setDmChannels([]); setFriends([]);
     setActiveServerId('home'); setActiveChannelId(null);
-    window.history.replaceState(null, '', '/');
+    // Every other piece of UI state — open modals, drafts, voice, caches in
+    // module scope — belongs to the old session too. A full reload is the only
+    // reset that cannot miss one; the login screen is what it lands on.
+    try { localStorage.removeItem(LAST_SERVER_KEY); } catch { /* private mode */ }
+    window.location.replace('/');
   }, []);
 
   // --- data loading --------------------------------------------------------------
@@ -317,6 +360,7 @@ export default function App() {
 
   useEffect(() => {
     if (!currentUserId) return;
+    preloadWhenIdle([UserSettingsModal, ServerSettingsModal, UserProfileModal, VoiceRoom, ForumView, EventsPanel, QuickSwitcher, CreateChannelModal]);
     loadInitialData(currentUserId);
     identifiedRef.current = false;
     socket.emit('identify', { userId: currentUserId, token: authToken });
@@ -336,7 +380,7 @@ export default function App() {
           if (ack && !ack.ok) {
             setCurrentVoiceChannel(null);
             setActiveVoiceParticipants([]);
-            pushToast(ack.error ?? t('voice.connectionFailed'), { type: 'error' });
+            pushToast(ack.error ? localizeError(ack) : t('voice.connectionFailed'), { type: 'error' });
             return;
           }
           socket.emit('voice_state_change', {
@@ -594,6 +638,9 @@ export default function App() {
       }));
 
     const onNewMessage = (msg) => {
+      if (msg.tts && msg.channel_id === activeChannelIdRef.current) {
+        speakTtsMessage({ author: msg.display_name ?? msg.username ?? '', content: msg.content });
+      }
       if (msg.channel_id === activeChannelIdRef.current) {
         setMessages((prev) => {
           const pendingIdx = msg.nonce ? prev.findIndex((m) => m.pending && m.nonce === msg.nonce) : -1;
@@ -854,7 +901,7 @@ export default function App() {
       setMessages((prev) => prev.filter((m) => !gone.has(m.id)));
     };
 
-    const onActionError = ({ error }) => pushToast(error, { type: 'error' });
+    const onActionError = (payload) => pushToast(localizeError(payload), { type: 'error' });
     const onIdentifyError = () => {
       // The session is gone server-side; the only honest answer is the login screen.
       handleSignOut();
@@ -931,15 +978,32 @@ export default function App() {
   }, []);
 
   /** Walk the channel list, the way Alt+↑/↓ does in Discord. */
-  const stepChannel = useCallback((direction) => {
+  const stepChannel = useCallback((direction, { unreadOnly = false } = {}) => {
     const list = activeServerId === 'home'
       ? dmChannels
       : channels.filter((c) => c.type !== 'thread' && c.type !== 'voice' && c.type !== 'category');
     if (list.length === 0) return;
     const index = list.findIndex((c) => c.id === activeChannelId);
-    const next = list[(index + direction + list.length) % list.length];
-    if (next) setActiveChannelId(next.id);
-  }, [activeServerId, dmChannels, channels, activeChannelId]);
+    if (!unreadOnly) {
+      const next = list[(index + direction + list.length) % list.length];
+      if (next) setActiveChannelId(next.id);
+      return;
+    }
+    // Alt+Shift+↑/↓: the next channel with something unread, skipping muted
+    // ones (a mention in a muted channel still counts, as in Discord).
+    const isUnread = (c) => {
+      const state = readStates[c.id];
+      if (state?.mention_count > 0) return true;
+      return Boolean(state?.unread) && !channelSettings[c.id]?.muted;
+    };
+    for (let step = 1; step < list.length; step += 1) {
+      const candidate = list[((index === -1 ? (direction > 0 ? -1 : 0) : index) + direction * step + list.length * step) % list.length];
+      if (candidate && candidate.id !== activeChannelId && isUnread(candidate)) {
+        setActiveChannelId(candidate.id);
+        return;
+      }
+    }
+  }, [activeServerId, dmChannels, channels, activeChannelId, readStates, channelSettings]);
 
   /** Move up or down the server rail, wrapping, with Home at the top. */
   const stepServer = useCallback((direction) => {
@@ -965,6 +1029,8 @@ export default function App() {
     markServerRead: markEverythingRead,
     navigateChannelUp: () => stepChannel(-1),
     navigateChannelDown: () => stepChannel(1),
+    navigateUnreadUp: () => stepChannel(-1, { unreadOnly: true }),
+    navigateUnreadDown: () => stepChannel(1, { unreadOnly: true }),
     toggleMute: () => handleToggleMute(),
     toggleDeafen: () => handleToggleDeafen(),
     disconnectVoice: () => { if (currentVoiceChannel) handleLeaveVoice(); },
@@ -982,6 +1048,7 @@ export default function App() {
     togglePins: () => setShowPinsFromSlash(Date.now()),
     search: () => setShowQuickSwitcher(true),
     openSettings: () => setShowUserSettingsModal(true),
+    openShortcuts: () => setShowShortcuts((v) => !v),
     openEvents: () => { if (activeServerId !== 'home') setShowEvents(true); },
     toggleEmojiPicker: () => setOpenEmojiSignal(Date.now()),
     toggleFormatting: () => setToggleFormattingSignal(Date.now()),
@@ -1162,11 +1229,12 @@ export default function App() {
     }]);
 
     socket.emit('send_message', {
-      channel_id: activeChannelId, content, attachments, reply_to_id, nonce, sticker_id: sticker?.id ?? null
+      channel_id: activeChannelId, content, attachments, reply_to_id, nonce, sticker_id: sticker?.id ?? null,
+      ...(extra.tts ? { tts: true } : {})
     }, (ack) => {
       if (ack && !ack.ok) {
         setMessages((prev) => prev.map((m) =>
-          m.nonce === nonce ? { ...m, pending: false, failed: true, error: ack.error } : m
+          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack) } : m
         ));
       }
     });
@@ -1186,7 +1254,7 @@ export default function App() {
     // toast, so a dropped socket can never leave the dialog spinning.
     const run = () => {
       socket.emit('delete_message', { messageId }, (ack) => {
-        if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+        if (ack && !ack.ok) pushToast(localizeError(ack), { type: 'error' });
       });
     };
     if (skipConfirm) { run(); return; }
@@ -1200,7 +1268,7 @@ export default function App() {
 
   const handleEditMessage = (messageId, content) => {
     socket.emit('edit_message', { messageId, content }, (ack) => {
-      if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+      if (ack && !ack.ok) pushToast(localizeError(ack), { type: 'error' });
     });
   };
 
@@ -1394,18 +1462,20 @@ export default function App() {
   const handleJoinVoice = (voiceChan) => {
     setCurrentVoiceChannel(voiceChan);
     socket.emit('join_voice', { channelId: voiceChan.id }, (ack) => {
-      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(ack.error, { type: 'error' }); }
+      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(localizeError(ack), { type: 'error' }); }
     });
   };
   const handleLeaveVoice = () => {
     if (!currentVoiceChannel) return;
     socket.emit('leave_voice', { channelId: currentVoiceChannel.id });
+    setScreenSharing(false);
     setCurrentVoiceChannel(null);
     setActiveVoiceParticipants([]);
     // Staying put: a voice channel now carries a text channel, so hanging up
     // leaves you reading it rather than teleporting you somewhere else.
   };
   const handleVideoStateChange = useCallback(({ isVideo, isStreaming }) => {
+    setScreenSharing(Boolean(isStreaming));
     if (!currentVoiceChannel) return;
     socket.emit('voice_state_change', { channelId: currentVoiceChannel.id, isVideo, isStreaming });
   }, [currentVoiceChannel]);
@@ -1439,6 +1509,8 @@ export default function App() {
       const newServer = await post('/api/servers', { name, icon_url });
       setServers((prev) => [...prev, newServer]);
       setActiveServerId(newServer.id);
+      // A new server is empty: offer the invite straight away, as Discord does.
+      setInviteFor({ server: newServer, channelId: null });
     } catch (err) { toastError(err); }
   };
 
@@ -1462,20 +1534,11 @@ export default function App() {
     } catch (err) { toastError(err); }
   };
 
-  const handleCreateInvite = async () => {
-    try {
-      const invite = await post(`/api/servers/${activeServerId}/invites`, { channelId: activeChannelId, maxAge: 86400 });
-      const link = `${window.location.origin}/invite/${invite.code}`;
-      await navigator.clipboard?.writeText(link).catch(() => {});
-      // Streamer Mode hides the code itself — it is still on the clipboard.
-      const hide = prefs.streamerMode.enabled && prefs.streamerMode.hideInviteLinks;
-      pushToast(
-        hide ? t('server.inviteCopiedHidden') : t('server.inviteCopied', { code: invite.code }),
-        { type: 'success' }
-      );
-    } catch (err) {
-      pushToast(t('server.inviteFailed', { error: err.message }), { type: 'error' });
-    }
+  // "Invite people": show the link with its expiry and use limit (it used
+  // to be copied silently, expiring after 24 h without saying so).
+  const handleCreateInvite = () => {
+    const server = servers.find((sv) => sv.id === activeServerId);
+    if (server) setInviteFor({ server, channelId: activeChannelId });
   };
 
   const handleLeaveServer = () => {
@@ -1807,6 +1870,7 @@ export default function App() {
       onTypingStop={() => socket.emit('typing_stop', { channelId: activeChannelId })}
       typingUsers={typingUsers}
       lastReadMessageId={channelReadMarker}
+      onClearReadMarker={() => setChannelReadMarker(null)}
       onLoadMore={handleLoadMore}
       hasMoreHistory={hasMoreHistory}
       isLoadingHistory={isLoadingHistory}
@@ -1820,7 +1884,7 @@ export default function App() {
       onSelectChannel={(id) => setActiveChannelId(id)}
       onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
       isLoadingMessages={isLoadingMessages}
-      onCreateThread={activeChannel?.server_id && activeChannel.type !== 'thread' ? handleCreateThread : null}
+      onCreateThread={Boolean(activeChannel?.server_id) && activeChannel.type !== 'thread' ? handleCreateThread : null}
       onForward={(msg) => setForwardMessage(msg)}
       botCommands={botCommands}
       onRunBotCommand={async (command, options, target = null) => {
@@ -1973,6 +2037,19 @@ export default function App() {
     voiceHost
   ) : null;
 
+  const openJoinWithInvite = () => setInputModal({
+    title: t('server.joinTitle'),
+    label: t('server.inviteLink'),
+    placeholder: `${window.location.origin}/invite/abc123`,
+    submitLabel: t('server.join'),
+    hint: t('server.joinHint'),
+    onSubmit: async (value) => {
+      const code = value.trim().split('/').filter(Boolean).pop();
+      if (!code) throw new Error(t('server.invalidInvite'));
+      setInviteCode(code);
+    }
+  });
+
   if (authState === null) {
     return (
       <div className="fixed inset-0 bg-d-base flex items-center justify-center text-d-text3 text-sm">
@@ -1997,6 +2074,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-d-base text-d-text font-sans antialiased">
+      {/* Skip links (WCAG 2.4.1): straight to the composer or the channel
+          list instead of tabbing through the rail and every message. */}
+      <nav aria-label={t('a11y.skipLinks')} className="contents">
+        <a href="#message-composer" className="skip-link">{t('a11y.skipToComposer')}</a>
+        <a href="#channel-list" className="skip-link">{t('a11y.skipToChannels')}</a>
+      </nav>
       <ServerRail
         servers={servers}
         serverSettings={serverSettings}
@@ -2007,18 +2090,7 @@ export default function App() {
         mobileOpen={mobileSidebarOpen}
         onOpenCreateServerModal={() => setShowCreateServerModal(true)}
         onSelectHome={() => setActiveServerId('home')}
-        onJoinWithInvite={() => setInputModal({
-          title: t('server.joinTitle'),
-          label: t('server.inviteLink'),
-          placeholder: `${window.location.origin}/invite/abc123`,
-          submitLabel: t('server.join'),
-          hint: t('server.joinHint'),
-          onSubmit: async (value) => {
-            const code = value.trim().split('/').filter(Boolean).pop();
-            if (!code) throw new Error(t('server.invalidInvite'));
-            setInviteCode(code);
-          }
-        })}
+        onJoinWithInvite={openJoinWithInvite}
         onServerContextMenu={(server, x, y) => setNotifPopover({ kind: 'server', id: server.id, x, y })}
         pendingFriendCount={friends.filter((f) => f.friend_status === 'pending' && f.direction === 'incoming').length}
       />
@@ -2035,6 +2107,9 @@ export default function App() {
           mobileOpen={mobileSidebarOpen}
           onOpenMobile={() => setMobileSidebarOpen(true)}
           onCloseMobile={() => setMobileSidebarOpen(false)}
+          serverCount={servers.length}
+          onCreateServer={() => setShowCreateServerModal(true)}
+          onJoinServer={openJoinWithInvite}
           onStartDm={handleStartDm}
           onCloseDm={handleCloseDm}
           onAddFriend={handleAddFriend}
@@ -2441,6 +2516,23 @@ export default function App() {
       {voiceRoomPortal}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      {showShortcuts && (
+        <ShortcutsModal
+          onClose={() => setShowShortcuts(false)}
+          onOpenKeybinds={() => { setShowShortcuts(false); setShowUserSettingsModal('keybinds'); }}
+        />
+      )}
+
+      {inviteFor && (
+        <InviteModal
+          server={inviteFor.server}
+          channelId={inviteFor.channelId}
+          hideLink={prefs.streamerMode.enabled && prefs.streamerMode.hideInviteLinks}
+          onClose={() => setInviteFor(null)}
+          onToast={pushToast}
+        />
+      )}
 
       {editHistoryFor && (
         <EditHistoryModal message={editHistoryFor} onClose={() => setEditHistoryFor(null)} />
