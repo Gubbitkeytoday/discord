@@ -16,6 +16,8 @@ import fs from 'fs';
 import { createSqliteDriver } from './db/sqlite.js';
 import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
+import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
+import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -396,6 +398,30 @@ const MIGRATIONS = [
       // Existing commands are all slash commands; the new kinds are opt-in.
       // ALTER TABLE cannot add a CHECK, so the constraint lives in the service.
       await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
+    }
+  }
+  // passkeys (v35) — WebAuthn credentials, single-use challenges, audit trail.
+  // Self-contained DDL (not in schema.sql / schema.pg.sql) so it merges cleanly.
+  ,{
+    version: 35,
+    name: 'passkeys (WebAuthn credentials, challenges, events)',
+    up: async () => { for (const ddl of PASSKEY_DDL.sqlite) await runQuery(ddl); },
+    postgres: async () => { for (const ddl of PASSKEY_DDL.postgres) await runQuery(ddl); }
+  }
+  // translation (v36) — per-message translation cache + guild opt-out.
+  ,{
+    version: 36,
+    name: 'message translation cache, guild translation switch',
+    up: async () => {
+      for (const ddl of TRANSLATION_DDL.sqlite) await runQuery(ddl);
+      const cols = await allQuery(`PRAGMA table_info(servers)`);
+      if (!cols.some((c) => c.name === 'translation_disabled')) {
+        await runQuery(`ALTER TABLE servers ADD COLUMN translation_disabled INTEGER NOT NULL DEFAULT 0`);
+      }
+    },
+    postgres: async () => {
+      for (const ddl of TRANSLATION_DDL.postgres) await runQuery(ddl);
+      await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS translation_disabled INTEGER NOT NULL DEFAULT 0`);
     }
   }
 ];
