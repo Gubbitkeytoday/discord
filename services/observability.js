@@ -94,6 +94,19 @@ export function pingRedis(url, { timeoutMs = 1500 } = {}) {
   });
 }
 
+/** Free/total space for each local data volume, for the disk gauges. */
+export async function diskVolumes({ storageRoot, storageBackend, dbPath, isSqlite }) {
+  const volumes = [];
+  if (storageBackend !== 's3' && storageRoot) volumes.push(['storage', storageRoot]);
+  if (isSqlite && dbPath) volumes.push(['database', path.dirname(dbPath)]);
+  const out = [];
+  for (const [volume, dir] of volumes) {
+    const d = await checkDisk(dir);
+    if (Number.isFinite(d.free_bytes)) out.push({ volume, free_bytes: d.free_bytes, total_bytes: d.total_bytes });
+  }
+  return out;
+}
+
 /**
  * Everything readiness depends on. `dbHealth` comes from db.js; Redis is only
  * checked when REDIS_URL is set; disk is checked where the bytes live (the

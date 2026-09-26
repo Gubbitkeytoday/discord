@@ -15,10 +15,12 @@ import express from 'express';
 import { asyncRoute, ApiError } from '../lib/httpUtils.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { renderMetrics, metricsSnapshot } from '../lib/middleware.js';
-import { mergeExposition, renderPromMetrics, metricsContentType } from '../lib/telemetry.js';
+import {
+  mergeExposition, renderPromMetrics, metricsContentType, registerRuntimeGauges
+} from '../lib/telemetry.js';
 import { getLogger } from '../lib/logger.js';
 import {
-  readinessChecks, ingestVitals, clientTelemetryConfig, forwardEnvelope
+  readinessChecks, ingestVitals, clientTelemetryConfig, forwardEnvelope, diskVolumes
 } from '../services/observability.js';
 
 const log = getLogger('observability');
@@ -43,6 +45,16 @@ export default function observabilityRouter({
 }) {
   const router = express.Router();
   const sockets = () => io.engine.clientsCount;
+
+  // Live gauges read at scrape/export time (lib/telemetry.js).
+  registerRuntimeGauges({
+    sockets,
+    dbStats: db.stats,
+    voiceParticipants: async () => (await db.getQuery(`SELECT COUNT(*) AS n FROM voice_states`))?.n ?? 0,
+    disk: () => diskVolumes({
+      storageRoot: storage.root, storageBackend: storage.backend(), dbPath: db.path, isSqlite: !db.isPostgres
+    })
+  });
 
   /**
    * Liveness: is the process up? Deliberately does not touch the database, so a

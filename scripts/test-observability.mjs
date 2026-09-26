@@ -386,7 +386,7 @@ describe('observability endpoints (default configuration)', () => {
       'app_requests_total', 'app_messages_sent_total', 'app_http_request_duration_seconds_bucket',
       'app_db_query_duration_seconds_bucket', 'app_socket_connections', 'app_voice_participants',
       'nodejs_eventloop_lag_seconds', 'process_resident_memory_bytes', 'app_web_vitals_lcp_seconds_count',
-      'app_web_vitals_cls_count'
+      'app_web_vitals_cls_count', 'app_disk_free_bytes{volume="storage"}', 'app_db_inflight_queries'
     ]) {
       assert.match(text, new RegExp(`^${name}`, 'm'), name);
     }

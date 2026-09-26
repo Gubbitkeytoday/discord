@@ -173,14 +173,9 @@ app.use(observabilityRouter({
   io,
   config,
   schemaVersion: SCHEMA_VERSION,
-  db: { health: dbHealth, getQuery, path: DB_PATH, isPostgres },
+  db: { health: dbHealth, getQuery, stats: dbStats, path: DB_PATH, isPostgres },
   storage: { root: STORAGE_ROOT, backend: activeBackend }
 }));
-telemetry.registerRuntimeGauges({
-  sockets: () => io.engine.clientsCount,
-  dbStats,
-  voiceParticipants: async () => (await getQuery(`SELECT COUNT(*) AS n FROM voice_states`))?.n ?? 0
-});
 
 /** Permission flag reference, so the client can build a role editor. */
 app.get('/api/meta/permissions', (_req, res) => {
