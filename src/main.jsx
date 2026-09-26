@@ -1,6 +1,5 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import './pwa/register.js'; // PWA: service worker, push, install (must precede App)
 import App from './App.jsx';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';
@@ -18,6 +17,7 @@ import '@fontsource/kanit/500.css';
 import '@fontsource/kanit/600.css';
 import '@fontsource/kanit/700.css';
 import './index.css';
+import './pwa/register.js'; // PWA: service worker, Web Push, install, update prompt
 
 // Apply the cached appearance and accessibility preferences before React
 // mounts, so the app never flashes the wrong theme, zoom or contrast.

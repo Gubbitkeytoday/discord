@@ -1,8 +1,11 @@
 import React, { useRef } from 'react';
 import { useDismiss } from '../hooks/useFocusTrap';
-import { Inbox, AtSign, Check } from 'lucide-react';
+import { Inbox, AtSign, Check, Sparkles, MessageCircle } from 'lucide-react';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
+
+// Mentions, keyword highlights and DMs each get their own glyph.
+const TYPE_ICON = { mention: AtSign, keyword: Sparkles, dm: MessageCircle };
 
 /**
  * The mention inbox behind the bell. Each row jumps straight to the message,
@@ -57,7 +60,7 @@ export default function NotificationsInbox({
             }`}
           >
             <div className="flex items-center gap-2 mb-0.5">
-              <AtSign className="w-3 h-3 text-d-mention shrink-0" />
+              {React.createElement(TYPE_ICON[n.type] ?? AtSign, { className: 'w-3 h-3 text-d-mention shrink-0', 'aria-hidden': true })}
               <span className="text-xs font-semibold text-d-strong truncate">
                 {n.actor_name ?? n.message?.display_name ?? ''}
               </span>

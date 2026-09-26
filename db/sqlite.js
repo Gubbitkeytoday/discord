@@ -119,7 +119,19 @@ export function createSqliteDriver({ dbPath, verbose = false, quiet = false }) {
     if (current()) return writer;
     return getReader() ?? writer;
   }
-  const get = (text, params) => rawGet(readConn(), text, normalize(params));
+  // On the reader, a single-row get() leaves its statement stepped but not
+  // reset until the finalize queued behind it runs — and while any statement
+  // on a connection is un-reset, that connection keeps its read snapshot. A
+  // read that lands in that window (e.g. createMessage re-reading the row it
+  // just committed on the writer) then sees data from before the commit.
+  // all() steps to SQLITE_DONE, which ends the statement's read transaction
+  // at once, so the reader never pins a stale snapshot.
+  const get = (text, params) => {
+    const conn = readConn();
+    return conn === writer
+      ? rawGet(conn, text, normalize(params))
+      : rawAll(conn, text, normalize(params)).then((rows) => rows[0]);
+  };
   const all = (text, params) => rawAll(readConn(), text, normalize(params));
 
   function exec(text) {

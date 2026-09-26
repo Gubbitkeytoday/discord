@@ -1,6 +1,7 @@
 // ============================================================================
-//  PWA bootstrap, imported once from src/main.jsx (before App, so the socket
-//  bridge is in place before the app's socket identifies).
+//  PWA bootstrap, imported once from src/main.jsx. Module evaluation happens
+//  before main.jsx renders, so the socket bridge is in place before the app's
+//  socket first identifies.
 //
 //  - registers /sw.js in production builds (or with ?sw=1 in dev);
 //  - drives the update flow: a waiting worker → "New version available";
