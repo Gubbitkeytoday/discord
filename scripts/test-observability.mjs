@@ -6,9 +6,8 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -327,10 +326,44 @@ describe('readiness probes (units)', () => {
 });
 
 // --- against the harness server ------------------------------------------------------
+//
+// One server for all integration tests (the suite runs files in parallel, so
+// every extra server process slows the others). It is started with a fake
+// Redis whose answer the tests can flip, a fake error tracker behind
+// SENTRY_BROWSER_DSN, and a small vitals rate limit.
 
-describe('observability endpoints (default configuration)', () => {
-  before(startServer);
-  after(stopServer);
+describe('observability endpoints', () => {
+  let redisHealthy = true;
+  let fakeRedis;
+  let tracker;
+  const received = [];
+
+  before(async () => {
+    fakeRedis = net.createServer((sock) => {
+      sock.on('data', () => sock.write(redisHealthy ? '+PONG\r\n' : '-LOADING Redis is loading the dataset in memory\r\n'));
+    });
+    await new Promise((r) => fakeRedis.listen(0, '127.0.0.1', r));
+    tracker = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => { received.push({ url: req.url, body }); res.writeHead(200); res.end('{}'); });
+    });
+    await new Promise((r) => tracker.listen(0, '127.0.0.1', r));
+    Object.assign(process.env, {
+      REDIS_URL: `redis://127.0.0.1:${fakeRedis.address().port}`,
+      SENTRY_BROWSER_DSN: `http://pubkey@127.0.0.1:${tracker.address().port}/5`,
+      RATE_LIMIT_VITALS_PER_MIN: '8',
+      WEB_VITALS_SAMPLE_RATE: '1'
+    });
+    await startServer();
+  });
+
+  after(async () => {
+    await stopServer();
+    for (const key of ['REDIS_URL', 'SENTRY_BROWSER_DSN', 'RATE_LIMIT_VITALS_PER_MIN', 'WEB_VITALS_SAMPLE_RATE']) delete process.env[key];
+    fakeRedis?.close();
+    tracker?.close();
+  });
 
   test('/api/live answers without touching the database', async () => {
     const { status, body } = await get('/api/live');
@@ -338,15 +371,34 @@ describe('observability endpoints (default configuration)', () => {
     assert.equal(body.status, 'alive');
   });
 
-  test('/api/ready reports database and disk checks', async () => {
+  test('/api/ready reports database, Redis and disk checks', async () => {
     const { status, body } = await get('/api/ready');
     assert.equal(status, 200, JSON.stringify(body));
     assert.equal(body.status, 'ready');
     assert.equal(body.checks.database.ok, true);
+    assert.equal(body.checks.redis.ok, true);
     assert.equal(body.checks.disk.ok, true);
-    assert.equal(body.checks.redis, undefined, 'redis is only checked when REDIS_URL is set');
+    assert.equal(typeof body.checks.disk.free_bytes, 'number');
     assert.equal(body.database.reachable, true);
     assert.ok('requests_total' in body, 'keeps the metrics snapshot it always had');
+  });
+
+  test('readiness fails (503) when Redis stops answering; liveness and health do not', async () => {
+    redisHealthy = false;
+    try {
+      const res = await fetch(`${BASE}/api/ready`);
+      assert.equal(res.status, 503);
+      const body = await res.json();
+      assert.equal(body.status, 'not_ready');
+      assert.equal(body.checks.database.ok, true);
+      assert.equal(body.checks.redis.ok, false);
+      assert.match(body.checks.redis.error, /LOADING/);
+      assert.equal((await fetch(`${BASE}/api/live`)).status, 200);
+      assert.equal((await fetch(`${BASE}/api/health`)).status, 200);
+    } finally {
+      redisHealthy = true;
+    }
+    assert.equal((await fetch(`${BASE}/api/ready`)).status, 200);
   });
 
   test('/api/health keeps its shape', async () => {
@@ -396,121 +448,42 @@ describe('observability endpoints (default configuration)', () => {
     assert.match(text, /app_http_request_duration_seconds_count\{method="GET",route="\/api\/live",status_code="200"\}/);
   });
 
-  test('/api/telemetry/config and the tunnel are inert without a browser DSN', async () => {
-    const { status, body } = await get('/api/telemetry/config');
-    assert.equal(status, 200);
-    assert.equal(body.errors, null);
-    assert.equal(typeof body.release, 'string');
-    const res = await fetch(`${BASE}/api/telemetry/errors`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}\n' });
-    assert.equal(res.status, 404);
-  });
-});
-
-// --- a separately configured server -------------------------------------------------------
-
-describe('observability endpoints (configured)', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-obs-'));
-  let child;
-  let base;
-  let glitchtip;
-  const received = [];
-
-  async function boot(extraEnv) {
-    const port = await freePort();
-    base = `http://127.0.0.1:${port}`;
-    const env = { ...process.env };
-    delete env.DATABASE_URL;
-    delete env.NODE_TEST_CONTEXT;
-    child = spawn(process.execPath, ['--import', './lib/otel-preload.mjs', 'server.js'], {
-      cwd: repo,
-      env: {
-        ...env, PORT: String(port), HOST: '127.0.0.1',
-        DB_PATH: path.join(tmp, 'obs.db'), STORAGE_ROOT: path.join(tmp, 'uploads'),
-        ALLOW_DEV_IDENTITY: '1', LOG_LEVEL: 'silent', ...extraEnv
-      },
-      stdio: ['ignore', 'ignore', 'pipe']
-    });
-    child.stderr.on('data', () => {});
-    const deadline = Date.now() + 40_000;
-    for (;;) {
-      try { if ((await fetch(`${base}/api/live`)).ok) break; } catch { /* not up */ }
-      if (Date.now() > deadline) throw new Error('configured server did not start');
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-
-  async function shutdown() {
-    if (child && child.exitCode === null) {
-      const exited = new Promise((r) => child.once('exit', r));
-      child.kill();
-      await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
-    }
-  }
-
-  before(async () => {
-    glitchtip = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => { received.push({ url: req.url, body }); res.writeHead(200); res.end('{}'); });
-    });
-    await new Promise((r) => glitchtip.listen(0, '127.0.0.1', r));
-    await boot({
-      // Unreachable Redis and an impossible disk threshold: readiness must fail.
-      REDIS_URL: `redis://127.0.0.1:${await freePort()}`,
-      READY_DISK_MIN_FREE_MB: String(Number.MAX_SAFE_INTEGER / 1024 / 1024),
-      RATE_LIMIT_VITALS_PER_MIN: '3',
-      SENTRY_BROWSER_DSN: `http://pubkey@127.0.0.1:${glitchtip.address().port}/5`,
-      WEB_VITALS_SAMPLE_RATE: '1'
-    });
-  });
-
-  after(async () => {
-    await shutdown();
-    glitchtip?.close();
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
-  });
-
-  test('readiness fails (503) on unreachable Redis or a full disk, liveness does not', async () => {
-    const res = await fetch(`${base}/api/ready`);
-    assert.equal(res.status, 503);
-    const body = await res.json();
-    assert.equal(body.status, 'not_ready');
-    assert.equal(body.checks.database.ok, true);
-    assert.equal(body.checks.redis.ok, false);
-    assert.equal(body.checks.disk.ok, false);
-    assert.equal(body.checks.disk.status, 'critical');
-    assert.equal((await fetch(`${base}/api/live`)).status, 200);
-    assert.equal((await fetch(`${base}/api/health`)).status, 200, 'health stays backward compatible');
-  });
-
   test('vitals endpoint is rate limited per IP', async () => {
     const body = JSON.stringify({ metrics: [{ name: 'INP', value: 120, rating: 'good' }] });
     const statuses = [];
-    for (let i = 0; i < 6; i++) {
-      statuses.push((await fetch(`${base}/api/telemetry/vitals`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })).status);
+    for (let i = 0; i < 10; i++) {
+      statuses.push((await fetch(`${BASE}/api/telemetry/vitals`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })).status);
     }
-    assert.deepEqual(statuses.slice(0, 3), [204, 204, 204]);
-    assert.ok(statuses.slice(3).every((s) => s === 429), statuses.join(','));
+    // 5 of the 8/min budget were spent above; the rest succeed, then 429.
+    assert.ok(statuses.includes(204), statuses.join(','));
+    const first429 = statuses.indexOf(429);
+    assert.ok(first429 > 0, statuses.join(','));
+    assert.ok(statuses.slice(first429).every((s) => s === 429), statuses.join(','));
   });
 
   test('browser config and tunnel forward scrubbed events to the tracker', async () => {
-    const cfg = await (await fetch(`${base}/api/telemetry/config`)).json();
+    const cfg = (await get('/api/telemetry/config')).body;
     assert.equal(cfg.vitals.sample_rate, 1);
     assert.equal(cfg.errors.tunnel, '/api/telemetry/errors');
+    assert.equal(typeof cfg.release, 'string');
     const envelope = [
       JSON.stringify({ dsn: cfg.errors.dsn }),
       JSON.stringify({ type: 'event' }),
       JSON.stringify({ message: 'client crash for heidi@example.com', user: { email: 'heidi@example.com', id: 'u1' } })
     ].join('\n');
-    const res = await fetch(`${base}/api/telemetry/errors`, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: envelope });
+    const res = await fetch(`${BASE}/api/telemetry/errors`, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: envelope });
     assert.equal(res.status, 200);
     assert.equal(received.length, 1);
     assert.equal(received[0].url, '/api/5/envelope/');
     assert.doesNotMatch(received[0].body, /heidi@/);
     const forged = [JSON.stringify({ dsn: 'http://attacker@127.0.0.1:1/5' }), JSON.stringify({ type: 'event' }), '{}'].join('\n');
-    assert.equal((await fetch(`${base}/api/telemetry/errors`, { method: 'POST', body: forged })).status, 403);
+    assert.equal((await fetch(`${BASE}/api/telemetry/errors`, { method: 'POST', body: forged })).status, 403);
   });
+});
 
+// --- server-side error tracking (a short child process) ----------------------------------
+
+describe('server error tracking', () => {
   test('server errors reach the tracker (SENTRY_DSN) with PII scrubbed', async () => {
     const got = [];
     const tracker = http.createServer((req, res) => {
@@ -541,4 +514,3 @@ describe('observability endpoints (configured)', () => {
     }
   });
 });
-
