@@ -14,7 +14,8 @@ import { spawn } from 'child_process';
 // Derive a stable-but-distinct port from the entry file name, so part 1 and
 // part 2 never collide.
 const suffix = path.basename(process.argv[1] ?? 'test').replace(/\D/g, '') || '1';
-export const PORT = Number(process.env.TEST_PORT) || (3900 + (Number(suffix) % 90));
+// TEST_PORT_BASE lets several checkouts run the suite concurrently.
+export const PORT = Number(process.env.TEST_PORT) || (Number(process.env.TEST_PORT_BASE || 3900) + (Number(suffix) % 90));
 export const BASE = `http://localhost:${PORT}`;
 export const ADMIN = { 'x-admin-token': 'test-admin-token' };
 
