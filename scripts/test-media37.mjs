@@ -17,6 +17,9 @@ import { fileURLToPath } from 'url';
 
 // A small quota for every user, so enforcement can be exercised with a few MB.
 process.env.STORAGE_QUOTA_BYTES = String(6 * 1024 * 1024);
+// Uploads answer once renditions exist (the default budget is 2 s, which a
+// loaded CI machine can miss for the larger fixtures).
+process.env.MEDIA_SYNC_BUDGET_MS = '20000';
 
 const {
   startServer, stopServer, api, get, uploadFile, BASE, ADMIN

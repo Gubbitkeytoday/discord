@@ -32,12 +32,12 @@ import { sniffMime, probeImage } from '../lib/mediaProbe.js';
 import { probeVideo, extractPoster } from '../lib/mediaDuration.js';
 import {
   loadSharp, inspectImage, planRenditions, renderRendition, renderStill,
-  animationWithinBudget, computeThumbhash, computeTinyPreview, mediaConfig, MediaError
+  animationWithinBudget, computePlaceholders, mediaConfig, MediaError
 } from '../lib/imageVariants.js';
 import {
   CATEGORY_RULES, STORAGE_ROOT, StorageError, activeBackend, buildStorageKey, readObject,
   writeObject, removeObject, resolveStoragePath, prepareUpload, processingJobFor, sha256,
-  sanitizeFilename, assertQuota, getFile, formatBytes
+  sanitizeFilename, assertQuota, getFile, formatBytes, syncBudgetMs
 } from '../storageService.js';
 import {
   registerJobHandler, enqueueJob, waitForJob, onWorkersStart
@@ -200,8 +200,9 @@ async function processVideo(file, buffer = null) {
           .webp({ quality: 80 })
           .toBuffer({ resolveWithObject: true });
         await upsertVariant(file, 'poster', { data, mime: 'image/webp', width: info.width, height: info.height });
-        thumbhash = await computeThumbhash(png).catch(() => thumbhash);
-        preview = await computeTinyPreview(png).catch(() => preview);
+        const placeholders = await computePlaceholders(png).catch(() => null);
+        thumbhash = placeholders?.thumbhash ?? thumbhash;
+        preview = placeholders?.preview ?? preview;
         if (!width || !height) {
           const m = await sharp(png).metadata();
           width = m.width; height = m.height;
@@ -504,8 +505,8 @@ export async function completeDirectUpload({ userId, uploadId, waitMs = null }) 
   await runQuery(`UPDATE direct_uploads SET status = 'completed', file_id = ? WHERE id = ?`, [fileId, upload.id]);
 
   await enqueueJob(fileId, 'ingest');
-  const budget = waitMs ?? (Number(process.env.MEDIA_SYNC_BUDGET_MS) >= 0 && process.env.MEDIA_SYNC_BUDGET_MS !== undefined
-    ? Number(process.env.MEDIA_SYNC_BUDGET_MS) : 10_000);
+  // Ingest downloads the object first, so it gets a longer budget than a multipart upload.
+  const budget = waitMs ?? Math.max(syncBudgetMs(), syncBudgetMs() > 0 ? 8000 : 0);
   if (budget > 0) await waitForJob(fileId, 'ingest', budget);
   const file = await getFile(fileId, { includeDeleted: true });
   if (file?.deleted_at) {

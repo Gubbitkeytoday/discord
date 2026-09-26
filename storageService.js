@@ -39,7 +39,7 @@ import { sniffMime, probeImage, getFileType } from './lib/mediaProbe.js';
 import { probeDuration, probeVideoDimensions, ffmpegAvailability } from './lib/mediaDuration.js';
 import { s3 } from './lib/s3Client.js';
 import {
-  loadSharp, inspectImage, sanitizeImage, computeThumbhash, computeTinyPreview,
+  loadSharp, inspectImage, sanitizeImage, computePlaceholders,
   pickRendition, MediaError, mediaConfig
 } from './lib/imageVariants.js';
 import { enqueueJob, waitForJob, startMediaWorkers } from './services/mediaJobs.js';
@@ -103,12 +103,15 @@ export const UPLOADS_BASE_DIR = STORAGE_ROOT;
 
 /**
  * How long an upload request waits for its renditions before answering with
- * `media_status: 'processing'`. The WebP set for a 12 MP photo takes ~1 s;
- * AVIF is always finished in the background.
+ * `media_status: 'processing'` (dimensions and placeholders are always in the
+ * answer). Small images finish well inside it; the WebP set for a 12 MP photo
+ * takes ~1–2 s, so a big photo may come back 'processing' and gain its
+ * renditions moments later. AVIF is always finished in the background.
  */
-const syncBudgetMs = () => {
-  const n = Number(process.env.MEDIA_SYNC_BUDGET_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 10_000;
+export const syncBudgetMs = () => {
+  const raw = process.env.MEDIA_SYNC_BUDGET_MS;
+  const n = Number(raw);
+  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 2000;
 };
 
 // --- errors ------------------------------------------------------------------
@@ -398,7 +401,7 @@ export async function prepareUpload({ buffer, category, declaredMime, originalNa
     }
     if (info.decodable) {
       try {
-        [thumbhash, preview] = await Promise.all([computeThumbhash(buffer), computeTinyPreview(buffer)]);
+        ({ thumbhash, preview } = await computePlaceholders(buffer));
       } catch (err) {
         console.warn(`⚠️  placeholder failed: ${err.message}`);
       }
