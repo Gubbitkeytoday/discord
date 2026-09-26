@@ -393,7 +393,16 @@ export default function App() {
       if (data.server) {
         setServers((prev) => prev.map((s) => (s.id === serverId ? { ...s, ...data.server } : s)));
       }
-      if (!keepChannel) {
+      // A refresh after a role or overwrite change can take a channel away:
+      // the server now stops sending events for channels you cannot view, so
+      // the refetched list is the only notice. Don't leave the user parked in
+      // a channel that has vanished from their sidebar.
+      const wantedChannel = allChannelsRef.current.find((c) => c.id === activeChannelIdRef.current);
+      const lostAccess = keepChannel
+        && wantedChannel?.server_id === serverId
+        && wantedChannel.type !== 'thread'
+        && !data.channels?.some((c) => c.id === wantedChannel.id);
+      if (!keepChannel || lostAccess) {
         const wanted = activeChannelIdRef.current;
         const stillThere = wanted && data.channels?.some((c) => c.id === wanted);
         if (!stillThere) {
@@ -498,7 +507,12 @@ export default function App() {
       .catch((err) => {
         if (stale) return;
         setMessages([]);
-        if (err.status === 403) pushToast(err.message, { type: 'error' });
+        if (err.status === 403) {
+          pushToast(err.message, { type: 'error' });
+          // Access was revoked while we were not told (no event reaches a
+          // member who can no longer see the channel): resync the sidebar.
+          if (activeChan.server_id) loadServer(activeChan.server_id, { keepChannel: true });
+        }
       })
       .finally(() => { if (!stale) setIsLoadingMessages(false); });
 
