@@ -304,7 +304,7 @@ export async function getServerDetail(serverId, viewerId = null) {
   );
 
   const roleRows = await allQuery(
-    `SELECT mr.user_id, r.id, r.name, r.color, r.position, r.permissions, r.hoist, r.managed, r.icon_url
+    `SELECT mr.user_id, r.id, r.name, r.color, r.color_secondary, r.position, r.permissions, r.hoist, r.managed, r.icon_url
        FROM member_roles mr JOIN roles r ON r.id = mr.role_id
       WHERE mr.server_id = ?
       ORDER BY r.position DESC`,

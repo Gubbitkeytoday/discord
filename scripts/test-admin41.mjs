@@ -201,6 +201,21 @@ describe('roles and audit log', () => {
     assert.equal(pos['@everyone'], 0);
   });
 
+  test('a two-colour role reaches the member list as a gradient', async () => {
+    const owner = await makeUser('gr');
+    const member = await makeUser('grm');
+    const serverId = await makeServer(owner);
+    await join(serverId, owner, member);
+    const role = await api('POST', `/api/servers/${serverId}/roles`, { name: 'Shiny', color: '#ff0000' }, as(owner));
+    const patched = await api('PATCH', `/api/servers/${serverId}/roles/${role.body.id}`, { color_secondary: '#0000ff' }, as(owner));
+    assert.equal(patched.status, 200, JSON.stringify(patched.body));
+    assert.equal((await api('PUT', `/api/servers/${serverId}/members/${member}/roles/${role.body.id}`, undefined, as(owner))).status, 200);
+    const m = (await detail(serverId, owner)).members.find((x) => x.id === member);
+    assert.equal(m.role_color, '#ff0000');
+    assert.equal(m.role_color_secondary, '#0000ff');
+    assert.equal(m.roles.find((r) => r.id === role.body.id).color_secondary, '#0000ff');
+  });
+
   test('audit entries name their target, and can be filtered', async () => {
     const owner = await makeUser('au');
     const victim = await makeUser('victim');
