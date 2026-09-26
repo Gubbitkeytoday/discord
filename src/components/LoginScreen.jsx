@@ -50,8 +50,10 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
       try {
         const data = await signInWithPasskey({ conditional: true });
         if (!cancelled && mounted.current) finishPasskey(data);
-      } catch (err) {
-        if (!cancelled && mounted.current && !err?.cancelled) setError(err?.message ?? String(err));
+      } catch {
+        // Autofill is passive: a failed or superseded background ceremony
+        // must not replace the error from a password attempt the user just
+        // made. The explicit "Sign in with a passkey" button reports errors.
       }
     })();
     return () => { cancelled = true; cancelPasskeyCeremony(); };
