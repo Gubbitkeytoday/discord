@@ -239,7 +239,7 @@ export default function ColourThemes({ appearance, update, onToast }) {
           <div className="mt-3 flex flex-wrap gap-2">
             <Button variant="primary" size="sm" onClick={() => runImport(importText)}>{t('theme.importApply')}</Button>
             <Button size="sm" onClick={() => fileRef.current?.click()}>{t('theme.importFile')}</Button>
-            <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={onFile} tabIndex={-1} aria-hidden="true" />
+            <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={onFile} tabIndex={-1} aria-label={t('theme.importFile')} />
           </div>
         </div>
       )}
