@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Endre hurtigtaster under Innstillinger › Hurtigtaster',
   'auth.sessionRevoked': 'Du ble logget ut på denne enheten.',
   'voice.disconnected': 'Du ble koblet fra talekanalen.',
+  'auth.checkEmail': 'Sjekk e-posten din for å fortsette.',
+  'chat.uploading': 'Laster opp …',
+  'chat.sendAfterUpload': 'Sendes når opplastingen er ferdig',
 };

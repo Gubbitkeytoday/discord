@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Skift genveje under Indstillinger › Tastebindinger',
   'auth.sessionRevoked': 'Du er blevet logget ud på denne enhed.',
   'voice.disconnected': 'Du blev afbrudt fra talekanalen.',
+  'auth.checkEmail': 'Tjek din e-mail for at fortsætte.',
+  'chat.uploading': 'Uploader…',
+  'chat.sendAfterUpload': 'Sendes, når uploaden er færdig',
 };

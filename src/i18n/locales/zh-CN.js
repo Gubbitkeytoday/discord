@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': '可在 设置 › 快捷键 中更改快捷键',
   'auth.sessionRevoked': '你已在此设备上退出登录。',
   'voice.disconnected': '你已与语音频道断开连接。',
+  'auth.checkEmail': '请查收邮件以继续。',
+  'chat.uploading': '正在上传…',
+  'chat.sendAfterUpload': '上传完成后将发送',
 };

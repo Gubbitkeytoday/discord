@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': 'Thay đổi phím tắt trong Cài đặt › Phím tắt',
   'auth.sessionRevoked': 'Bạn đã bị đăng xuất trên thiết bị này.',
   'voice.disconnected': 'Bạn đã bị ngắt kết nối khỏi kênh thoại.',
+  'auth.checkEmail': 'Hãy kiểm tra email để tiếp tục.',
+  'chat.uploading': 'Đang tải lên…',
+  'chat.sendAfterUpload': 'Sẽ gửi khi tải lên xong',
 };

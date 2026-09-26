@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Muuta pikanäppäimiä kohdassa Asetukset › Pikanäppäimet',
   'auth.sessionRevoked': 'Sinut kirjattiin ulos tällä laitteella.',
   'voice.disconnected': 'Yhteytesi puhekanavaan katkesi.',
+  'auth.checkEmail': 'Jatka tarkistamalla sähköpostisi.',
+  'chat.uploading': 'Lähetetään…',
+  'chat.sendAfterUpload': 'Lähetetään, kun lataus on valmis',
 };

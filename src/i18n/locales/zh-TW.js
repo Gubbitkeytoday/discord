@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': '可在 設定 › 快捷鍵 中變更快捷鍵',
   'auth.sessionRevoked': '你已在此裝置上登出。',
   'voice.disconnected': '你已與語音頻道中斷連線。',
+  'auth.checkEmail': '請查看電子郵件以繼續。',
+  'chat.uploading': '正在上傳…',
+  'chat.sendAfterUpload': '上傳完成後將傳送',
 };

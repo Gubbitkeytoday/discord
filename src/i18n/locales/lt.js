@@ -1792,4 +1792,7 @@ export default {
   'shortcuts.customize': 'Sparčiuosius klavišus pakeisite skiltyje Nustatymai › Spartieji klavišai',
   'auth.sessionRevoked': 'Šiame įrenginyje buvote atjungti.',
   'voice.disconnected': 'Buvote atjungti nuo balso kanalo.',
+  'auth.checkEmail': 'Norėdami tęsti, patikrinkite el. paštą.',
+  'chat.uploading': 'Įkeliama…',
+  'chat.sendAfterUpload': 'Bus išsiųsta, kai įkėlimas baigsis',
 };

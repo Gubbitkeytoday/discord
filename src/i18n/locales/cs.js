@@ -1792,4 +1792,7 @@ export default {
   'shortcuts.customize': 'Zkratky změníš v Nastavení › Klávesové zkratky',
   'auth.sessionRevoked': 'Na tomto zařízení jsi byl(a) odhlášen(a).',
   'voice.disconnected': 'Byl(a) jsi odpojen(a) od hlasového kanálu.',
+  'auth.checkEmail': 'Pokračuj kontrolou svého e-mailu.',
+  'chat.uploading': 'Nahrávání…',
+  'chat.sendAfterUpload': 'Odešle se po dokončení nahrávání',
 };

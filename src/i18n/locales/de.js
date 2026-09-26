@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Tastenkürzel änderst du unter Einstellungen › Tastenbelegungen',
   'auth.sessionRevoked': 'Du wurdest auf diesem Gerät abgemeldet.',
   'voice.disconnected': 'Deine Sprachverbindung wurde getrennt.',
+  'auth.checkEmail': 'Prüfe deine E-Mails, um fortzufahren.',
+  'chat.uploading': 'Wird hochgeladen …',
+  'chat.sendAfterUpload': 'Wird gesendet, sobald der Upload fertig ist',
 };

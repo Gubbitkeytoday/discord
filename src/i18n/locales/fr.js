@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Modifie les raccourcis dans Paramètres › Raccourcis clavier',
   'auth.sessionRevoked': 'Tu as été déconnecté(e) sur cet appareil.',
   'voice.disconnected': 'Tu as été déconnecté(e) du vocal.',
+  'auth.checkEmail': 'Consulte tes e-mails pour continuer.',
+  'chat.uploading': 'Envoi en cours…',
+  'chat.sendAfterUpload': 'Sera envoyé à la fin du téléversement',
 };

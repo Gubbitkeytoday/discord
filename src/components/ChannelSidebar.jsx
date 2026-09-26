@@ -7,7 +7,7 @@ import {
 import ServerDropdown from './ServerDropdown';
 import ContextMenu from './ContextMenu';
 import UserStatusMenu from './UserStatusMenu';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { getPreferences, useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
@@ -101,6 +101,8 @@ export default function ChannelSidebar({
     update('layout', { ...(prefs.layout ?? {}), pinnedChannels: next });
   };
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const grouped = useMemo(() => {
     const groups = new Map();
     const pinned = [];
@@ -120,7 +122,7 @@ export default function ChannelSidebar({
       entries.unshift([t('channel.pinned'), pinned]);
     }
     return entries;
-  }, [channels, pinnedIds]);
+  }, [channels, pinnedIds, locale]);
 
   if (!currentServer) return null;
 

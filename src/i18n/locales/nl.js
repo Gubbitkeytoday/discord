@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Wijzig sneltoetsen in Instellingen › Sneltoetsen',
   'auth.sessionRevoked': 'Je bent afgemeld op dit apparaat.',
   'voice.disconnected': 'De verbinding met het spraakkanaal is verbroken.',
+  'auth.checkEmail': 'Controleer je e-mail om door te gaan.',
+  'chat.uploading': 'Uploaden…',
+  'chat.sendAfterUpload': 'Wordt verzonden zodra de upload klaar is',
 };

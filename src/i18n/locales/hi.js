@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'सेटिंग्स › कीबाइंड में शॉर्टकट बदलें',
   'auth.sessionRevoked': 'आपको इस डिवाइस पर साइन आउट कर दिया गया।',
   'voice.disconnected': 'आप वॉइस से डिस्कनेक्ट हो गए।',
+  'auth.checkEmail': 'जारी रखने के लिए अपना ईमेल देखें।',
+  'chat.uploading': 'अपलोड हो रहा है…',
+  'chat.sendAfterUpload': 'अपलोड पूरा होने पर भेजा जाएगा',
 };

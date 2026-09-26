@@ -53,11 +53,10 @@ const NotificationsInbox = lazyComponent(() => import('./components/Notification
 // proxies /socket.io to :3001, so a relative connection works in both.
 const socket = io({ withCredentials: true, autoConnect: true });
 
-// The session outlives App: I18nProvider remounts the tree on a language
-// switch, and App's state starts over. Without this the remounted App
-// identified the gateway with a null token (the socket was opened before the
-// session cookie existed), the gateway refused, and the user was signed out
-// the moment they picked a language.
+// The session lives outside App so that anything that remounts it (an error
+// boundary reset, a hot reload) keeps the signed-in user and gateway token.
+// A remounted App used to identify with a null token (the socket opened
+// before the session cookie existed), and the gateway signed the user out.
 const session = { user: null, token: null };
 
 const PAGE_SIZE = 50;
@@ -925,8 +924,8 @@ export default function App() {
     // change, account deletion). Say so, then take the normal sign-out path;
     // the note survives the reload and is repeated on the login screen.
     const onSessionRevoked = () => {
-      pushToast(t('session.revoked'), { type: 'error', ttl: 6000 });
-      try { sessionStorage.setItem(SIGN_OUT_NOTICE_KEY, 'session.revoked'); } catch { /* private mode */ }
+      pushToast(t('auth.sessionRevoked'), { type: 'error', ttl: 6000 });
+      try { sessionStorage.setItem(SIGN_OUT_NOTICE_KEY, 'auth.sessionRevoked'); } catch { /* private mode */ }
       handleSignOut();
     };
     // The server removed us from a voice room (moved out, kicked, lost
@@ -938,7 +937,7 @@ export default function App() {
       setCurrentVoiceChannel(null);
       setActiveVoiceParticipants([]);
       setScreenSharing(false);
-      pushToast(t('voice.disconnectedByServer'), { type: 'info', ttl: 5000 });
+      pushToast(t('voice.disconnected'), { type: 'info', ttl: 5000 });
     };
 
     const handlers = {

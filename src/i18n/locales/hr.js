@@ -1792,4 +1792,7 @@ export default {
   'shortcuts.customize': 'Prečace promijeni u Postavke › Tipkovni prečaci',
   'auth.sessionRevoked': 'Tvoja sesija na ovom uređaju je završena.',
   'voice.disconnected': 'Prekinuta je tvoja veza s glasovnim kanalom.',
+  'auth.checkEmail': 'Provjeri e-poštu za nastavak.',
+  'chat.uploading': 'Prijenos…',
+  'chat.sendAfterUpload': 'Poslat će se kad prijenos završi',
 };

@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Άλλαξε τις συντομεύσεις στις Ρυθμίσεις › Συντομεύσεις πλήκτρων',
   'auth.sessionRevoked': 'Αποσυνδέθηκες από αυτή τη συσκευή.',
   'voice.disconnected': 'Αποσυνδέθηκες από το φωνητικό κανάλι.',
+  'auth.checkEmail': 'Έλεγξε το email σου για να συνεχίσεις.',
+  'chat.uploading': 'Μεταφόρτωση…',
+  'chat.sendAfterUpload': 'Θα σταλεί όταν ολοκληρωθεί η μεταφόρτωση',
 };

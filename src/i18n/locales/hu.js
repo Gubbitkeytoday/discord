@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': 'A billentyűparancsokat a Beállítások › Billentyűparancsok menüben módosíthatod',
   'auth.sessionRevoked': 'Kijelentkeztettünk ezen az eszközön.',
   'voice.disconnected': 'Megszakadt a kapcsolatod a hangcsatornával.',
+  'auth.checkEmail': 'A folytatáshoz nézd meg az e-mailjeidet.',
+  'chat.uploading': 'Feltöltés…',
+  'chat.sendAfterUpload': 'A feltöltés után elküldjük',
 };

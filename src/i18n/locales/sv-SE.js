@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Ändra kortkommandon under Inställningar › Kortkommandon',
   'auth.sessionRevoked': 'Du loggades ut på den här enheten.',
   'voice.disconnected': 'Du kopplades från röstkanalen.',
+  'auth.checkEmail': 'Kolla din e-post för att fortsätta.',
+  'chat.uploading': 'Laddar upp …',
+  'chat.sendAfterUpload': 'Skickas när uppladdningen är klar',
 };

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { AtSign, Hash, Smile, Slash } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { matchCommands } from '../utils/slashCommands';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
@@ -174,7 +174,9 @@ export default function ComposerAutocomplete({ trigger, options, activeIndex, on
     node?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex]);
 
-  const meta = useMemo(() => kindMeta()[trigger?.kind] ?? kindMeta().user, [trigger?.kind]);
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
+  const meta = useMemo(() => kindMeta()[trigger?.kind] ?? kindMeta().user, [trigger?.kind, locale]);
   if (!trigger || options.length === 0) return null;
 
   const Icon = meta.icon;

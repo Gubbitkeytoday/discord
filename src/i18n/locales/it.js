@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Modifica le scorciatoie in Impostazioni › Scorciatoie',
   'auth.sessionRevoked': 'La tua sessione su questo dispositivo è terminata.',
   'voice.disconnected': 'Sei stato disconnesso dal canale vocale.',
+  'auth.checkEmail': 'Controlla la tua email per continuare.',
+  'chat.uploading': 'Caricamento…',
+  'chat.sendAfterUpload': 'Verrà inviato al termine del caricamento',
 };

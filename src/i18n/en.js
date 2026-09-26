@@ -1737,4 +1737,7 @@ export default {
   'shortcuts.customize': 'Change shortcuts in Settings › Keybinds',
   'auth.sessionRevoked': 'You were signed out on this device.',
   'voice.disconnected': 'You were disconnected from voice.',
+  'auth.checkEmail': 'Check your email to continue.',
+  'chat.uploading': 'Uploading…',
+  'chat.sendAfterUpload': 'Will send when the upload finishes',
 };

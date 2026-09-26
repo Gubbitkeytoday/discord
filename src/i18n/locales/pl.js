@@ -1792,4 +1792,7 @@ export default {
   'shortcuts.customize': 'Zmień skróty w Ustawienia › Skróty klawiszowe',
   'auth.sessionRevoked': 'Wylogowano Cię na tym urządzeniu.',
   'voice.disconnected': 'Rozłączono Cię z kanałem głosowym.',
+  'auth.checkEmail': 'Sprawdź swoją skrzynkę e-mail, aby kontynuować.',
+  'chat.uploading': 'Przesyłanie…',
+  'chat.sendAfterUpload': 'Zostanie wysłane po zakończeniu przesyłania',
 };

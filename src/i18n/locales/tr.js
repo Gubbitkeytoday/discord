@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': 'Kısayolları Ayarlar › Tuş atamaları bölümünden değiştir',
   'auth.sessionRevoked': 'Bu cihazda oturumun kapatıldı.',
   'voice.disconnected': 'Ses kanalıyla bağlantın kesildi.',
+  'auth.checkEmail': 'Devam etmek için e-postanı kontrol et.',
+  'chat.uploading': 'Yükleniyor…',
+  'chat.sendAfterUpload': 'Yükleme bitince gönderilecek',
 };

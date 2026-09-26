@@ -1737,4 +1737,7 @@ export default {
   'shortcuts.customize': 'เปลี่ยนแป้นพิมพ์ลัดได้ที่ การตั้งค่า › ปุ่มลัด',
   'auth.sessionRevoked': 'คุณถูกออกจากระบบบนอุปกรณ์นี้แล้ว',
   'voice.disconnected': 'คุณถูกตัดการเชื่อมต่อจากช่องเสียง',
+  'auth.checkEmail': 'โปรดตรวจสอบอีเมลของคุณเพื่อดำเนินการต่อ',
+  'chat.uploading': 'กำลังอัปโหลด…',
+  'chat.sendAfterUpload': 'จะส่งเมื่ออัปโหลดเสร็จ',
 };

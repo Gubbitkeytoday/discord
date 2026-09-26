@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': '단축키는 설정 › 단축키에서 변경할 수 있어요',
   'auth.sessionRevoked': '이 기기에서 로그아웃되었어요.',
   'voice.disconnected': '음성 채널에서 연결이 끊겼어요.',
+  'auth.checkEmail': '계속하려면 이메일을 확인하세요.',
+  'chat.uploading': '업로드 중…',
+  'chat.sendAfterUpload': '업로드가 끝나면 전송돼요',
 };

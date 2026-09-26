@@ -1792,4 +1792,7 @@ export default {
   'shortcuts.customize': 'Schimbă comenzile rapide în Setări › Combinații de taste',
   'auth.sessionRevoked': 'Sesiunea ta de pe acest dispozitiv s-a încheiat.',
   'voice.disconnected': 'Ai fost deconectat de la canalul vocal.',
+  'auth.checkEmail': 'Verifică-ți e-mailul pentru a continua.',
+  'chat.uploading': 'Se încarcă…',
+  'chat.sendAfterUpload': 'Se va trimite după finalizarea încărcării',
 };

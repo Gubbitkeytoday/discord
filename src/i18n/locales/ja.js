@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': 'ショートカットは 設定 › キー割り当て で変更できます',
   'auth.sessionRevoked': 'このデバイスからログアウトされました。',
   'voice.disconnected': 'ボイスチャンネルから切断されました。',
+  'auth.checkEmail': '続行するにはメールを確認してください。',
+  'chat.uploading': 'アップロード中…',
+  'chat.sendAfterUpload': 'アップロード完了後に送信されます',
 };

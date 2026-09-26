@@ -1736,4 +1736,7 @@ export default {
   'shortcuts.customize': 'Cambia los atajos en Configuración › Atajos de teclado',
   'auth.sessionRevoked': 'Se cerró tu sesión en este dispositivo.',
   'voice.disconnected': 'Te desconectaste del canal de voz.',
+  'auth.checkEmail': 'Revisa tu correo electrónico para continuar.',
+  'chat.uploading': 'Subiendo…',
+  'chat.sendAfterUpload': 'Se enviará cuando termine la carga',
 };

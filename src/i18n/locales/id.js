@@ -1708,4 +1708,7 @@ export default {
   'shortcuts.customize': 'Ubah pintasan di Pengaturan › Pintasan tombol',
   'auth.sessionRevoked': 'Kamu telah dikeluarkan dari akun di perangkat ini.',
   'voice.disconnected': 'Kamu terputus dari saluran suara.',
+  'auth.checkEmail': 'Periksa email kamu untuk melanjutkan.',
+  'chat.uploading': 'Mengunggah…',
+  'chat.sendAfterUpload': 'Akan dikirim setelah unggahan selesai',
 };
