@@ -3,7 +3,8 @@ import {
   Hash, Bell, BellOff, Pin, Users, Search, PlusCircle, Smile, Send, Trash2, Reply, X,
   FileText, Download, Pencil, ArrowDown, Loader2, Check, Sticker, Inbox, UserPlus,
   MessagesSquare, Archive, AlertTriangle, RotateCcw, Megaphone, Volume2, Lock, BarChart3, ChevronRight,
-  Bold, Italic, Underline, Strikethrough, Code, Code2, Quote, EyeOff, Type, Link2 as Link2Icon, Menu, Phone, Video, History
+  Bold, Italic, Underline, Strikethrough, Code, Code2, Quote, EyeOff, Type, Link2 as Link2Icon, Menu, Phone, Video, History,
+  SmilePlus, MoreHorizontal
 } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
 import { playMessageIncomingSound } from '../utils/soundEffects';
@@ -33,6 +34,14 @@ const QUICK_EMOJIS = ['❤️', '🔥', '👍', '😂', '🎉', '🚀', '💯', 
 
 // How close to the bottom still counts as "following the conversation".
 const AUTOSCROLL_THRESHOLD_PX = 120;
+
+// Hold this long on a touch screen to get the message actions — phones have
+// no hover and no right-click, so without it they had no way to reply or react.
+const LONG_PRESS_MS = 450;
+
+// Unsent text per channel, kept for the life of the tab like Discord's drafts:
+// hopping to another channel to check something no longer eats what you typed.
+const drafts = new Map();
 
 const HEADER_ICONS = { announcement: Megaphone, voice: Volume2, forum: MessagesSquare, thread: MessagesSquare };
 
@@ -93,7 +102,8 @@ export default function ChatArea({
   onAddGroupRecipients,
   onArchiveThread,
   onToast,
-  isUnknownSender
+  isUnknownSender,
+  isLoadingMessages = false
 }) {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -131,6 +141,12 @@ export default function ChatArea({
   const [acIndex, setAcIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [revealedBlocked, setRevealedBlocked] = useState(() => new Set());
+  // The message the emoji picker is reacting to. Null means the picker is
+  // writing into the composer; set, it toggles a reaction on that message.
+  const [reactTarget, setReactTarget] = useState(null);
+  // Touch: which row a long-press opened the action bar on.
+  const [touchActionsId, setTouchActionsId] = useState(null);
+  const longPressRef = useRef(null);
 
   // Text & Images and Accessibility decide what a message row actually renders.
   const { prefs } = useUserSettings();
@@ -179,6 +195,13 @@ export default function ChatArea({
     [trigger, members, channels, customEmojis, botCommands]
   );
 
+  // Click handlers arrive as fresh closures on every parent render; reading
+  // them through refs keeps the Markdown context (and its cache) stable.
+  const onSelectUserRef = useRef(onSelectUser);
+  onSelectUserRef.current = onSelectUser;
+  const onSelectChannelRef = useRef(onSelectChannel);
+  onSelectChannelRef.current = onSelectChannel;
+
   const markdownContext = useMemo(() => ({
     resolveUser: (id) => {
       const m = members.find((x) => x.id === id);
@@ -194,9 +217,28 @@ export default function ChatArea({
     },
     emojiUrl: (id) => customEmojis.find((e) => String(e.id) === String(id))?.url
       ?? externalEmojiGroups.flatMap((g) => g.emojis).find((e) => String(e.id) === String(id))?.url,
-    onMentionClick: (id) => onSelectUser?.(id),
-    onChannelClick: (id) => onSelectChannel?.(id)
-  }), [members, channels, customEmojis, externalEmojiGroups, onSelectUser, onSelectChannel]);
+    onMentionClick: (id) => onSelectUserRef.current?.(id),
+    onChannelClick: (id) => onSelectChannelRef.current?.(id)
+  }), [members, channels, customEmojis, externalEmojiGroups]);
+
+  // Parsing Markdown is the most expensive thing a row does, and the composer
+  // re-renders this whole component on every keystroke — so a 50-message page
+  // was re-parsed 50 times per character typed. Rendered bodies are cached by
+  // message id and content; the cache is dropped whenever what mentions and
+  // emoji resolve against changes, or the channel does.
+  const markdownCacheRef = useRef({ context: null, channelId: null, map: new Map() });
+  if (markdownCacheRef.current.context !== markdownContext || markdownCacheRef.current.channelId !== channel?.id) {
+    markdownCacheRef.current = { context: markdownContext, channelId: channel?.id, map: new Map() };
+  }
+  const renderMarkdown = (msg) => {
+    const { map } = markdownCacheRef.current;
+    let entry = map.get(msg.id);
+    if (!entry || entry.content !== msg.content) {
+      entry = { content: msg.content, node: parseDiscordMarkdown(msg.content, markdownContext) };
+      map.set(msg.id, entry);
+    }
+    return entry.node;
+  };
 
   const trackScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -223,15 +265,29 @@ export default function ChatArea({
     if (isAtBottom) el.scrollTop = el.scrollHeight;
   }, [decorated, isAtBottom]);
 
+  // Keep the latest text in a ref so the channel-switch cleanup below can
+  // stash the draft of the channel being left.
+  const inputTextRef = useRef(inputText);
+  inputTextRef.current = inputText;
+
   useEffect(() => {
+    const channelId = channel?.id;
     setIsAtBottom(true);
     setReplyToMsg(null);
     setEditingId(null);
-    setInputText('');
+    setInputText(channelId ? drafts.get(channelId) ?? '' : '');
     setAttachments([]);
     setShowPins(false);
+    setReactTarget(null);
+    setTouchActionsId(null);
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+    return () => {
+      if (!channelId) return;
+      const draft = inputTextRef.current;
+      if (draft.trim()) drafts.set(channelId, draft);
+      else drafts.delete(channelId);
+    };
   }, [channel?.id]);
 
   // Hooks must run on every render, so anything hook-shaped lives above the
@@ -318,6 +374,8 @@ export default function ChatArea({
 
   const clearComposer = () => {
     setInputText('');
+    inputTextRef.current = '';
+    if (channel?.id) drafts.delete(channel.id);
     setAttachments([]);
     setReplyToMsg(null);
     setUploadError(null);
@@ -521,16 +579,64 @@ export default function ChatArea({
     const node = document.getElementById(`message-${messageId}`);
     if (!node) return;
     node.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    node.classList.add('bg-d-brand/20');
-    setTimeout(() => node.classList.remove('bg-d-brand/20'), 1600);
+    node.classList.remove('message-flash');
+    void node.offsetWidth; // restart the animation on a repeat jump
+    node.classList.add('message-flash');
+    setTimeout(() => node.classList.remove('message-flash'), 1700);
+  };
+
+  const focusComposer = () => requestAnimationFrame(() => textareaRef.current?.focus());
+
+  /** Reply, and put the caret in the composer — replying is about typing. */
+  const startReply = (msg) => {
+    setReplyToMsg(msg);
+    setTouchActionsId(null);
+    focusComposer();
+  };
+
+  /** Delete, confirming unless Shift is held (Discord's bypass). */
+  const requestDelete = (msg, event) => {
+    setTouchActionsId(null);
+    onDeleteMessage?.(msg.id, { skipConfirm: Boolean(event?.shiftKey) });
+  };
+
+  /** Open the full message menu from the "More" button, under the button. */
+  const openMenuFrom = (msg, event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setTouchActionsId(null);
+    setContextMenu({ message: msg, x: rect.left, y: rect.bottom + 4 });
+  };
+
+  const openReactionPicker = (msg) => {
+    setTouchActionsId(null);
+    setShowStickerPicker(false);
+    setReactTarget(msg);
+    setShowEmojiPicker(true);
+  };
+
+  const cancelLongPress = () => {
+    clearTimeout(longPressRef.current);
+    longPressRef.current = null;
+  };
+
+  const stopEditing = () => {
+    setEditingId(null);
+    setEditText('');
+    focusComposer();
   };
 
   const submitEdit = (e) => {
     e.preventDefault();
-    if (!editText.trim()) return;
-    onEditMessage?.(editingId, editText);
-    setEditingId(null);
-    setEditText('');
+    // Saving an empty edit is how Discord offers to delete the message.
+    if (!editText.trim()) {
+      const id = editingId;
+      stopEditing();
+      onDeleteMessage?.(id);
+      return;
+    }
+    const original = messages.find((m) => m.id === editingId);
+    if (original?.content !== editText) onEditMessage?.(editingId, editText);
+    stopEditing();
   };
 
   const typingText = formatTypingText(typingUsers.map((u) => u.displayName ?? u.userId));
@@ -603,7 +709,7 @@ export default function ChatArea({
             </>
           )}
           <span className="font-bold text-d-strong text-[15px] truncate">{title}</span>
-          {channel.is_private && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
+          {Boolean(channel.is_private) && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
           {isArchived && (
             <span className="text-[10px] bg-d-surface text-d-text3 px-1.5 py-0.5 rounded shrink-0">
               {t('chat.archived')}
@@ -617,7 +723,7 @@ export default function ChatArea({
           )}
         </div>
 
-        <div className="flex items-center gap-3 text-d-text2">
+        <div className="flex items-center gap-3 max-sm:gap-2.5 text-d-text2 shrink-0">
           {onStartCall && (
             <>
               <button
@@ -646,8 +752,9 @@ export default function ChatArea({
               onClick={() => onFollowChannel(channel)}
               className="inline-flex items-center gap-1.5 text-xs font-semibold bg-d-surface hover:bg-d-surface/70 text-d-strong px-2.5 py-1 rounded-md"
               title={t('chat.followChannelHint')}
+              aria-label={t('chat.followChannel')}
             >
-              <Megaphone className="w-3.5 h-3.5" aria-hidden="true" />{t('chat.followChannel')}
+              <Megaphone className="w-3.5 h-3.5" aria-hidden="true" /><span className="max-sm:hidden">{t('chat.followChannel')}</span>
             </button>
           )}
           {onArchiveThread && (
@@ -655,13 +762,14 @@ export default function ChatArea({
               onClick={() => onArchiveThread(!isArchived)}
               className="hover:text-d-strong transition-colors"
               title={isArchived ? t('chat.unarchiveThread') : t('chat.archiveThread')}
+              aria-label={isArchived ? t('chat.unarchiveThread') : t('chat.archiveThread')}
             >
               <Archive className="w-5 h-5" />
             </button>
           )}
 
           {onAddGroupRecipients && (
-            <button onClick={onAddGroupRecipients} className="hover:text-d-strong transition-colors" title={t('dm.addToGroup')}>
+            <button onClick={onAddGroupRecipients} className="hover:text-d-strong transition-colors" title={t('dm.addToGroup')} aria-label={t('dm.addToGroup')}>
               <UserPlus className="w-5 h-5" />
             </button>
           )}
@@ -671,7 +779,7 @@ export default function ChatArea({
               const rect = e.currentTarget.getBoundingClientRect();
               onOpenNotificationSettings?.(rect.left - 120, rect.bottom + 6);
             }}
-            className={`hover:text-d-strong transition-colors ${muted ? 'text-d-danger' : ''}`}
+            className={`hover:text-d-strong transition-colors max-sm:hidden ${muted ? 'text-d-danger' : ''}`}
             title={t('notif.notificationSettings')}
             aria-label={t('notif.notificationSettings')}
           >
@@ -682,6 +790,7 @@ export default function ChatArea({
             onClick={() => setShowPins((v) => !v)}
             className={`hover:text-d-strong transition-colors relative ${showPins ? 'text-d-strong' : ''}`}
             title={t('chat.pinnedMessages')}
+            aria-label={t('chat.pinnedMessages')}
             aria-expanded={showPins}
           >
             <Pin className="w-5 h-5" />
@@ -697,6 +806,7 @@ export default function ChatArea({
               onClick={onToggleMemberList}
               className={`hover:text-d-strong transition-colors ${showMemberList ? 'text-d-strong' : ''}`}
               title={t('chat.memberList')}
+              aria-label={t('chat.memberList')}
               aria-pressed={showMemberList}
             >
               <Users className="w-5 h-5" />
@@ -709,8 +819,9 @@ export default function ChatArea({
                 const rect = e.currentTarget.getBoundingClientRect();
                 onOpenInbox(rect.right, rect.bottom + 6);
               }}
-              className="hover:text-d-strong transition-colors relative"
+              className="hover:text-d-strong transition-colors relative max-sm:hidden"
               title={t('notif.inbox')}
+              aria-label={t('notif.inbox')}
             >
               <Inbox className="w-5 h-5" />
               {inboxCount > 0 && (
@@ -733,7 +844,7 @@ export default function ChatArea({
               aria-label={t('chat.searchMessages')}
               className="bg-d-base text-xs text-d-strong placeholder-d-text4 px-2 py-1 pr-6 rounded focus:outline-none w-36 focus:w-48 transition-all"
             />
-            <button type="submit" className="absolute right-2 top-1.5" title={t('chat.searchMessages')}>
+            <button type="submit" className="absolute right-2 top-1.5" title={t('chat.searchMessages')} aria-label={t('chat.searchMessages')}>
               <Search className="w-3.5 h-3.5 text-d-text4 hover:text-d-strong" />
             </button>
           </form>
@@ -746,19 +857,47 @@ export default function ChatArea({
       {callBar}
 
       {/* Messages */}
-      <div ref={scrollRef} onScroll={trackScroll} className="flex-1 overflow-y-auto px-4 select-text">
+      <div
+        ref={scrollRef}
+        onScroll={trackScroll}
+        onClick={(e) => {
+          // A tap anywhere else puts away the long-press action bar.
+          if (touchActionsId && !e.target.closest('.message-actions')) setTouchActionsId(null);
+        }}
+        className="flex-1 overflow-y-auto px-4 max-sm:px-3 select-text"
+        aria-busy={isLoadingMessages || isLoadingHistory}
+      >
+        {/* Like Discord, a short conversation sits on the composer rather than
+            floating at the top of an empty pane. */}
+        <div className="min-h-full flex flex-col">
+        <div className="flex-1" aria-hidden="true" />
+        <div>
         {isLoadingHistory && (
           <div className="flex justify-center py-3 text-d-text3">
             <Loader2 className="w-5 h-5 animate-spin" />
           </div>
         )}
 
-        {!hasMoreHistory && (
+        {isLoadingMessages && decorated.length === 0 && (
+          <div role="status" aria-label={t('chat.loadingMessages')} className="py-4 space-y-5">
+            {[0.62, 0.4, 0.78, 0.5, 0.66].map((width, i) => (
+              <div key={i} className="flex gap-4 skeleton" aria-hidden="true">
+                <div className="w-10 h-10 rounded-full bg-d-surface shrink-0" />
+                <div className="flex-1 space-y-2 pt-1">
+                  <div className="h-3 w-28 rounded bg-d-surface" />
+                  <div className="h-3 rounded bg-d-surface/70" style={{ width: `${width * 100}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!hasMoreHistory && !isLoadingMessages && (
           <div className="my-6">
             <div className="w-16 h-16 rounded-full bg-d-active flex items-center justify-center mb-3">
               <HeaderIcon className="w-10 h-10 text-d-strong" />
             </div>
-            <h2 className="text-3xl font-extrabold text-d-strong mb-1">
+            <h2 className="text-3xl max-sm:text-2xl font-extrabold text-d-strong mb-1 break-words">
               {isDM ? t('chat.welcomeToDm', { name: title }) : t('chat.welcomeToChannel', { channel: title })}
             </h2>
             <p className="text-sm text-d-text3">
@@ -813,9 +952,24 @@ export default function ChatArea({
 
               <div
                 id={`message-${msg.id}`}
+                data-actions-open={touchActionsId === msg.id ? 'true' : undefined}
+                onTouchStart={(e) => {
+                  if (msg.pending || e.touches.length !== 1) return;
+                  if (e.target.closest('a, button, textarea, input, video, audio')) return;
+                  cancelLongPress();
+                  longPressRef.current = setTimeout(() => {
+                    longPressRef.current = null;
+                    setTouchActionsId(msg.id);
+                  }, LONG_PRESS_MS);
+                }}
+                onTouchMove={cancelLongPress}
+                onTouchEnd={cancelLongPress}
+                onTouchCancel={cancelLongPress}
                 onContextMenu={(e) => {
                   if (e.target.closest('a, img, video, audio, textarea')) return;
                   e.preventDefault();
+                  cancelLongPress();
+                  setTouchActionsId(null);
                   setContextMenu({ message: msg, x: e.clientX, y: e.clientY });
                 }}
                 onDoubleClick={(e) => {
@@ -829,9 +983,9 @@ export default function ChatArea({
                   if (window.getSelection?.()?.toString()) return;
                   onToggleReaction?.(msg.id, emoji);
                 }}
-                className={`group flex gap-4 px-2 -mx-2 rounded hover:bg-d-rowhover transition-colors relative ${
+                className={`message-row group flex gap-4 max-sm:gap-3 px-2 -mx-2 rounded hover:bg-d-rowhover transition-colors relative ${
                   msg.isGrouped ? 'py-[1px]' : 'py-[var(--message-padding-y)] message-group-start'
-                } ${msg.pending ? 'opacity-50' : ''} ${msg.failed ? 'opacity-70' : ''} ${msg.isFirstUnread ? 'bg-d-danger/[0.04]' : ''}`}
+                } ${msg.pending ? 'opacity-50' : ''} ${msg.failed ? 'opacity-70' : ''} ${msg.isFirstUnread ? 'bg-d-danger/[0.04]' : ''} ${touchActionsId === msg.id ? 'bg-d-rowhover' : ''}`}
               >
                 {msg.isGrouped ? (
                   <div
@@ -931,14 +1085,14 @@ export default function ChatArea({
                         onChange={(e) => setEditText(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !e.shiftKey) submitEdit(e);
-                          if (e.key === 'Escape') setEditingId(null);
+                          if (e.key === 'Escape') { e.preventDefault(); stopEditing(); }
                         }}
                         rows={Math.min(8, editText.split('\n').length)}
                         autoFocus
                         className="w-full bg-d-input text-d-strong text-sm rounded px-3 py-2 resize-none focus:outline-none"
                       />
                       <div className="flex items-center gap-2 mt-1 text-[11px] text-d-text3">
-                        <button type="button" onClick={() => setEditingId(null)} className="hover:underline">
+                        <button type="button" onClick={stopEditing} className="hover:underline">
                           {t('chat.cancelEsc')}
                         </button>
                         <button type="submit" className="text-d-link hover:underline flex items-center gap-1">
@@ -949,7 +1103,7 @@ export default function ChatArea({
                   ) : (
                     msg.content ? (
                       <div className="message-body text-d-text leading-relaxed whitespace-pre-wrap break-words">
-                        {parseDiscordMarkdown(msg.content, markdownContext)}
+                        {renderMarkdown(msg)}
                         {msg.edited_at && (onShowEditHistory ? (
                           // The "(edited)" marker is the natural place to ask
                           // "edited from what?", so it is the button.
@@ -1071,48 +1225,81 @@ export default function ChatArea({
                   />
                 )}
 
-                {/* Hover toolbar */}
+                {/* Action bar: hover, keyboard focus, or a long-press on touch.
+                    Mirrors Discord's order — quick reactions, add reaction,
+                    reply, edit, then "More" for the full menu. */}
                 {!msg.pending && !msg.failed && editingId !== msg.id && (
-                  <div className="absolute right-4 -top-3.5 hidden group-hover:flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-1 z-10">
+                  <div
+                    role="toolbar"
+                    aria-label={t('chat.moreActions')}
+                    className="message-actions absolute right-4 max-sm:right-2 -top-3.5 hidden group-hover:flex items-center bg-d-canvas border border-d-surface rounded-md shadow-lg p-0.5 gap-0.5 z-10"
+                  >
                     {QUICK_EMOJIS.slice(0, 3).map((emoji) => (
                       <button
                         key={emoji}
+                        type="button"
                         // Shift-click is Discord's "super" gesture: the same
                         // reaction, plus a burst everyone in the channel sees.
-                        onClick={(e) => superReact(msg, emoji, e.shiftKey)}
-                        className="p-1 hover:bg-d-hover rounded text-xs transition-colors"
+                        onClick={(e) => { superReact(msg, emoji, e.shiftKey); setTouchActionsId(null); }}
+                        className="p-1 hover:bg-d-hover rounded text-sm leading-none transition-colors"
                         title={`${t('chat.reactWith', { emoji })} — ${t('chat.superHint')}`}
+                        aria-label={t('chat.reactWith', { emoji })}
                       >
                         {emoji}
                       </button>
                     ))}
+                    <button
+                      type="button"
+                      onClick={() => openReactionPicker(msg)}
+                      className="p-1 hover:bg-d-hover text-d-text2 hover:text-d-strong rounded transition-colors"
+                      title={t('chat.addReaction')}
+                      aria-label={t('chat.addReaction')}
+                    >
+                      <SmilePlus className="w-4 h-4" />
+                    </button>
                     {canSend && !isArchived && (
                       <button
-                        onClick={() => setReplyToMsg(msg)}
+                        type="button"
+                        onClick={() => startReply(msg)}
                         className="p-1 hover:bg-d-hover text-d-text2 hover:text-d-strong rounded transition-colors"
                         title={t('chat.reply')}
+                        aria-label={t('chat.reply')}
                       >
                         <Reply className="w-4 h-4" />
                       </button>
                     )}
                     {isOwn && (
                       <button
-                        onClick={() => startEditing(msg)}
+                        type="button"
+                        onClick={() => { setTouchActionsId(null); startEditing(msg); }}
                         className="p-1 hover:bg-d-hover text-d-text2 hover:text-d-strong rounded transition-colors"
                         title={t('chat.editMessage')}
+                        aria-label={t('chat.editMessage')}
                       >
                         <Pencil className="w-4 h-4" />
                       </button>
                     )}
                     {(isOwn || canManageMessages) && (
                       <button
-                        onClick={() => onDeleteMessage?.(msg.id)}
+                        type="button"
+                        onClick={(e) => requestDelete(msg, e)}
                         className="p-1 hover:bg-d-danger/20 text-d-danger rounded transition-colors"
                         title={t('chat.deleteMessage')}
+                        aria-label={t('chat.deleteMessage')}
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={(e) => openMenuFrom(msg, e)}
+                      aria-haspopup="menu"
+                      className="p-1 hover:bg-d-hover text-d-text2 hover:text-d-strong rounded transition-colors"
+                      title={t('chat.moreActions')}
+                      aria-label={t('chat.moreActions')}
+                    >
+                      <MoreHorizontal className="w-4 h-4" />
+                    </button>
                   </div>
                 )}
               </div>
@@ -1120,6 +1307,8 @@ export default function ChatArea({
           );
         })}
         <div className="h-4" />
+        </div>
+        </div>
       </div>
 
       {!isAtBottom && (
@@ -1136,14 +1325,14 @@ export default function ChatArea({
       )}
 
       {/* Composer */}
-      <div className="px-4 pb-6 pt-1 shrink-0 relative">
+      <div className="px-4 max-sm:px-2 pb-6 max-sm:pb-2 pt-1 shrink-0 relative">
         {replyToMsg && (
           <div className="mb-2 px-3 py-1.5 bg-d-surface rounded-t-lg border-x border-t border-d-divider flex items-center justify-between text-xs text-d-text2">
             <div className="flex items-center gap-2 truncate">
               <Reply className="w-3.5 h-3.5 text-d-brand" />
               <span>{t('chat.replyingTo', { name: replyToMsg.display_name })}</span>
             </div>
-            <button onClick={() => setReplyToMsg(null)} className="hover:text-d-strong" title={t('common.cancel')}>
+            <button onClick={() => { setReplyToMsg(null); focusComposer(); }} className="hover:text-d-strong" title={t('common.cancel')} aria-label={t('common.cancel')}>
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -1201,11 +1390,18 @@ export default function ChatArea({
             <EmojiPicker
               customEmojis={customEmojis}
               externalGroups={externalEmojiGroups.filter((g) => g.server_id !== channel?.server_id)}
-              onClose={() => setShowEmojiPicker(false)}
+              onClose={() => { setShowEmojiPicker(false); setReactTarget(null); }}
               onPick={(entry) => {
-                setInputText((prev) => prev + (entry.custom ? '<:' + entry.name + ':' + entry.id + '> ' : entry.char));
                 setShowEmojiPicker(false);
-                requestAnimationFrame(() => textareaRef.current?.focus());
+                // Opened from a message ("Add reaction"): react to it. This
+                // used to paste the emoji into the composer instead.
+                if (reactTarget) {
+                  onToggleReaction(reactTarget.id, entry.char ?? `:${entry.name}:`);
+                  setReactTarget(null);
+                  return;
+                }
+                setInputText((prev) => prev + (entry.custom ? '<:' + entry.name + ':' + entry.id + '> ' : entry.char));
+                focusComposer();
               }}
             />
           </div>
@@ -1240,7 +1436,7 @@ export default function ChatArea({
 
         <form
           onSubmit={handleSend}
-          className={`bg-d-input rounded-lg px-4 py-2.5 ${!canSend || isArchived ? 'opacity-60' : ''}`}
+          className={`bg-d-input rounded-lg px-4 max-sm:px-3 py-2.5 ${!canSend || isArchived ? 'opacity-60' : ''}`}
         >
           {showFormatting && !recordingNote && (
             <div className="flex items-center gap-0.5 pb-1.5 mb-1.5 border-b border-d-divider" role="toolbar" aria-label={t('chat.formatting')}>
@@ -1270,7 +1466,7 @@ export default function ChatArea({
             </div>
           )}
 
-          <div className="flex items-end gap-3">
+          <div className="flex items-end gap-3 max-sm:gap-2">
           {recordingNote ? (
             <VoiceNoteRecorder
               onCancel={() => setRecordingNote(false)}
@@ -1289,6 +1485,7 @@ export default function ChatArea({
             disabled={isUploading || !canAttach || !canSend || isArchived}
             className="text-d-text2 hover:text-d-strong transition-colors pb-0.5 disabled:cursor-not-allowed"
             title={canAttach ? t('chat.uploadFiles') : t('chat.noAttachPermission')}
+            aria-label={canAttach ? t('chat.uploadFiles') : t('chat.noAttachPermission')}
           >
             <PlusCircle className={`w-6 h-6 ${isUploading ? 'animate-spin text-d-brand' : ''}`} />
           </button>
@@ -1297,7 +1494,7 @@ export default function ChatArea({
             type="button"
             onClick={() => setShowFormatting((v) => !v)}
             aria-pressed={showFormatting}
-            className={`transition-colors pb-0.5 ${showFormatting ? 'text-d-strong' : 'text-d-text2 hover:text-d-strong'}`}
+            className={`transition-colors pb-0.5 max-sm:hidden ${showFormatting ? 'text-d-strong' : 'text-d-text2 hover:text-d-strong'}`}
             title={t('chat.formatting')}
             aria-label={t('chat.formatting')}
           >
@@ -1337,8 +1534,9 @@ export default function ChatArea({
               type="button"
               onClick={() => setShowPollComposer(true)}
               disabled={!canSend || isArchived}
-              className="text-d-text2 hover:text-d-strong transition-colors pb-0.5 disabled:opacity-50"
+              className="text-d-text2 hover:text-d-strong transition-colors pb-0.5 disabled:opacity-50 max-sm:hidden"
               title={t('poll.createTitle')}
+              aria-label={t('poll.createTitle')}
             >
               <BarChart3 className="w-6 h-6" />
             </button>
@@ -1349,8 +1547,9 @@ export default function ChatArea({
               type="button"
               onClick={() => { setShowStickerPicker((v) => !v); setShowEmojiPicker(false); }}
               disabled={!canSend || isArchived}
-              className="text-d-text2 hover:text-d-strong transition-colors pb-0.5"
+              className="text-d-text2 hover:text-d-strong transition-colors pb-0.5 max-sm:hidden"
               title={t('stickers.title')}
+              aria-label={t('stickers.title')}
             >
               <Sticker className="w-6 h-6" />
             </button>
@@ -1358,10 +1557,11 @@ export default function ChatArea({
 
           <button
             type="button"
-            onClick={() => { setShowEmojiPicker((v) => !v); setShowStickerPicker(false); }}
+            onClick={() => { setReactTarget(null); setShowEmojiPicker((v) => !v); setShowStickerPicker(false); }}
             disabled={!canSend || isArchived}
             className="text-d-text2 hover:text-d-strong transition-colors pb-0.5"
             title={t('chat.emoji')}
+            aria-label={t('chat.emoji')}
           >
             <Smile className="w-6 h-6" />
           </button>
@@ -1382,6 +1582,7 @@ export default function ChatArea({
                 : 'text-d-text4 cursor-not-allowed'
             }`}
             title={t('chat.send')}
+            aria-label={t('chat.send')}
           >
             <Send className="w-4 h-4" />
           </button>
@@ -1433,11 +1634,11 @@ export default function ChatArea({
           canManage={canManageMessages}
           canPin={canManageMessages || isDM}
           onClose={() => setContextMenu(null)}
-          onReply={canSend && !isArchived ? setReplyToMsg : null}
+          onReply={canSend && !isArchived ? startReply : null}
           onEdit={startEditing}
-          onDelete={(msg) => onDeleteMessage?.(msg.id)}
+          onDelete={(msg) => requestDelete(msg)}
           onTogglePin={(msg, pinned) => onTogglePin?.(msg, pinned)}
-          onAddReaction={() => setShowEmojiPicker(true)}
+          onAddReaction={openReactionPicker}
           onCreateThread={onCreateThread}
           onPublish={channel.type === 'announcement' ? onPublish : null}
           onForward={onForward}

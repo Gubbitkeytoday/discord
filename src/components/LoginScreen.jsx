@@ -59,8 +59,11 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
 
   return (
     <div className="fixed inset-0 bg-d-base flex items-center justify-center overlay-center p-4">
-      <div className="w-full max-w-4xl bg-d-canvas rounded-xl shadow-2xl flex overflow-hidden">
-        <form onSubmit={submit} className="flex-1 p-8 min-w-0">
+      {/* Discord's auth card is a narrow ~480px column; the old 896px card
+          stretched two inputs across the whole screen whenever the dev-account
+          column was not there to fill it. */}
+      <div className={`w-full ${devAccounts.length > 0 ? 'max-w-3xl' : 'max-w-[30rem]'} bg-d-canvas rounded-xl shadow-2xl flex overflow-hidden`}>
+        <form onSubmit={submit} className="flex-1 p-8 max-sm:p-6 min-w-0">
           {mode === 'forgot' && (
             <button
               type="button"
@@ -71,12 +74,12 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
             </button>
           )}
 
-          <h1 className="text-2xl font-bold text-d-strong mb-1">
+          <h1 className="text-2xl font-bold text-d-strong mb-1 text-center">
             {mode === 'login' ? t('auth.welcomeBack')
               : mode === 'register' ? t('auth.createAccount')
               : t('auth.forgotTitle')}
           </h1>
-          <p className="text-sm text-d-text3 mb-6">
+          <p className="text-sm text-d-text3 mb-6 text-center">
             {mode === 'login' ? t('auth.gladToSeeYou')
               : mode === 'register' ? t('auth.takesAMinute')
               : t('auth.forgotHint')}
@@ -124,6 +127,10 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  autoFocus
                   required
                   className="w-full bg-d-base text-sm text-d-strong px-3 py-2.5 rounded border border-d-edge focus:outline-none focus:border-d-brand"
                 />

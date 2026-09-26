@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Volume2, Pin, Bell, Users } from 'lucide-react';
 import ServerRail from './components/ServerRail';
@@ -47,6 +48,11 @@ import { t } from './i18n/index.jsx';
 const socket = io({ withCredentials: true, autoConnect: true });
 
 const PAGE_SIZE = 50;
+
+/** Initial-layout hint only; never throws where matchMedia is missing. */
+function isNarrowViewport(query) {
+  try { return typeof window !== 'undefined' && Boolean(window.matchMedia?.(query).matches); } catch { return false; }
+}
 const LAST_SERVER_KEY = 'antigravity.lastServer';
 
 // Bumped with every db.js migration. The client compares it to the running
@@ -123,11 +129,18 @@ export default function App() {
   const [isDeafened, setIsDeafened] = useState(false);
 
   // Modals & UI
-  const [showMemberList, setShowMemberList] = useState(true);
-  // Below the `md` breakpoint the channel list is a drawer rather than a
-  // column, so it needs an explicit open state; on desktop it is always shown
-  // and this value is ignored.
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // On a phone or narrow window the member list is a sheet over the chat, so
+  // it starts closed there — opening straight onto a wall of avatars that
+  // hides the conversation is the opposite of what anyone came for.
+  const [showMemberList, setShowMemberList] = useState(() => !isNarrowViewport('(max-width: 1023px)'));
+  // Below the `md` breakpoint the server rail and channel list are one drawer
+  // rather than two columns, so they need an explicit open state; on desktop
+  // they are always shown and this value is ignored. A phone opens onto the
+  // navigation, as Discord's app does, since there is nothing to read yet.
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(() => isNarrowViewport('(max-width: 767px)'));
+  // True while the open channel's first page is in flight, so the chat can
+  // show a skeleton instead of the previous channel's history.
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   // A /template/:code link opens the "use template" flow with the code filled in.
   const [showCreateServerModal, setShowCreateServerModal] = useState(() => (parseLocation().template ? { templateCode: parseLocation().template } : false));
   const [showCreateChannelModal, setShowCreateChannelModal] = useState(false);
@@ -140,8 +153,14 @@ export default function App() {
   const [openEmojiSignal, setOpenEmojiSignal] = useState(0);
   const [toggleFormattingSignal, setToggleFormattingSignal] = useState(0);
 
-  // Picking a channel on a phone should get the drawer out of the way.
-  useEffect(() => { setMobileSidebarOpen(false); }, [activeChannelId]);
+  // Picking a channel on a phone should get the drawer out of the way. This is
+  // tied to the *choice*, not to activeChannelId changing: switching servers
+  // also moves the active channel, and on a phone that must leave the drawer
+  // open so the user can pick where to go inside the new server.
+  const pickChannel = useCallback((id) => {
+    setActiveChannelId(id);
+    setMobileSidebarOpen(false);
+  }, []);
   const [selectedProfileUser, setSelectedProfileUser] = useState(null);
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [serverSettingsTab, setServerSettingsTab] = useState(null);
@@ -183,6 +202,13 @@ export default function App() {
   channelSettingsRef.current = channelSettings;
   const serverSettingsRef = useRef({});
   serverSettingsRef.current = serverSettings;
+  // What voice session to restore if the gateway connection drops. A socket
+  // reconnect starts anonymous and outside every room, so without this the user
+  // silently fell out of voice while the UI still showed them connected.
+  const voiceSessionRef = useRef(null);
+  voiceSessionRef.current = currentVoiceChannel
+    ? { channelId: currentVoiceChannel.id, isMuted, isDeafened }
+    : null;
 
   const toastError = useCallback((err) => pushToast(err?.message ?? String(err), { type: 'error' }), [pushToast]);
 
@@ -302,6 +328,22 @@ export default function App() {
     const onIdentified = () => {
       identifiedRef.current = true;
       joinWantedRooms();
+      // After a reconnect, put the user back in the voice channel they were
+      // in, with the same mute/deafen state the rest of the room should see.
+      const voice = voiceSessionRef.current;
+      if (voice) {
+        socket.emit('join_voice', { channelId: voice.channelId }, (ack) => {
+          if (ack && !ack.ok) {
+            setCurrentVoiceChannel(null);
+            setActiveVoiceParticipants([]);
+            pushToast(ack.error ?? t('voice.connectionFailed'), { type: 'error' });
+            return;
+          }
+          socket.emit('voice_state_change', {
+            channelId: voice.channelId, isMuted: voice.isMuted, isDeafened: voice.isDeafened
+          });
+        });
+      }
     };
     socket.on('identified', onIdentified);
     return () => socket.off('identified', onIdentified);
@@ -432,8 +474,17 @@ export default function App() {
     const query = pendingJumpMessageId
       ? `around=${pendingJumpMessageId}&limit=${PAGE_SIZE}`
       : `limit=${PAGE_SIZE}`;
+    // Clear the previous channel's history straight away: leaving it on screen
+    // under the new channel's header — and letting a slow response for a
+    // channel the user already left land on top of the one they are in — both
+    // show the wrong conversation.
+    let stale = false;
+    setMessages([]);
+    setHasMoreHistory(false);
+    setIsLoadingMessages(true);
     get(`/api/messages/${activeChannelId}?${query}`)
       .then((list) => {
+        if (stale) return;
         list = Array.isArray(list) ? list : [];
         setMessages(list);
         setHasMoreHistory(list.length >= PAGE_SIZE || Boolean(pendingJumpMessageId));
@@ -445,9 +496,11 @@ export default function App() {
         }
       })
       .catch((err) => {
+        if (stale) return;
         setMessages([]);
         if (err.status === 403) pushToast(err.message, { type: 'error' });
-      });
+      })
+      .finally(() => { if (!stale) setIsLoadingMessages(false); });
 
     loadPins(activeChannelId);
 
@@ -476,6 +529,7 @@ export default function App() {
     wantedChannelRef.current = activeChannelId;
     joinWantedRooms();
     return () => {
+      stale = true;
       socket.emit('leave_channel', activeChannelId);
       if (wantedChannelRef.current === activeChannelId) wantedChannelRef.current = null;
     };
@@ -488,8 +542,11 @@ export default function App() {
   const handleLoadMore = useCallback(() => {
     if (!activeChannelId || !messages.length || isLoadingHistory) return;
     setIsLoadingHistory(true);
-    get(`/api/messages/${activeChannelId}?limit=${PAGE_SIZE}&before=${messages[0].id}`)
+    const channelId = activeChannelId;
+    get(`/api/messages/${channelId}?limit=${PAGE_SIZE}&before=${messages[0].id}`)
       .then((older) => {
+        // The user may have switched channels while this page was loading.
+        if (activeChannelIdRef.current !== channelId) return;
         setMessages((prev) => [...(older || []), ...prev]);
         setHasMoreHistory((older || []).length >= PAGE_SIZE);
       })
@@ -1106,9 +1163,24 @@ export default function App() {
     handleSendMessage(msg.content, msg.attachments, msg.reply_to_id, { sticker: msg.sticker });
   };
 
-  const handleDeleteMessage = (messageId) => {
-    socket.emit('delete_message', { messageId }, (ack) => {
-      if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+  /**
+   * Deleting is irreversible, so it asks first — unless Shift is held, which
+   * is Discord's "I know what I'm doing" bypass for clearing several quickly.
+   */
+  const handleDeleteMessage = (messageId, { skipConfirm = false } = {}) => {
+    // Fire and forget: the modal closes at once and a failure arrives as a
+    // toast, so a dropped socket can never leave the dialog spinning.
+    const run = () => {
+      socket.emit('delete_message', { messageId }, (ack) => {
+        if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+      });
+    };
+    if (skipConfirm) { run(); return; }
+    setConfirm({
+      title: t('chat.deleteMessage'),
+      body: t('chat.deleteConfirmBody'),
+      confirmLabel: t('common.delete'),
+      onConfirm: run
     });
   };
 
@@ -1732,6 +1804,8 @@ export default function App() {
       externalEmojiGroups={externalEmojiGroups}
       stickers={serverStickers}
       onSelectChannel={(id) => setActiveChannelId(id)}
+      onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+      isLoadingMessages={isLoadingMessages}
       onCreateThread={activeChannel?.server_id && activeChannel.type !== 'thread' ? handleCreateThread : null}
       onForward={(msg) => setForwardMessage(msg)}
       botCommands={botCommands}
@@ -1800,6 +1874,91 @@ export default function App() {
   // its chat and see who is in it — so the room only renders once connected.
   const isConnectedHere = currentVoiceChannel?.id === activeChannel?.id;
 
+  // The voice room owns the microphone, the peer connections and the remote
+  // audio, so it must live exactly as long as the voice session — not as long
+  // as the voice channel happens to be on screen. Opening a text channel used
+  // to unmount it, which silently cut the mic and every peer while the server
+  // still listed the user in voice.
+  //
+  // It is therefore rendered once, at a fixed spot in the tree, into a
+  // detached host element. That host is moved (not re-rendered) into the voice
+  // pane's slot while the pane is open, and into a hidden parking spot
+  // otherwise. Moving a DOM node keeps its media playing; remounting would not.
+  const [voiceHost] = useState(() => {
+    if (typeof document === 'undefined') return null;
+    const host = document.createElement('div');
+    host.className = 'flex-1 flex flex-col min-h-0';
+    return host;
+  });
+  const voiceSlotRef = useRef(null);
+  const voiceParkingRef = useRef(null);
+  // Runs after every commit: whichever of slot/parking exists decides where
+  // the host lives. Layout phase, so the move lands before the browser (or a
+  // media element's "removed from document" check) ever sees it detached.
+  useLayoutEffect(() => {
+    if (!voiceHost) return;
+    const target = voiceSlotRef.current ?? voiceParkingRef.current;
+    if (target && voiceHost.parentNode !== target) target.appendChild(voiceHost);
+  });
+
+  const voiceRoomPortal = currentVoiceChannel && voiceHost ? createPortal(
+    <VoiceRoom
+      key={currentVoiceChannel.id}
+      channel={currentVoiceChannel}
+      hidden={!isConnectedHere || !isVoiceChannel}
+      participants={activeVoiceParticipants}
+      currentUser={currentUser}
+      viewerPermissions={viewerPermissions}
+      isOwner={isOwner}
+      onToast={pushToast}
+      isMuted={isMuted}
+      onToggleMute={handleToggleMute}
+      isDeafened={isDeafened}
+      onToggleDeafen={handleToggleDeafen}
+      onLeaveVoice={handleLeaveVoice}
+      onSpeakingChange={handleSpeakingChange}
+      onOpenVoiceSettings={() => setShowUserSettingsModal('voice')}
+      onVideoStateChange={handleVideoStateChange}
+      socket={socket}
+      headerActions={(
+        <>
+          <button
+            type="button"
+            onClick={() => setShowPinsFromSlash((n) => n + 1)}
+            className="hover:text-d-strong transition-colors"
+            title={t('chat.pinnedMessages')}
+            aria-label={t('chat.pinnedMessages')}
+          >
+            <Pin className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setNotifPopover({ kind: 'channel', id: currentVoiceChannel.id, x: rect.left - 120, y: rect.bottom + 6 });
+            }}
+            className="hover:text-d-strong transition-colors"
+            title={t('notif.notificationSettings')}
+            aria-label={t('notif.notificationSettings')}
+          >
+            <Bell className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowMemberList(!showMemberList)}
+            aria-pressed={showMemberList}
+            className="hover:text-d-strong transition-colors"
+            title={t('chat.memberList')}
+            aria-label={t('chat.memberList')}
+          >
+            <Users className="w-4 h-4" />
+          </button>
+        </>
+      )}
+    />,
+    voiceHost
+  ) : null;
+
   if (authState === null) {
     return (
       <div className="fixed inset-0 bg-d-base flex items-center justify-center text-d-text3 text-sm">
@@ -1831,6 +1990,7 @@ export default function App() {
         channels={channels}
         activeServerId={activeServerId}
         onSelectServer={(id) => setActiveServerId(id)}
+        mobileOpen={mobileSidebarOpen}
         onOpenCreateServerModal={() => setShowCreateServerModal(true)}
         onSelectHome={() => setActiveServerId('home')}
         onJoinWithInvite={() => setInputModal({
@@ -1857,7 +2017,10 @@ export default function App() {
           activeChannelId={activeChannelId}
           readStates={readStates}
           currentUser={currentUser}
-          onSelectDm={(id) => setActiveChannelId(id)}
+          onSelectDm={pickChannel}
+          mobileOpen={mobileSidebarOpen}
+          onOpenMobile={() => setMobileSidebarOpen(true)}
+          onCloseMobile={() => setMobileSidebarOpen(false)}
           onStartDm={handleStartDm}
           onCloseDm={handleCloseDm}
           onAddFriend={handleAddFriend}
@@ -1897,7 +2060,7 @@ export default function App() {
             currentServer={currentServer}
             channels={channels}
             activeChannelId={activeChannelId}
-            onSelectChannel={(id) => setActiveChannelId(id)}
+            onSelectChannel={pickChannel}
             onOpenCreateChannelModal={(type) => {
               setCreateChannelDefaultType(type);
               setShowCreateChannelModal(true);
@@ -1949,61 +2112,10 @@ export default function App() {
             // scroll out of reach mid-call.
             <ChannelGate channel={activeChannel} onLeave={() => setActiveChannelId(null)}>
             <div className="flex-1 flex flex-col min-h-0">
+              {/* The live room is mounted once, higher up, and only *shown*
+                  here — see voiceRoomPortal. */}
               {isConnectedHere && (
-              <div className="flex-[3] flex flex-col min-h-[16rem]">
-            <VoiceRoom
-              channel={activeChannel}
-              participants={activeVoiceParticipants}
-              currentUser={currentUser}
-              viewerPermissions={viewerPermissions}
-              isOwner={isOwner}
-              onToast={pushToast}
-              isMuted={isMuted}
-              onToggleMute={handleToggleMute}
-              isDeafened={isDeafened}
-              onToggleDeafen={handleToggleDeafen}
-              onLeaveVoice={handleLeaveVoice}
-              onSpeakingChange={handleSpeakingChange}
-              onOpenVoiceSettings={() => setShowUserSettingsModal('voice')}
-              onVideoStateChange={handleVideoStateChange}
-              socket={socket}
-              headerActions={(
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setShowPinsFromSlash((n) => n + 1)}
-                    className="hover:text-d-strong transition-colors"
-                    title={t('chat.pinnedMessages')}
-                    aria-label={t('chat.pinnedMessages')}
-                  >
-                    <Pin className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      setNotifPopover({ kind: 'channel', id: activeChannel.id, x: rect.left - 120, y: rect.bottom + 6 });
-                    }}
-                    className="hover:text-d-strong transition-colors"
-                    title={t('notif.notificationSettings')}
-                    aria-label={t('notif.notificationSettings')}
-                  >
-                    <Bell className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowMemberList(!showMemberList)}
-                    aria-pressed={showMemberList}
-                    className="hover:text-d-strong transition-colors"
-                    title={t('chat.memberList')}
-                    aria-label={t('chat.memberList')}
-                  >
-                    <Users className="w-4 h-4" />
-                  </button>
-                </>
-              )}
-            />
-              </div>
+                <div ref={voiceSlotRef} className="flex-[3] flex flex-col min-h-[16rem]" />
               )}
               {!isConnectedHere && (
                 <div className="shrink-0 px-4 py-3 border-b border-d-edge bg-d-surface/40 flex items-center gap-3">
@@ -2134,7 +2246,7 @@ export default function App() {
             setShowQuickSwitcher(false);
             if (entry.kind === 'server') { setActiveServerId(entry.id); return; }
             if (entry.kind === 'dm') { setActiveServerId('home'); }
-            setActiveChannelId(entry.id);
+            pickChannel(entry.id);
           }}
         />
       )}
@@ -2308,6 +2420,11 @@ export default function App() {
 
       {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
       {inputModal && <InputModal {...inputModal} onClose={() => setInputModal(null)} />}
+
+      {/* Where the voice room waits, still connected, while its pane is not
+          on screen. */}
+      <div ref={voiceParkingRef} className="hidden" aria-hidden="true" />
+      {voiceRoomPortal}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
