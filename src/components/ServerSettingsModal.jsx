@@ -19,6 +19,7 @@ import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../
 import {
   permissionGroups, hasBit, toggleBit, countPermissions, ROLE_COLOR_PRESETS
 } from '../utils/permissionCatalog';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -1151,7 +1152,7 @@ function MembersTab({ members, roles, server, api, reload, onToast, currentUserI
         {filtered.map((member) => (
           <div key={member.id} className="bg-d-surface rounded-lg p-3">
             <div className="flex items-center gap-3">
-              <img src={member.avatar_url || defaultAvatar(member.id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+              <img src={proxiedImageUrl(member.avatar_url || defaultAvatar(member.id))} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-d-strong truncate flex items-center gap-1.5">
                   {member.nickname || member.display_name}
@@ -1393,7 +1394,7 @@ function EmojisTab({ emojis, api, reload, onToast }) {
 
         {emojis.map((emoji) => (
           <React.Fragment key={emoji.id}>
-            <img src={emoji.url} alt={emoji.name} className="w-8 h-8 object-contain" />
+            <img src={proxiedImageUrl(emoji.url)} alt={emoji.name} className="w-8 h-8 object-contain" />
             <span className="text-sm text-d-strong truncate">:{emoji.name}:</span>
             <span className="text-xs text-d-text3 truncate">{emoji.creator_name ?? '—'}</span>
             <button
@@ -1519,7 +1520,7 @@ function BansTab({ bans, api, reload, onToast }) {
       <div className="space-y-1">
         {bans.map((ban) => (
           <div key={ban.user_id} className="bg-d-surface rounded-lg p-3 flex items-center gap-3">
-            <img src={ban.avatar_url || defaultAvatar(ban.user_id)} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+            <img src={proxiedImageUrl(ban.avatar_url || defaultAvatar(ban.user_id))} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-d-strong truncate">{ban.display_name}</p>
               <p className="text-[11px] text-d-text3 truncate">
@@ -1567,7 +1568,7 @@ function AuditTab({ entries }) {
       <div className="space-y-1">
         {entries.map((entry) => (
           <div key={entry.id} className="bg-d-surface rounded-lg p-3 flex gap-3">
-            <img src={entry.avatar_url || defaultAvatar(entry.id)} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+            <img src={proxiedImageUrl(entry.avatar_url || defaultAvatar(entry.id))} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
             <div className="min-w-0">
               <p className="text-sm text-d-strong">
                 <strong>{entry.display_name ?? t('audit.system')}</strong>{' '}
@@ -1671,7 +1672,7 @@ function StickersTab({ stickers, api, reload, onToast }) {
         <div className="grid grid-cols-4 gap-3">
           {stickers.map((sticker) => (
             <div key={sticker.id} className="bg-d-surface rounded-lg p-3 text-center relative group">
-              <img src={sticker.url} alt={sticker.name} className="w-20 h-20 object-contain mx-auto" />
+              <img src={proxiedImageUrl(sticker.url)} alt={sticker.name} className="w-20 h-20 object-contain mx-auto" />
               <p className="text-xs text-d-strong truncate mt-1">{sticker.name}</p>
               <p className="text-[10px] text-d-text4 truncate">{sticker.creator_name ?? ''}</p>
               <button

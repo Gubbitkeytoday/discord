@@ -3,6 +3,7 @@ import { X, Hash, Users, Paperclip } from 'lucide-react';
 import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -100,7 +101,7 @@ export default function SearchResultsPanel({ query, results = [], channels = [],
               <span className="ml-auto shrink-0">{formatFullTimestamp(message.created_at)}</span>
             </div>
             <div className="flex items-start gap-2">
-              <img src={message.avatar_url || defaultAvatar(message.user_id)} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+              <img src={proxiedImageUrl(message.avatar_url || defaultAvatar(message.user_id))} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
               <div className="min-w-0">
                 <span className="block text-xs font-semibold text-d-strong truncate">
                   {message.display_name || message.username}

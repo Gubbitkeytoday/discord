@@ -4,17 +4,18 @@ import { post, setApiIdentity } from '../api';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
 import { LanguageMenu } from '../i18n/LanguagePicker.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 /**
  * Real login / registration against /api/auth. Shown when there is no session.
  * The seeded quick-sign-in column only appears when the server says the dev
  * identity shortcut is on, which it never is in production.
  */
-export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteCode }) {
+export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteCode, initialNotice = null }) {
   const [mode, setMode] = useState('login');   // login | register | forgot | mfa
   const [form, setForm] = useState({ username: '', password: '', display_name: '', email: '', mfa_code: '' });
   const [error, setError] = useState(null);
-  const [notice, setNotice] = useState(null);
+  const [notice, setNotice] = useState(initialNotice);
   const [busy, setBusy] = useState(false);
 
   const submit = async (event) => {
@@ -34,6 +35,14 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
         ? { username: form.username, password: form.password, ...(mode === 'mfa' ? { mfa_code: form.mfa_code.replace(/\s+/g, '') } : {}) }
         : { username: form.username, password: form.password, display_name: form.display_name, email: form.email || undefined };
       const data = await post(endpoint, body);
+      // Registration can answer with a generic, success-shaped body (no
+      // session) so it does not reveal whether an e-mail is already in use.
+      // Treat that as "look in your inbox", not as a crash.
+      if (!data?.user?.id) {
+        setNotice(isLogin ? t('apiError.generic', { code: 'NO_SESSION' }) : t('auth.checkEmail'));
+        if (!isLogin) setMode('login');
+        return;
+      }
       setApiIdentity({ userId: data.user.id, token: data.token });
       onAuthenticated(data.user, data.token);
     } catch (err) {
@@ -273,7 +282,7 @@ export default function LoginScreen({ onAuthenticated, devAccounts = [], inviteC
                   disabled={busy}
                   className="w-full flex items-center gap-2 p-2 rounded hover:bg-d-hover text-left transition-colors disabled:opacity-50"
                 >
-                  <img src={account.avatar_url || DEFAULT_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                  <img src={proxiedImageUrl(account.avatar_url || DEFAULT_AVATAR)} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
                   <span className="min-w-0">
                     <span className="block text-sm text-d-strong truncate">{account.display_name}</span>
                     <span className="block text-[11px] text-d-text3 truncate">@{account.username}</span>

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { t } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -88,7 +89,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                 >
                   <div className="relative shrink-0">
                     <img
-                      src={member.avatar_url || defaultAvatar(member.id)}
+                      src={proxiedImageUrl(member.avatar_url || defaultAvatar(member.id))}
                       alt=""
                       className={`w-8 h-8 rounded-full object-cover ${section.dim ? 'grayscale' : ''}`}
                     />
@@ -132,7 +133,7 @@ export default function MemberList({ members, onSelectMember, onMemberContextMen
                       </span>
                       {Boolean(member.role_icon?.url) && (
                         <img
-                          src={member.role_icon.url}
+                          src={proxiedImageUrl(member.role_icon.url)}
                           alt=""
                           title={member.role_icon.name}
                           className="h-4 w-4 shrink-0 rounded-sm object-contain"
