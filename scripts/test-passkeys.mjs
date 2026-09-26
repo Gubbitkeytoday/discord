@@ -303,6 +303,15 @@ describe('sign-in', () => {
     const ok = await passkeyLogin(authenticator);
     assert.equal(ok.status, 200);
 
+    // A discoverable sign-in must carry the user handle; dropping it from the
+    // request does not skip the check (the server's challenge decides).
+    const bare = await api('POST', '/api/passkeys/login/options', {}, { 'x-user-id': '' });
+    const noHandle = authenticator.get(bare.body.options);
+    delete noHandle.response.userHandle;
+    const refused = await api('POST', '/api/passkeys/login/verify', { flow_id: bare.body.flow_id, response: noHandle }, { 'x-user-id': '' });
+    assert.equal(refused.status, 401);
+    assert.equal(refused.body.code, 'PASSKEY_AUTH_FAILED');
+
     // A cloned authenticator replays an old counter.
     const cloned = await passkeyLogin(authenticator, { counter: 1 });
     assert.equal(cloned.status, 401);
@@ -409,5 +418,12 @@ describe('management', () => {
       flow_id: ro.body.flow_id, response: authB.get(ro.body.options, { credentialId: [...authB.credentials.keys()][0] })
     });
     assert.equal(res.status, 401);
+
+    // Step-up names the allowed credentials, so the user handle is optional.
+    const ro2 = await asSession(a.token, 'POST', '/api/passkeys/reauth/options');
+    const own = authA.get(ro2.body.options);
+    delete own.response.userHandle;
+    const ok = await asSession(a.token, 'POST', '/api/passkeys/reauth/verify', { flow_id: ro2.body.flow_id, response: own });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
   });
 });

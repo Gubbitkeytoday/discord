@@ -221,3 +221,83 @@ and step-up re-auth for e-mail change and MFA disable.
   verification, TOTP per RFC 6238 with constant-time compare.
 - **Invites** — codes minted with `crypto.randomInt`; last-use claimed with an
   atomic conditional `UPDATE` (no TOCTOU on limited invites).
+
+---
+
+## CodeQL triage
+
+Local run of the CodeQL bundle (`javascript-security-extended.qls`, build-mode
+none, same `paths-ignore` as `.github/workflows/codeql.yml`). Fixed in code:
+
+| Rule | Location | Fix |
+|------|----------|-----|
+| `js/double-escaping` | `services/linkEmbeds.js` `decodeEntities` | Single-pass decode; `&amp;lt;` now yields `&lt;`, not `<` (test in `test-part4.mjs`). |
+| `js/remote-property-injection` | `services/userSettings.js` `merge` | Built with `Object.fromEntries`; `__proto__`/`constructor`/`prototype` keys dropped (a body key `__proto__` used to swap the merged object's prototype). |
+| `js/log-injection` | `lib/middleware.js` request logger | Control characters (CR/LF, ANSI) stripped from the logged path. |
+| `js/log-injection` | `services/translation.js` failure log | Logs the database row's message id, not the request's. |
+| `js/user-controlled-bypass` | `services/passkeys.js` `verifyAssertion` | Whether the WebAuthn user handle may be absent is decided by the stored challenge purpose (required for discoverable sign-in per WebAuthn §7.2), not by the request omitting it (tests in `test-passkeys.mjs`). |
+| (hardening) | `routes/auth.js` change-password | Per-user limiter (10 / 15 min) instead of only the global 600/min read budget for current-password guesses (test in `test-part2.mjs`). |
+| (hardening) | `lib/mailer.js` `sendMail` | Recipients containing control characters are refused (SMTP command / header / log injection). |
+
+The remaining alerts are false positives; dismiss them in the GitHub UI with
+the reason given.
+
+- **`js/request-forgery` — `services/linkEmbeds.js` `safeGet`** (critical).
+  Won't fix / false positive. Fetching a user-supplied URL is the feature (link
+  previews). Every hop, including each redirect, goes through
+  `assertPublicUrl` (http(s) only, every resolved address checked against
+  private, loopback, link-local/metadata, CGNAT, multicast and IPv4-mapped
+  ranges), and the socket connects through `guardedLookup`, which re-checks
+  the address actually dialled (DNS rebinding). CodeQL does not model either
+  function as a sanitizer. Do not weaken them to silence this.
+- **`js/missing-rate-limiting`** — `routes/passkeys.js` (login/options,
+  login/verify, reauth/password, reauth/options, reauth/verify,
+  register/options), `routes/auth.js` (login, change-password),
+  `routes/accountSecurity.js` (verify-email), `routes/files.js`
+  (`GET /files/:fileId`, admin integrity check), `server.js`
+  (`DELETE /api/users/@me`, SPA fallback `app.get('*')`). False positive. The
+  query only recognises npm limiter packages (express-rate-limit,
+  express-brute, rate-limiter-flexible, …); this app uses its own token-bucket
+  middleware in `lib/rateLimit.js`, which is in each route chain
+  (`loginLimit`, `reauthLimit`, `manageLimit`, `loginRateLimit`,
+  `passwordChangeRateLimit`, `writeRateLimit`) and globally on `/api`
+  (`readRateLimit`, 600/min). verify-email takes a 256-bit token. The SPA
+  fallback serves the static `index.html` and is not an API route.
+- **`js/insufficient-password-hash` — `lib/totp.js` `hashRecoveryCode`.**
+  False positive: the input is a server-generated random recovery code, not a
+  user-chosen password, so a salted slow hash is not required (same as the
+  SHA-256 session/reset tokens). The digest is also the lookup key for an
+  atomic "burn once" `UPDATE`, which a salted hash would prevent. A recovery
+  code is only a second factor; the password (scrypt) is still needed. Optional
+  future hardening: more code entropy than the current 40 bits.
+- **`js/regex-injection` — `services/automod.js` `safeRegex`.** By design:
+  `regex` automod rules are server-admin-authored patterns (MANAGE_GUILD). They
+  are length-capped (200), rejected when they contain lookbehind or nested
+  quantifiers, compiled with the `u` flag, and invalid patterns are refused.
+- **`js/xss-through-dom`** — `ForumView.jsx` attachment preview,
+  `ServerSettingsModal.jsx` emoji/sticker preview. False positive: the value is
+  a `blob:` URL from `URL.createObjectURL(file)` used as an `<img src>`
+  (rendered by React, never as HTML). A blob URL cannot run script from an
+  image element.
+- **`js/insecure-randomness` — `src/App.jsx` `handleSendMessage` nonce.**
+  False positive: the nonce only matches the optimistic pending message to the
+  server echo. It is not a secret and grants nothing; the server assigns the
+  message id.
+- **`js/cors-permissive-configuration` — `server.js` CORS setup.** False
+  positive: the origin comes from the operator's `CORS_ORIGIN`. Production
+  defaults to same-origin, and `lib/config.js` warns about `CORS_ORIGIN=*` in
+  production. With `*`, browsers refuse credentialed responses.
+- **`js/http-to-file-access` — `storageService.js` `writeLocalObject`** (the
+  purpose of an upload). The object key is the SHA-256 of the content (content-addressed), and the bytes are
+  magic-byte sniffed first. **`lib/mailer.js` file transport**: the operator
+  opts in with `MAIL_TRANSPORT=file` for CI, the path comes from `MAIL_FILE`,
+  and the line is `JSON.stringify`-encoded.
+- **`js/log-injection` — `lib/mailer.js` console transport.** False positive:
+  `sendMail` now refuses any recipient containing a control character before
+  logging, and registration already rejects whitespace in addresses. CodeQL
+  does not model a reject-guard as a sanitizer.
+- **TURN credentials (`js/weak-cryptographic-algorithm`, if reported) —
+  `server.js` ICE endpoint.** HMAC-SHA1 is required by coturn's REST API
+  (`use-auth-secret`). HMAC-SHA1 is not affected by SHA-1 collision attacks.
+  The MAC input (`turnLabel`) is expiry:random-nonce with no account data. The
+  local run did not report this alert.
