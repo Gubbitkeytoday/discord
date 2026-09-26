@@ -10,6 +10,9 @@
 #  users behind symmetric NAT / CGNAT / strict firewalls. Enable it with the
 #  `turn` profile — see DEPLOYMENT.md, "Voice and video: TURN".
 #
+#  Optional: a LiveKit SFU (`livekit` profile) replaces the peer-to-peer mesh
+#  for voice/video — see DEPLOYMENT.md, "Voice and video: LiveKit".
+#
 #  The database is PostgreSQL (the `postgres` service). The app creates and
 #  migrates the schema itself on boot, and waits for Postgres to be healthy.
 #  To keep SQLite instead, set `DATABASE_URL=` (empty) in .env — the app then
@@ -125,6 +128,8 @@ services:
       # Set DOMAIN in .env. Use `localhost` to get a local self-signed cert
       # instead of a public ACME certificate.
       DOMAIN: ${DOMAIN:-localhost}
+      # Only used by the (commented-out) LiveKit block in the Caddyfile.
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"
@@ -176,6 +181,41 @@ services:
         --denied-peer-ip=172.16.0.0-172.31.255.255
         --denied-peer-ip=192.168.0.0-192.168.255.255
         --total-quota=300 --stale-nonce=600
+    logging: *logging
+
+  # --- livekit (optional SFU) -------------------------------------------------
+  # LiveKit SFU for voice / video / screen share / stage. Enable with
+  #   docker compose --profile livekit up -d
+  # and set LIVEKIT_* in .env (see DEPLOYMENT.md, "Voice and video: LiveKit").
+  # Without it the app uses its peer-to-peer mesh, exactly as before.
+  #
+  # Bridge network (not host): the app reaches the server API and LiveKit
+  # reaches the app's webhook over `edge`, and Caddy terminates TLS for
+  # LIVEKIT_DOMAIN in front of the signalling port. Media needs only three
+  # published ports, because livekit.yaml multiplexes WebRTC onto one UDP port:
+  #   7882/udp  media (primary)      7881/tcp  ICE/TCP fallback
+  #   3479/udp  embedded TURN relay
+  # Open them in the host firewall and the cloud security group.
+  livekit:
+    image: livekit/livekit-server:v1.10.1
+    profiles: ["livekit"]
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      # "key: secret". The key must match webhook.api_key in livekit.yaml.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-antigravity}: ${LIVEKIT_API_SECRET:-}"
+      # To advertise a fixed public IP instead of STUN discovery, add:
+      #   NODE_IP: 203.0.113.10
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    expose:
+      - "7880"
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+      - "3479:3479/udp"
+    networks:
+      - edge
     logging: *logging
 
 volumes:

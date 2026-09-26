@@ -123,6 +123,9 @@ describe('configuration', () => {
     assert.ok(Array.isArray(body.iceServers));
     const text = JSON.stringify(body);
     assert.ok(!text.includes(API_SECRET) && !text.includes(API_KEY), 'no credentials in the client config');
+    const health = await api('GET', '/api/voice/health', undefined, as(''));
+    assert.equal(health.status, 200);
+    assert.deepEqual(health.body, { mode: 'livekit', livekit: 'configured', problems: [] });
   });
 
   test('stage grants: audience subscribe-only, speakers and moderators publish', () => {
@@ -177,6 +180,19 @@ describe('token endpoint', () => {
     assert.equal(reg.status, 201, JSON.stringify(reg.body));
     const outsider = await tokenFor(reg.body.user.id, 'chan-104');
     assert.equal(outsider.status, 403);
+  });
+
+  test('a full channel gives no token to newcomers, but still to those already in it', async () => {
+    const channelId = await makeChannel('voice');
+    assert.equal((await api('PATCH', `/api/channels/${channelId}`, { user_limit: 1 })).status, 200);
+    const inside = await connectAs('user-2');
+    assert.equal((await emitAck(inside, 'join_voice', { channelId }))?.ok, true);
+    const full = await tokenFor('user-5', channelId);
+    assert.equal(full.status, 403);
+    assert.equal(full.body.code, 'VOICE_FULL');
+    assert.equal((await tokenFor('user-2', channelId)).status, 200);
+    inside.emit('leave_voice', { channelId });
+    await sleep(150);
   });
 
   test('a text channel is not a voice room', async () => {

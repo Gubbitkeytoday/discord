@@ -254,6 +254,20 @@ export async function issueToken({ channelId, userId }) {
   }
   const { channel, grants } = await resolveGrants({ channelId, userId });
 
+  // Same capacity rule as the gateway's join_voice, so a client cannot skip
+  // the gateway and overfill a room straight on the SFU.
+  const limits = await getQuery(`SELECT user_limit FROM channels WHERE id = ?`, [channel.id]);
+  const caps = [Number(limits?.user_limit) || 0, cfg.roomLimit].filter((n) => n > 0);
+  if (caps.length) {
+    const inRoom = await getQuery(
+      `SELECT COUNT(*) AS n, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) AS me FROM voice_states WHERE channel_id = ?`,
+      [userId, channel.id]
+    );
+    if (!Number(inRoom?.me) && Number(inRoom?.n) >= Math.min(...caps)) {
+      throw new ApiError(`This voice channel is full (${Math.min(...caps)} max)`, { status: 403, code: 'VOICE_FULL' });
+    }
+  }
+
   const user = await getQuery(`SELECT username, display_name FROM users WHERE id = ?`, [userId]);
   const at = new AccessToken(cfg.apiKey, cfg.apiSecret, {
     identity: userId,

@@ -135,6 +135,20 @@ export default function createLivekitRouter({ io }) {
     res.json(livekit.clientVoiceConfig(req.userId));
   });
 
+  /**
+   * Operator health: which media path is active, and if LiveKit is half-
+   * configured, which variables are wrong (names only, never values).
+   */
+  router.get('/voice/health', (_req, res) => {
+    const cfg = livekit.livekitConfig();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      mode: cfg.enabled ? 'livekit' : 'mesh',
+      livekit: cfg.enabled ? 'configured' : cfg.reason,
+      problems: cfg.enabled ? [] : cfg.problems
+    });
+  });
+
   // --- tokens ----------------------------------------------------------------
 
   router.post('/voice/livekit/token', requireUser, tokenLimit, asyncRoute(async (req, res) => {

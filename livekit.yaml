@@ -1,0 +1,64 @@
+# ============================================================================
+#  LiveKit SFU — configuration for the `livekit` compose profile.
+#
+#  Optional. Without LIVEKIT_* in .env the app keeps using its peer-to-peer
+#  mesh and this file is unused. See DEPLOYMENT.md, "Voice and video: LiveKit".
+#
+#  Secrets are NOT in this file: the API key/secret pair comes from the
+#  LIVEKIT_KEYS environment variable, which docker-compose.yml builds from
+#  LIVEKIT_API_KEY and LIVEKIT_API_SECRET in .env.
+# ============================================================================
+
+# HTTP + WebSocket signalling (and the server API the app calls). Not exposed
+# to the internet directly: Caddy terminates TLS for LIVEKIT_DOMAIN and proxies
+# to livekit:7880 on the internal network.
+port: 7880
+
+rtc:
+  # Media. All WebRTC traffic is multiplexed onto ONE UDP port, so only one
+  # port has to be published and opened in the firewall. (For very large
+  # deployments a range — port_range_start/port_range_end, e.g. 50000-60000 —
+  # spreads load across sockets; it then needs host networking.)
+  udp_port: 7882
+  # ICE/TCP fallback for networks that block UDP entirely.
+  tcp_port: 7881
+  # Discover the public IP via STUN and advertise it in ICE candidates. On a
+  # cloud VM with 1:1 NAT this is what you want. Set NODE_IP in .env
+  # (LIVEKIT_NODE_IP) to pin it instead.
+  use_external_ip: true
+
+# Embedded TURN relay for clients whose network blocks UDP 7882 and TCP 7881
+# (strict corporate firewalls). UDP TURN on 3479 works out of the box; TURN
+# over TLS on 443 needs its own domain + certificate (turn.tls_port /
+# external_tls behind a TCP load balancer) — see DEPLOYMENT.md. The mesh's
+# coturn (profile `turn`) is not needed when LiveKit is used.
+turn:
+  enabled: true
+  udp_port: 3479
+
+room:
+  # Rooms are created on first join and closed shortly after the last person
+  # leaves; the app's roster (voice_states) is the source of truth anyway.
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  # opus + RED for voice; AV1/VP9 with VP8 as the universal fallback.
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: audio/red
+    - mime: video/vp8
+    - mime: video/vp9
+    - mime: video/av1
+    - mime: video/h264
+
+# Participant join/leave → the app keeps voice_states in sync (signed with the
+# API secret; the app verifies it). Internal network URL: no TLS needed and
+# nothing is exposed. `api_key` must equal LIVEKIT_API_KEY.
+webhook:
+  api_key: antigravity
+  urls:
+    - http://app:3001/api/voice/livekit/webhook
+
+logging:
+  level: info
+  json: true
