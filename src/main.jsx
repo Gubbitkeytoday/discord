@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import './pwa/register.js'; // PWA: service worker, push, install (must precede App)
 import App from './App.jsx';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';

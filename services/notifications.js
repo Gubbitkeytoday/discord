@@ -476,9 +476,13 @@ export async function fanOutMessageNotifications({
 
   const pings = decisions.filter((d) => d.kind === 'message').map((d) => d.uid);
   if (gateway && pings.length) {
+    const author = authorId
+      ? await getQuery(`SELECT display_name, username FROM users WHERE id = ?`, [authorId]).catch(() => null)
+      : null;
     const payload = {
       channel_id: channelId, server_id: serverId, message_id: messageId,
-      actor_id: authorId, preview, type: 'message'
+      actor_id: authorId, actor_name: author?.display_name ?? author?.username ?? null,
+      channel_name: channel.name ?? null, preview, type: 'message'
     };
     for (const uid of pings) gateway.to(`user-${uid}`).emit('notification_ping', payload);
   }

@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- PWA: manifest, theme colour per OS scheme (src/pwa keeps it in sync
+         with the in-app theme), iOS home-screen icon/title. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1e1f22" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f2f3f5" media="(prefers-color-scheme: light)" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Antigravity" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Antigravity Discord</title>
     <!-- Fonts are self-hosted (@fontsource, imported in src/main.jsx): no
