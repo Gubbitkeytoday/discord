@@ -400,11 +400,108 @@ const MIGRATIONS = [
       await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
     }
   },
+  // --- notifications / web push (services/notifications.js, services/push.js) ---
+  // DDL lives only here (idempotent), not in schema.sql / schema.pg.sql.
+  {
+    version: 32,
+    name: 'notification level inheritance, keyword highlights, push privacy',
+    up: async () => {
+      const cols = await allQuery(`PRAGMA table_info(server_settings)`);
+      if (!cols.some((c) => c.name === 'level_override')) {
+        // NULL = "use the server's default_notifications". notification_level
+        // cannot express that (its CHECK has no 'inherit' and rows are created
+        // with 'all_messages' on join), so an explicit choice lives here.
+        await runQuery(`ALTER TABLE server_settings ADD COLUMN level_override TEXT`);
+      }
+      await runQuery(
+        `UPDATE server_settings SET level_override = notification_level
+          WHERE level_override IS NULL AND notification_level <> 'all_messages'`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS notification_prefs (
+           user_id       TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+           keywords      TEXT NOT NULL DEFAULT '[]',
+           push_content  TEXT NOT NULL DEFAULT 'full'
+                         CHECK (push_content IN ('full','name_only','hidden')),
+           updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_channel_settings_channel ON channel_settings(channel_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_server_settings_server ON server_settings(server_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `ALTER TABLE server_settings ADD COLUMN IF NOT EXISTS level_override TEXT COLLATE "C"
+           CHECK (level_override IN ('all_messages','only_mentions','nothing'))`
+      );
+      await runQuery(
+        `UPDATE server_settings SET level_override = notification_level
+          WHERE level_override IS NULL AND notification_level <> 'all_messages'`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS notification_prefs (
+           user_id       TEXT COLLATE "C" PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           keywords      TEXT NOT NULL DEFAULT '[]',
+           push_content  TEXT COLLATE "C" NOT NULL DEFAULT 'full'
+                         CHECK (push_content IN ('full','name_only','hidden')),
+           updated_at    TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_channel_settings_channel ON channel_settings(channel_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_server_settings_server ON server_settings(server_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id)`);
+    }
+  }
+  ,{
+    version: 33,
+    name: 'web push subscriptions',
+    up: async () => {
+      // A subscription belongs to the session (device login) that created it:
+      // ending the session — logout, revoke, expiry prune — removes it.
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS push_subscriptions (
+           id               TEXT PRIMARY KEY,
+           user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+           session_id       TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+           endpoint         TEXT NOT NULL UNIQUE,
+           p256dh           TEXT NOT NULL,
+           auth             TEXT NOT NULL,
+           user_agent       TEXT,
+           expiration_time  TEXT,
+           failure_count    INTEGER NOT NULL DEFAULT 0,
+           last_success_at  TEXT,
+           created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_session ON push_subscriptions(session_id)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS push_subscriptions (
+           id               TEXT COLLATE "C" PRIMARY KEY,
+           user_id          TEXT COLLATE "C" NOT NULL REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           session_id       TEXT COLLATE "C" REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE,
+           endpoint         TEXT COLLATE "C" NOT NULL UNIQUE,
+           p256dh           TEXT NOT NULL,
+           auth             TEXT NOT NULL,
+           user_agent       TEXT,
+           expiration_time  TIMESTAMPTZ(3),
+           failure_count    INTEGER NOT NULL DEFAULT 0,
+           last_success_at  TIMESTAMPTZ(3),
+           created_at       TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_session ON push_subscriptions(session_id)`);
+    }
+  }
   // realtime-scale: GET /api/sync counts edits and deletions since a cursor
   // per channel; these partial indexes keep that off a table scan. Both
   // baselines (schema.sql / schema.pg.sql) create them too, so a fresh
   // database already has them and IF NOT EXISTS makes this a no-op there.
-  {
+  ,{
     version: 34,
     name: 'sync indexes on messages.edited_at / deleted_at',
     up: async () => {

@@ -61,6 +61,7 @@ import * as pollService from './services/polls.js';
 import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
+import createPushRouter from './routes/push.js'; // push
 import passkeysRouter from './routes/passkeys.js'; // passkeys
 import translationRouter from './routes/translation.js'; // translation
 import {
@@ -250,6 +251,7 @@ app.get('/api/meta/permissions', (_req, res) => {
 app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
+app.use('/api', createPushRouter({ io })); // push
 app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
 app.use('/api', passkeysRouter); // passkeys
 app.use('/api', translationRouter); // translation

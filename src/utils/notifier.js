@@ -14,6 +14,7 @@ import {
   playLeaveVoiceSound, playMuteSound, playUnmuteSound
 } from './soundEffects';
 import { speak } from './speech';
+import { proxiedImageUrl } from './media';
 
 const SOUND_PLAYERS = {
   message: playMessageIncomingSound,
@@ -118,7 +119,11 @@ export function notifyMessage({ title, body, icon, tag, muted = false, status, o
   if (document.visibilityState === 'visible' && document.hasFocus()) return false;
 
   try {
-    const notification = new Notification(title, { body, icon, tag, silent: true });
+    // Remote avatars go through our image proxy (the CSP allows same-origin
+    // images only); no avatar → the app icon.
+    const notification = new Notification(title, {
+      body, icon: icon ? proxiedImageUrl(icon) : '/icons/icon-192.png', tag, silent: true
+    });
     notification.onclick = () => {
       window.focus();
       notification.close();
@@ -154,13 +159,31 @@ export function speakTtsMessage({ author, content }) {
   return speak(`${author} says ${content}`, { rate: prefs.accessibility.ttsRate });
 }
 
-/** Reflect unread counts in the tab title, if the user wants a badge. */
+/**
+ * Reflect unread counts in the tab title and, where the Badging API exists
+ * (installed PWA on desktop Chromium, iOS/macOS home-screen apps), on the app
+ * icon — if the user wants a badge.
+ */
 export function applyUnreadBadge(mentionCount) {
   const prefs = getPreferences();
   const base = 'Antigravity';
-  const title = prefs.notifications.unreadBadge && mentionCount > 0
-    ? `(${mentionCount}) ${base}`
-    : base;
+  const show = prefs.notifications.unreadBadge && mentionCount > 0;
+  const title = show ? `(${mentionCount}) ${base}` : base;
   if (flashTimer) flashBaseTitle = title;
   else document.title = title;
+  try {
+    if (show && typeof navigator.setAppBadge === 'function') navigator.setAppBadge(mentionCount).catch(() => {});
+    else if (typeof navigator.clearAppBadge === 'function') navigator.clearAppBadge().catch(() => {});
+  } catch { /* not allowed in this context */ }
+}
+
+/**
+ * Is a channel/server settings row's mute in force? A timed mute that has run
+ * out is not (the server clears it too, but a client may hold the old row).
+ */
+export function isMuteActive(settings, now = Date.now()) {
+  if (!settings?.muted) return false;
+  if (!settings.muted_until) return true;
+  const until = Date.parse(settings.muted_until);
+  return Number.isFinite(until) ? until > now : true;
 }

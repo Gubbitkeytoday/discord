@@ -82,7 +82,11 @@ export async function assertChannelAccess({ channelId, userId, permission = null
     }
     throw ApiError.forbidden(`Missing permission: ${permission}`);
   }
-  return { channel, permissions: resolved.permissions, isDm: false, isOwner: resolved.isOwner };
+  return {
+    channel, permissions: resolved.permissions, isDm: false, isOwner: resolved.isOwner,
+    // Already loaded; callers such as AutoMod's role exemptions reuse it.
+    roleIds: resolved.roleIds ?? []
+  };
 }
 
 /** Non-throwing variant: does the user hold `permission` in this channel? */

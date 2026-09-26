@@ -18,6 +18,7 @@ import '@fontsource/kanit/500.css';
 import '@fontsource/kanit/600.css';
 import '@fontsource/kanit/700.css';
 import './index.css';
+import './pwa/register.js'; // PWA: service worker, Web Push, install, update prompt
 
 // Apply the cached appearance and accessibility preferences before React
 // mounts, so the app never flashes the wrong theme, zoom or contrast.

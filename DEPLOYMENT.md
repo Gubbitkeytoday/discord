@@ -776,3 +776,43 @@ language) for `TRANSLATION_CACHE_TTL_HOURS` (default 168); editing a message
 changes the hash, so an old translation is never served. Provider calls are
 rate limited per user (`TRANSLATION_RATE_PER_MIN`, default 20). Message
 content is never written to logs.
+
+## 13. Installable app (PWA) and Web Push
+
+The SPA is an installable Progressive Web App out of the box: `vite build`
+emits `manifest.webmanifest`, the icon set (`public/icons/`, regenerate with
+`node scripts/generate-pwa-icons.mjs` after changing `favicon.svg`),
+`offline.html`, and `sw.js` stamped with the build id and the hashed app-shell
+files to precache. Serve `/sw.js` with `Cache-Control: no-cache` (the built-in
+static server does; so must any CDN or reverse proxy in front of it) or clients
+will not see new versions. After a deploy, open tabs show "A new version is
+available — Reload"; nothing is swapped under a user mid-conversation. The
+worker never caches `/api`, `/socket.io` or `/uploads`.
+
+Web Push is optional. It needs HTTPS (a secure context) and a VAPID key pair:
+
+```bash
+npm run push:keys -- --subject mailto:ops@example.com   # prints the three lines for .env
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | unset (push off) | all three required; the subject is `mailto:` or `https://` |
+| `PUSH_ENDPOINT_HOSTS` | FCM, Mozilla, Apple, WNS | host suffixes the server may POST to; keep it to real push services |
+| `PUSH_USER_LIMIT_PER_MIN` | 30 | per-user push budget; the per-channel Topic collapses the rest |
+| `PUSH_TTL_SECONDS` | 14400 | how long a push service holds an undelivered push |
+
+`GET /api/push/config` reports `{ enabled, public_key }`. Outbound HTTPS from
+the server to the push services must be allowed.
+
+Behaviour: a subscription belongs to the session (device login) that created
+it and is deleted on logout, session revoke and "log out everywhere". Pushes go
+out for DMs, mentions, keyword highlights and — at a channel/server level of
+"All messages" — every message, following each member's notification settings
+(`/api/notification-settings`), and never while the user has the app focused on
+another device. The payload is Declarative Web Push JSON (Safari 18.4+ shows it
+without running the worker); each user chooses whether pushes show the message,
+only the sender, or nothing private. Subscriptions the push service reports as
+gone (404/410) are deleted. On iPhone/iPad, push works only after "Add to Home
+Screen" (iOS 16.4+); the app explains this instead of offering a prompt that
+cannot work.
