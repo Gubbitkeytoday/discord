@@ -459,9 +459,17 @@ export function useStreamVideo(stream) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el) return undefined;
+    // A LiveKit remote track is attached through the SDK, so adaptiveStream
+    // knows the element's size and visibility (and pauses hidden video).
+    const lkTrack = stream?.lkTrack;
+    if (lkTrack?.attach) {
+      lkTrack.attach(el);
+      return () => { try { lkTrack.detach(el); } catch { /* already gone */ } };
+    }
     el.srcObject = stream ?? null;
     if (stream) el.play().catch(() => { /* autoplay blocked; muted so unlikely */ });
+    return undefined;
   }, [stream]);
   return ref;
 }

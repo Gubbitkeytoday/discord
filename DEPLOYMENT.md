@@ -204,7 +204,8 @@ STUN only.
 Full mesh: every participant uploads one copy of their audio (and camera, and
 screen) to every other participant. `VOICE_MESH_LIMIT` (default 8) caps the room.
 Audio alone is fine at 8; with cameras on, 4–5 people is the practical limit on
-typical home upload bandwidth. Beyond that you need an SFU (LiveKit, mediasoup).
+typical home upload bandwidth. Beyond that, turn on the optional LiveKit SFU
+(section 4b), which removes the cap.
 
 ### Echo
 
@@ -212,6 +213,133 @@ Chrome only echo-cancels audio played through a media element. The client plays
 voices that way, and switches to Web Audio only when you boost someone above
 100% or turn on spatial audio — in those cases speaker users may cause echo;
 headphones avoid it.
+
+---
+
+## 4b. Voice and video: LiveKit (optional SFU)
+
+The mesh above tops out at a handful of people. For bigger rooms, stage
+channels with a large audience, or many cameras, run a **LiveKit** SFU
+(selective forwarding unit): every participant uploads each track once and the
+SFU forwards it to everyone else. It is optional — with no `LIVEKIT_*`
+variables the app keeps using the mesh, unchanged.
+
+**What changes when it is on**
+
+| | Mesh (default) | LiveKit |
+|---|---|---|
+| Room size | `VOICE_MESH_LIMIT` (8) | channel `user_limit` / `LIVEKIT_ROOM_LIMIT` only |
+| Upload per person | one copy per other participant | one copy |
+| Video | single layer | simulcast + dynacast (unused layers are not encoded), adaptive stream (hidden/small tiles get a small layer or none) |
+| Codecs | browser default | AV1 → VP9 → VP8 by support, always with a VP8 backup layer (`LIVEKIT_VIDEO_CODEC`) |
+| Audio | Opus | Opus + RED (redundant packets survive loss) + DTX |
+| Moderation | enforced by the clients | also enforced by the SFU (permissions revoked, participants removed) |
+| Encryption | DTLS-SRTP peer to peer | DTLS-SRTP to the SFU; optional E2EE (`LIVEKIT_E2EE=1`) |
+
+What stays the same: the gateway (Socket.IO) is still the source of truth for
+who is in a channel, mute/deafen, stage speakers, speaking indicators and the
+soundboard; the UI is identical, plus a connection-quality indicator and a
+"Reconnecting…" state. Clients ask `GET /api/voice/config` which mode is on.
+
+**How authorization maps to LiveKit.** `POST /api/voice/livekit/token` issues
+a short-lived room token (identity = user id, room = voice channel id) only to
+users with **CONNECT** in that channel. Grants follow the channel's
+permissions: **SPEAK** → microphone, **STREAM** → camera / screen share (+
+its audio). On a **stage**, the audience can only subscribe; speakers and
+stage moderators (**MUTE_MEMBERS**) publish. Moderators can server-mute
+(**MUTE_MEMBERS**), server-deafen (**DEAFEN_MEMBERS**), move and disconnect
+(**MOVE_MEMBERS**) through `/api/voice/channels/:channelId/members/:userId/…`;
+the app pushes each change to the SFU through the RoomService API, so a
+modified client cannot ignore it. Server mute/deafen is stored on the
+membership and survives rejoining.
+
+### Production requirements
+
+- **A public IP** on the LiveKit host (or 1:1 NAT: cloud VMs are fine —
+  `use_external_ip` discovers it via STUN; pin it with `NODE_IP` if needed).
+- **Open ports** (host firewall *and* cloud security group):
+  `7882/udp` (all WebRTC media, multiplexed on one port), `7881/tcp` (ICE/TCP
+  fallback for UDP-blocking networks), `3479/udp` (embedded TURN relay),
+  plus `443/tcp` for signalling through Caddy.
+- **A TLS domain for signalling**, e.g. `lk.example.com`, pointing at the
+  host. Browsers only allow `wss://` from an `https://` page.
+- The secret: `openssl rand -hex 32` (LiveKit refuses anything under 32
+  characters, and so does the app).
+- Bandwidth: the SFU *downloads* one copy of every track and *uploads* one per
+  subscriber. A 20-person audio room is ~1.5 Mbit/s up; a room with cameras
+  is dominated by video — budget ~1.5 Mbit/s per visible 720p tile per viewer
+  (adaptive stream lowers this for small tiles).
+
+### Run it with the compose file
+
+```bash
+# .env
+LIVEKIT_URL=wss://lk.example.com
+LIVEKIT_API_KEY=antigravity            # must equal webhook.api_key in livekit.yaml
+LIVEKIT_API_SECRET=<openssl rand -hex 32>
+LIVEKIT_HOST=http://livekit:7880       # app → LiveKit over the internal network
+LIVEKIT_DOMAIN=lk.example.com
+
+docker compose --profile livekit up -d
+```
+
+Then enable the LiveKit site block in `Caddyfile` (it is commented out so a
+stack without LiveKit does not try to get a certificate for a domain that does
+not exist) and `docker compose restart caddy`.
+
+`livekit.yaml` holds the server config (ports, embedded TURN, codecs, the
+webhook). The API key/secret are **not** in it: compose passes them in the
+`LIVEKIT_KEYS` environment variable. The webhook goes to
+`http://app:3001/api/voice/livekit/webhook` over the internal network; the app
+verifies its signature (JWT signed with the API secret, with a SHA-256 of the
+exact body) and uses `participant_joined` / `participant_left` to keep the
+voice roster honest when a browser reaches or leaves the SFU without the
+gateway noticing (a crashed tab). Deliveries with a bad signature get `401`.
+
+**TURN over TLS (optional).** The embedded TURN relay listens on UDP 3479.
+Networks that allow only HTTPS need TURN/TLS on 443, which requires a second
+domain (e.g. `turn.example.com`) with its own certificate and a TCP (layer-4)
+load balancer or a dedicated IP — see LiveKit's "Firewall / TURN" docs, then
+set `turn.domain`, `turn.tls_port` and `turn.external_tls` in `livekit.yaml`.
+coturn (profile `turn`) is only for the mesh and is not needed with LiveKit.
+
+**nginx instead of Caddy.** Proxy `lk.example.com` to `127.0.0.1:7880` with
+WebSocket upgrade headers and `proxy_read_timeout 86400s` — see the commented
+block in `nginx.conf.example`. UDP/TCP media ports go straight to LiveKit, never
+through the web proxy.
+
+**E2EE.** `LIVEKIT_E2EE=1` encrypts media frames in the browser with a
+per-room key the app derives from `LIVEKIT_E2EE_SECRET` (or the API secret).
+This hides media from whoever runs the SFU (useful with LiveKit Cloud), not
+from this app's server. It costs CPU, disables RED and forces VP8; browsers
+without insertable streams cannot join encrypted rooms.
+
+**LiveKit Cloud** works the same way: set `LIVEKIT_URL` / key / secret from the
+cloud project, leave `LIVEKIT_HOST` unset, and point the project's webhook at
+`https://chat.example.com/api/voice/livekit/webhook`. No compose profile needed.
+
+### Checking it works
+
+1. `curl -s https://chat.example.com/api/voice/config -H "Cookie: …"` →
+   `"mode":"livekit"`. If it says `mesh`, a variable is missing or the secret is
+   too short — the app logs which one at boot (never the value).
+2. Join a voice channel from two browsers: the room header shows **SFU** with a
+   signal icon instead of **P2P n/m**.
+3. `docker compose logs livekit` shows `participant active` for each; a
+   participant stuck in "Reconnecting…" almost always means `7882/udp` (and
+   `7881/tcp`) are not reachable from outside.
+4. LiveKit's connection test (https://livekit.io/connection-test) with a token
+   from `POST /api/voice/livekit/token` checks signalling, UDP, TCP and TURN.
+
+**Content-Security-Policy.** The browser connects to `wss://lk.example.com`,
+which `connect-src … wss:` already allows. LiveKit's diagnostic HTTPS request
+(`/rtc/validate`, used only to explain a failed connection) is blocked by the
+CSP; that only affects the error text.
+
+**Noise suppression.** The toggle (room controls and Voice settings) uses the
+browser's built-in noise suppression (`getUserMedia` constraint). An
+RNNoise/WASM model is a possible follow-up; LiveKit's Krisp filter requires
+LiveKit Cloud.
 
 ---
 

@@ -66,3 +66,26 @@
 		format json
 	}
 }
+
+# ============================================================================
+#  LiveKit SFU signalling (optional — `docker compose --profile livekit`).
+#
+#  Uncomment once LIVEKIT_DOMAIN in .env points at this host (compose passes
+#  it to this container). It is commented out so a stack without LiveKit does not request a
+#  certificate for a domain that does not exist. Only signalling (WebSocket)
+#  goes through Caddy; media uses 7882/udp, 7881/tcp and 3479/udp directly —
+#  see DEPLOYMENT.md, section 4b.
+# ============================================================================
+
+# {$LIVEKIT_DOMAIN} {
+# 	reverse_proxy livekit:7880 {
+# 		# Signalling sockets live as long as the call.
+# 		transport http {
+# 			read_timeout 0
+# 		}
+# 	}
+# 	log {
+# 		output stdout
+# 		format json
+# 	}
+# }

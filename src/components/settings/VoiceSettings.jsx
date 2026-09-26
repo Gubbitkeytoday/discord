@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, Video, VideoOff, Loader2 } from 'lucide-react';
 import { useVoiceSettings, listAudioDevices } from '../../hooks/useVoiceSettings';
 import { t } from '../../i18n/index.jsx';
+import { loadVoiceConfig } from '../../voice/config';
 import {
   PageHeader, Section, SettingToggle, Slider, RadioList, ResetButton,
   Divider, StackedRow, Field, Select, Button, inputClass
@@ -26,6 +27,13 @@ export default function VoiceSettings({ onToast }) {
   const [capturingKey, setCapturingKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(null);   // 'livekit' | 'mesh'
+
+  useEffect(() => {
+    let cancelled = false;
+    loadVoiceConfig().then((cfg) => { if (!cancelled) setVoiceMode(cfg.mode); });
+    return () => { cancelled = true; };
+  }, []);
 
   const streamRef = useRef(null);
   const ctxRef = useRef(null);
@@ -356,6 +364,15 @@ export default function VoiceSettings({ onToast }) {
 
       <Divider />
 
+      {/* --- which media path this server uses (informational) ------------------ */}
+      {voiceMode && (
+        <Section title={t('voice.connectionMode')}>
+          <p className="text-sm text-d-text2" data-testid="voice-mode" data-mode={voiceMode}>
+            {voiceMode === 'livekit' ? t('voice.modeLivekit') : t('voice.modeMesh')}
+          </p>
+        </Section>
+      )}
+
       {/* --- processing --------------------------------------------------------- */}
       <Section title={t('voice.processing')}>
         <SettingToggle
@@ -365,6 +382,7 @@ export default function VoiceSettings({ onToast }) {
         />
         <SettingToggle
           label={t('voice.noiseSuppression')}
+          hint={t('voice.noiseSuppressionHint')}
           checked={settings.noiseSuppression}
           onChange={(value) => update({ noiseSuppression: value })}
         />

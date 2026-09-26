@@ -64,6 +64,7 @@ import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
 import createPushRouter from './routes/push.js'; // push
+import createLivekitRouter from './routes/livekit.js'; // livekit
 import passkeysRouter from './routes/passkeys.js'; // passkeys
 import translationRouter from './routes/translation.js'; // translation
 import {
@@ -254,6 +255,7 @@ app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
 app.use('/api', createPushRouter({ io })); // push
+app.use('/api', createLivekitRouter({ io })); // livekit
 app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
 app.use('/api', passkeysRouter); // passkeys
 app.use('/api', translationRouter); // translation

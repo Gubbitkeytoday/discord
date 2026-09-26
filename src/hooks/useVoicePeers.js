@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { get } from '../api';
+import { createAudioPlayback } from '../voice/playback';
 
 /**
  * WebRTC full mesh for a voice channel.
@@ -94,9 +95,11 @@ export function useVoicePeers({
   };
 
   const peersRef = useRef(new Map());        // socketId -> { pc, userId, senders, polite, makingOffer, ignoreOffer, restarts }
-  const audioNodesRef = useRef(new Map());   // `${socketId}` | `${socketId}:screen` -> { el, stream, userId, gain?, panner?, source? }
   const pendingCandidatesRef = useRef(new Map());   // socketId -> RTCIceCandidateInit[]
-  const playbackCtxRef = useRef(null);
+  // Remote audio: `${socketId}` | `${socketId}:screen` -> <audio> (+ Web Audio graph when needed).
+  const playbackRef_ = useRef(null);
+  if (!playbackRef_.current) playbackRef_.current = createAudioPlayback(() => playbackRef.current);
+  const playback = playbackRef_.current;
   const tracksRef = useRef(tracks);
   tracksRef.current = tracks;
   const participantsRef = useRef(participants);
@@ -116,95 +119,11 @@ export function useVoicePeers({
   const userIdFor = (socketId) =>
     participantsRef.current?.find((p) => p.socketId === socketId)?.userId ?? null;
 
-  /** One AudioContext for every remote voice — browsers cap how many may exist. */
-  function playbackContext() {
-    if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      playbackCtxRef.current = new AudioCtx();
-    }
-    const ctx = playbackCtxRef.current;
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-    return ctx;
-  }
-
-  /**
-   * Deafen silences everyone; per-user volume, master volume and attenuation
-   * multiply on top.
-   *
-   * Playback goes through a plain <audio> element whenever it can. Chrome's
-   * echo canceller only uses audio played that way as its reference — audio
-   * routed through Web Audio is invisible to it, so a speaker user's room would
-   * hear itself echo back. The Web Audio graph is built only when it is really
-   * needed: boosting someone past 100%, or spatial positioning.
-   */
-  function applyPlayback(node) {
-    const p = playbackRef.current;
-    if (!node?.el) return;
-    const userId = node.userId;
-    const ducked = p.attenuateWhileSpeaking && p.selfSpeaking ? 1 - (p.attenuation / 100) : 1;
-    const silenced = p.isDeafened || (userId && p.localMutes[userId]);
-    const percent = (userId && p.volumes[userId]) ?? 100;
-    const level = silenced ? 0 : (percent / 100) * (p.outputVolume / 100) * ducked;
-    const needGraph = level > 1 || p.spatialAudio;
-    const sink = p.outputDeviceId && p.outputDeviceId !== 'default' ? p.outputDeviceId : '';
-
-    if (needGraph) {
-      if (!node.gain) {
-        const ctx = playbackContext();
-        node.source = ctx.createMediaStreamSource(node.stream);
-        node.gain = ctx.createGain();
-        // The panner is always in the graph; with spatial audio off it sits at
-        // the origin, which is indistinguishable from not having one.
-        node.panner = ctx.createPanner();
-        node.panner.panningModel = 'HRTF';
-        node.panner.distanceModel = 'inverse';
-        node.panner.refDistance = 1;
-        node.panner.maxDistance = 4;
-        node.source.connect(node.gain).connect(node.panner).connect(ctx.destination);
-      }
-      // The element keeps pumping the stream (Chrome needs that for the graph
-      // to receive samples) but no longer plays it itself.
-      node.el.muted = true;
-      node.gain.gain.value = level;
-      const ctx = playbackCtxRef.current;
-      const x = p.spatialAudio ? Math.max(-1, Math.min(1, Number(p.positions[userId] ?? 0))) : 0;
-      const when = ctx.currentTime;
-      // setValueAtTime rather than assignment: a jump in position clicks.
-      node.panner.positionX?.setValueAtTime(x, when);
-      node.panner.positionY?.setValueAtTime(0, when);
-      node.panner.positionZ?.setValueAtTime(p.spatialAudio ? -0.4 : 0, when);
-      if (ctx.setSinkId && ctx.sinkId !== sink) ctx.setSinkId(sink).catch(() => {});
-    } else {
-      if (node.gain) node.gain.gain.value = 0;
-      node.el.volume = Math.max(0, Math.min(1, level));
-      node.el.muted = level === 0;
-      if (node.el.setSinkId && node.el.sinkId !== sink) node.el.setSinkId(sink).catch(() => {});
-    }
-    node.el.play().catch(() => {});
-  }
-
-  const detachAudio = useCallback((key) => {
-    const node = audioNodesRef.current.get(key);
-    if (!node) return;
-    node.el.pause();
-    node.el.srcObject = null;
-    try { node.source?.disconnect(); node.gain?.disconnect(); node.panner?.disconnect(); } catch { /* already gone */ }
-    audioNodesRef.current.delete(key);
-  }, []);
-
-  const attachRemoteAudio = useCallback((key, userId, stream) => {
-    let node = audioNodesRef.current.get(key);
-    if (node && node.stream !== stream) { detachAudio(key); node = null; }
-    if (!node) {
-      const el = new Audio();
-      el.autoplay = true;
-      el.srcObject = stream;
-      node = { el, stream, userId };
-      audioNodesRef.current.set(key, node);
-    }
-    if (userId) node.userId = userId;
-    applyPlayback(node);
-  }, [detachAudio]);
+  const detachAudio = useCallback((key) => playback.detach(key), [playback]);
+  const attachRemoteAudio = useCallback(
+    (key, userId, stream) => playback.attach(key, userId, stream),
+    [playback]
+  );
 
   const setRemoteVideo = useCallback((userId, role, stream) => {
     if (!userId) return;
@@ -487,10 +406,7 @@ export function useVoicePeers({
         // Learn the user id if the peer connected before the roster caught up.
         if (!known.userId && other.userId) {
           known.userId = other.userId;
-          for (const key of [other.socketId, `${other.socketId}:screen`]) {
-            const node = audioNodesRef.current.get(key);
-            if (node) { node.userId = other.userId; applyPlayback(node); }
-          }
+          for (const key of [other.socketId, `${other.socketId}:screen`]) playback.setUser(key, other.userId);
         }
         continue;
       }
@@ -511,7 +427,7 @@ export function useVoicePeers({
   // Apply playback changes without rebuilding anything.
   const positionsKey = JSON.stringify(positions);
   useEffect(() => {
-    for (const [, node] of audioNodesRef.current) applyPlayback(node);
+    playback.applyAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [volumes, localMutes, isDeafened, outputVolume, outputDeviceId, attenuation, attenuateWhileSpeaking, selfSpeaking, spatialAudio, positionsKey]);
 
@@ -519,11 +435,9 @@ export function useVoicePeers({
   // just stop reconciling — an open RTCPeerConnection keeps sending.
   const closeAll = useCallback(() => {
     for (const socketId of [...peersRef.current.keys()]) closePeer(socketId);
-    for (const key of [...audioNodesRef.current.keys()]) detachAudio(key);
     pendingCandidatesRef.current.clear();
-    playbackCtxRef.current?.close().catch(() => {});
-    playbackCtxRef.current = null;
-  }, [closePeer, detachAudio]);
+    playback.closeAll();
+  }, [closePeer, playback]);
 
   useEffect(() => {
     if (enabled) return;
@@ -534,10 +448,52 @@ export function useVoicePeers({
 
   useEffect(() => () => closeAll(), [closeAll]);
 
+  // Connection quality per peer, from the selected candidate pair's round-trip
+  // time and inbound packet loss — the same signals LiveKit grades on.
+  const [quality, setQuality] = useState({});   // userId -> excellent|good|poor|lost
+  useEffect(() => {
+    if (!enabled) { setQuality({}); return undefined; }
+    const previous = new Map();   // socketId -> { lost, received }
+    const timer = setInterval(async () => {
+      const next = {};
+      for (const [socketId, peer] of peersRef.current) {
+        if (!peer.userId) continue;
+        const state = peer.pc.connectionState;
+        if (state === 'failed' || state === 'disconnected') { next[peer.userId] = 'lost'; continue; }
+        if (state !== 'connected') continue;
+        try {
+          const stats = await peer.pc.getStats();
+          let rtt = null; let lost = 0; let received = 0;
+          stats.forEach((r) => {
+            if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded' && r.currentRoundTripTime != null) rtt = r.currentRoundTripTime;
+            if (r.type === 'inbound-rtp' && r.kind === 'audio') { lost += r.packetsLost ?? 0; received += r.packetsReceived ?? 0; }
+          });
+          const before = previous.get(socketId) ?? { lost: 0, received: 0 };
+          previous.set(socketId, { lost, received });
+          const dLost = Math.max(0, lost - before.lost);
+          const dTotal = dLost + Math.max(0, received - before.received);
+          const loss = dTotal ? dLost / dTotal : 0;
+          next[peer.userId] = loss > 0.05 || (rtt ?? 0) > 0.4 ? 'poor'
+            : loss > 0.01 || (rtt ?? 0) > 0.15 ? 'good' : 'excellent';
+        } catch { /* closed mid-poll */ }
+      }
+      setQuality((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+
+  const states = Object.values(peerStates);
+  const connectionState = !enabled ? 'idle'
+    : states.some((st) => st === 'disconnected' || st === 'failed') ? 'reconnecting'
+    : states.every((st) => st === 'connected') ? 'connected' : 'connecting';
+
   return {
     peerStates,
     remoteMedia,
+    quality,
+    connectionState,
     peerCount: Object.keys(peerStates).length,
-    connectedCount: Object.values(peerStates).filter((s) => s === 'connected').length
+    connectedCount: Object.values(peerStates).filter((s) => s === 'connected').length,
+    resumeAudio: () => playback.resume()
   };
 }

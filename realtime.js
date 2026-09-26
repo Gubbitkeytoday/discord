@@ -28,6 +28,8 @@ import * as presence from './lib/presence.js';
 import { resolvePermissions } from './services/guilds.js';
 import { ApiError, publicError } from './lib/httpUtils.js';
 import { sessionEvents } from './lib/sessionEvents.js';
+// livekit: optional SFU; every call is a no-op when it is not configured.
+import * as livekit from './services/livekit.js';
 
 /** What a socket client may see of an error: never raw database text. */
 const clientError = (err) => publicError(err).body;
@@ -636,13 +638,15 @@ export async function registerRealtime(io) {
         `SELECT user_id FROM voice_states WHERE channel_id = ? AND user_id != ?`,
         [channelId, user.id]
       );
-      const limit = Number(channel?.user_limit) || MESH_LIMIT;
-      if (occupants.length + 1 > Math.min(limit, MESH_LIMIT)) {
-        ack?.({ ok: false, error: `This voice channel is full (${Math.min(limit, MESH_LIMIT)} max)`, code: 'VOICE_FULL' });
+      // With the LiveKit SFU each participant uploads once whatever the room
+      // size, so only the channel's own limit (and LIVEKIT_ROOM_LIMIT) apply.
+      const cap = voiceCapacity(channel);
+      if (cap && occupants.length + 1 > cap) {
+        ack?.({ ok: false, error: `This voice channel is full (${cap} max)`, code: 'VOICE_FULL' });
         socket.emit('voice_error', {
           channelId,
           code: 'VOICE_FULL',
-          error: `This voice channel holds at most ${Math.min(limit, MESH_LIMIT)} people`
+          error: `This voice channel holds at most ${cap} people`
         });
         return;
       }
@@ -665,9 +669,14 @@ export async function registerRealtime(io) {
       // moderator or by having their raised hand accepted.
       const isStage = channel?.type === 'stage';
       const isStageMod = isStage && await canInChannel({ channelId, userId, permission: 'MUTE_MEMBERS' });
+      // A server mute/deafen belongs to the member, not the session, so leaving
+      // and rejoining does not shake it off.
+      const member = channel?.server_id
+        ? await getQuery(`SELECT is_mute, is_deaf FROM server_members WHERE server_id = ? AND user_id = ?`, [channel.server_id, userId])
+        : null;
       await runQuery(
-        `UPDATE voice_states SET suppress = ?, request_to_speak_at = NULL WHERE user_id = ?`,
-        [isStage && !isStageMod ? 1 : 0, userId]
+        `UPDATE voice_states SET suppress = ?, request_to_speak_at = NULL, server_mute = ?, server_deaf = ? WHERE user_id = ?`,
+        [isStage && !isStageMod ? 1 : 0, member?.is_mute ? 1 : 0, member?.is_deaf ? 1 : 0, userId]
       );
 
       lastSpokeAt.set(userId, Date.now());
@@ -762,9 +771,11 @@ export async function registerRealtime(io) {
         [speaker ? 0 : 1, targetId, channelId]
       );
       if (!changes) { ack?.({ ok: false, code: 'NOT_IN_CHANNEL' }); return; }
-      for (const sid of socketsByUser.get(targetId) ?? []) {
-        io.to(sid).emit('stage_speaker_changed', { channelId, speaker: Boolean(speaker), by: actorId });
-      }
+      // The user's own room reaches their sockets on every instance.
+      io.to(`user-${targetId}`).emit('stage_speaker_changed', { channelId, speaker: Boolean(speaker), by: actorId });
+      // The SFU enforces it too: a promoted speaker may now publish, a demoted
+      // one has their tracks unpublished.
+      await livekit.syncParticipantGrants(channelId, targetId);
       await broadcastVoice(io, channelId);
       ack?.({ ok: true });
     });
@@ -817,7 +828,7 @@ export async function registerRealtime(io) {
     socket.on('leave_voice', async ({ channelId } = {}) => {
       const userId = socket.data.userId;
       if (!userId) return;
-      if (socket.data.voiceChannelId) socket.leave(`voice-${socket.data.voiceChannelId}`);
+      for (const room of [...socket.rooms]) if (room.startsWith('voice-')) socket.leave(room);
       socket.leave(`voice-${channelId}`);
       socket.data.voiceChannelId = null;
       await runQuery(`DELETE FROM voice_states WHERE user_id = ?`, [userId]);
@@ -830,22 +841,37 @@ export async function registerRealtime(io) {
     // channel or `user-…` id broadcast signalling to a whole audience, and an
     // anonymous socket could push offers at anyone. Relay only between two
     // identified sockets that share the same voice room.
-    const relayTarget = (targetSocketId) => {
-      if (!socket.data.userId || typeof targetSocketId !== 'string') return null;
-      const target = io.sockets.sockets.get(targetSocketId);
-      const room = socket.data.voiceChannelId;
-      if (!target || !room || target.data.voiceChannelId !== room) return null;
-      return target;
+    //
+    // The target may live on another instance (REDIS_URL cluster), so its
+    // membership is checked against voice_states — the row the gateway wrote
+    // when that socket joined — and the message goes out through the adapter
+    // (io.to(socketId)). A socket on this instance is checked in memory. The
+    // verdict is cached briefly: a join trickles dozens of ICE candidates.
+    const relayVerdicts = new Map();   // `${target}|${room}` -> { ok, at }
+    const relayTarget = async (targetSocketId) => {
+      if (!socket.data.userId || typeof targetSocketId !== 'string' || !targetSocketId || targetSocketId.length > 64) return false;
+      const room = voiceRoomOf(socket);
+      if (!room) return false;
+      const local = io.sockets.sockets.get(targetSocketId);
+      if (local) return Boolean(local.data?.userId) && voiceRoomOf(local) === room;
+      const key = `${targetSocketId}|${room}`;
+      const cached = relayVerdicts.get(key);
+      if (cached && Date.now() - cached.at < 5000) return cached.ok;
+      const row = await getQuery(
+        `SELECT 1 AS ok FROM voice_states WHERE socket_id = ? AND channel_id = ?`, [targetSocketId, room]
+      ).catch(() => null);
+      if (relayVerdicts.size > 200) relayVerdicts.clear();
+      relayVerdicts.set(key, { ok: Boolean(row), at: Date.now() });
+      return Boolean(row);
     };
-    socket.on('webrtc_offer', ({ targetSocketId, offer } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_offer', { senderSocketId: socket.id, offer });
-    });
-    socket.on('webrtc_answer', ({ targetSocketId, answer } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_answer', { senderSocketId: socket.id, answer });
-    });
-    socket.on('webrtc_ice_candidate', ({ targetSocketId, candidate } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_ice_candidate', { senderSocketId: socket.id, candidate });
-    });
+    const relay = (event, field) => async ({ targetSocketId, [field]: body } = {}) => {
+      if (await relayTarget(targetSocketId)) {
+        io.to(targetSocketId).emit(event, { senderSocketId: socket.id, [field]: body });
+      }
+    };
+    socket.on('webrtc_offer', relay('webrtc_offer', 'offer'));
+    socket.on('webrtc_answer', relay('webrtc_answer', 'answer'));
+    socket.on('webrtc_ice_candidate', relay('webrtc_ice_candidate', 'candidate'));
 
     // --- teardown ------------------------------------------------------------
 
@@ -1030,6 +1056,100 @@ async function evictFromVoice(io, sock, channelId) {
   // The client tears down its peer connections on this; the others see the
   // roster change through broadcastVoice.
   sock.emit('voice_disconnected', { channelId, reason: 'removed' });
+  // With the SFU the media session is separate from the socket room.
+  await livekit.removeParticipant(channelId, sock.data.userId, { revoke: true });
+  await broadcastVoice(io, channelId);
+}
+
+/**
+ * The voice channel a socket is in, read from its rooms rather than from
+ * socket.data: rooms follow a socket across instances (a moderator move on
+ * another node joins/leaves rooms through the adapter), data does not.
+ */
+function voiceRoomOf(sock) {
+  for (const room of sock?.rooms ?? []) if (room.startsWith('voice-')) return room.slice('voice-'.length);
+  return null;
+}
+
+/** How many may be in a voice channel at once; 0 = no limit. */
+function voiceCapacity(channel) {
+  const own = Number(channel?.user_limit) || 0;
+  const cfg = livekit.livekitConfig();
+  if (cfg.enabled) {
+    const caps = [own, cfg.roomLimit].filter((n) => n > 0);
+    return caps.length ? Math.min(...caps) : 0;
+  }
+  return Math.min(own || MESH_LIMIT, MESH_LIMIT);
+}
+
+/**
+ * Move a user's voice session to another channel: state row, socket rooms,
+ * the client told (it rejoins the media there), both rosters refreshed. Used by
+ * the AFK sweep and by moderators (MOVE_MEMBERS).
+ */
+export async function moveVoiceMember(io, userId, from, to, reason = 'moved') {
+  const target = await getQuery(`SELECT server_id FROM channels WHERE id = ?`, [to]);
+  await runQuery(
+    `UPDATE voice_states SET channel_id = ?, server_id = ?, suppress = 0, request_to_speak_at = NULL WHERE user_id = ?`,
+    [to, target?.server_id ?? null, userId]
+  );
+  const toStage = await getQuery(`SELECT type FROM channels WHERE id = ?`, [to]);
+  if (toStage?.type === 'stage' && !(await canInChannel({ channelId: to, userId, permission: 'MUTE_MEMBERS' }))) {
+    await runQuery(`UPDATE voice_states SET suppress = 1 WHERE user_id = ?`, [userId]);
+  }
+  // The user's room and fetchSockets() both span every instance.
+  io.to(`user-${userId}`).emit('voice_moved', { from, to, reason });
+  const sockets = typeof io.in === 'function' ? await io.in(`user-${userId}`).fetchSockets() : [];
+  for (const sock of sockets) {
+    if (!sock.rooms.has(`voice-${from}`)) continue;
+    sock.leave(`voice-${from}`);
+    sock.join(`voice-${to}`);
+    if (sock.data) sock.data.voiceChannelId = to;
+  }
+  // The client reconnects to the new room with a fresh token; the old media
+  // session must not linger (or keep a moved user audible in the old room).
+  await livekit.removeParticipant(from, userId);
+  await broadcastVoice(io, from);
+  await broadcastVoice(io, to);
+}
+
+/** Disconnect a user from voice entirely (moderator "Disconnect"). */
+export async function disconnectVoiceMember(io, userId, channelId) {
+  let evicted = false;
+  for (const sock of await io.in(`user-${userId}`).fetchSockets()) {
+    if (!sock.rooms.has(`voice-${channelId}`)) continue;
+    await evictFromVoice(io, sock, channelId);
+    evicted = true;
+  }
+  if (!evicted) {
+    // Only on the SFU (joined without a live socket): clear the row and room.
+    await runQuery(`DELETE FROM voice_states WHERE user_id = ? AND channel_id = ?`, [userId, channelId]);
+    await livekit.removeParticipant(channelId, userId, { revoke: true });
+    await broadcastVoice(io, channelId);
+  }
+}
+
+/**
+ * Apply a server mute / deafen. It is stored on the membership (it outlives
+ * the session, as on Discord) and mirrored into the live voice state; the SFU
+ * revokes the corresponding publish/subscribe permission, and the target's
+ * client is told so it can reflect it immediately.
+ */
+export async function setServerVoiceState(io, { serverId, channelId, userId, mute, deaf, by }) {
+  const sets = [];
+  const params = [];
+  if (mute !== undefined) { sets.push('is_mute = ?'); params.push(mute ? 1 : 0); }
+  if (deaf !== undefined) { sets.push('is_deaf = ?'); params.push(deaf ? 1 : 0); }
+  if (!sets.length) return;
+  await runQuery(`UPDATE server_members SET ${sets.join(', ')} WHERE server_id = ? AND user_id = ?`, [...params, serverId, userId]);
+  await runQuery(
+    `UPDATE voice_states SET ${sets.map((s) => s.replace('is_mute', 'server_mute').replace('is_deaf', 'server_deaf')).join(', ')} WHERE user_id = ?`,
+    [...params, userId]
+  );
+  io.to(`user-${userId}`).emit('voice_server_state', {
+    channelId, serverId, by, ...(mute !== undefined ? { serverMute: Boolean(mute) } : {}), ...(deaf !== undefined ? { serverDeaf: Boolean(deaf) } : {})
+  });
+  await livekit.syncParticipantGrants(channelId, userId);
   await broadcastVoice(io, channelId);
 }
 
@@ -1094,11 +1214,13 @@ function clearTyping(io, channelId, userId) {
   io.to(channelId).emit('typing_stop', { channelId, userId });
 }
 
-async function broadcastVoice(io, channelId) {
+export async function broadcastVoice(io, channelId) {
+  if (!channelId) return;
   const participants = await allQuery(
     `SELECT vs.user_id AS "userId", vs.socket_id AS "socketId",
             vs.self_mute AS "isMuted", vs.self_deaf AS "isDeafened",
             vs.self_video, vs.self_stream, vs.joined_at, vs.suppress, vs.request_to_speak_at,
+            vs.server_mute, vs.server_deaf,
             COALESCE(u.display_name, u.username) AS username, u.avatar_url
        FROM voice_states vs JOIN users u ON u.id = vs.user_id
       WHERE vs.channel_id = ?
@@ -1114,6 +1236,8 @@ async function broadcastVoice(io, channelId) {
       isVideo: Boolean(p.self_video),
       isStreaming: Boolean(p.self_stream),
       isSuppressed: Boolean(p.suppress),
+      isServerMuted: Boolean(p.server_mute),
+      isServerDeafened: Boolean(p.server_deaf),
       requestedToSpeakAt: p.request_to_speak_at ?? null,
       isSpeaking: false
     }))
@@ -1235,22 +1359,10 @@ export async function sweepAfk(io) {
       if (Date.now() - lastSpokeAt.get(state.user_id) < timeoutMs) continue;
 
       const from = state.channel_id;
-      await runQuery(`UPDATE voice_states SET channel_id = ? WHERE user_id = ?`, [afkChannel.id, state.user_id]);
       lastSpokeAt.set(state.user_id, Date.now());   // do not bounce them again immediately
-
-      // Tell the moved client so it re-joins the mesh in the new room, then
+      // Tell the moved client so it re-joins the media in the new room, then
       // refresh both rosters.
-      for (const socketId of socketsByUser.get(state.user_id) ?? []) {
-        io.to(socketId).emit('voice_moved', { from, to: afkChannel.id, reason: 'afk' });
-        const sock = io.sockets.sockets.get(socketId);
-        if (sock) {
-          sock.leave(`voice-${from}`);
-          sock.join(`voice-${afkChannel.id}`);
-          sock.data.voiceChannelId = afkChannel.id;
-        }
-      }
-      await broadcastVoice(io, from);
-      await broadcastVoice(io, afkChannel.id);
+      await moveVoiceMember(io, state.user_id, from, afkChannel.id, 'afk');
       moved += 1;
     }
   }
