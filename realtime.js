@@ -30,6 +30,11 @@ import { ApiError, publicError } from './lib/httpUtils.js';
 import { sessionEvents } from './lib/sessionEvents.js';
 // livekit: optional SFU; every call is a no-op when it is not configured.
 import * as livekit from './services/livekit.js';
+import { getLogger } from './lib/logger.js';
+import { bumpMetric } from './lib/middleware.js';
+import { instrumentSocket, recordMessageSent, recordPushSend } from './lib/telemetry.js';
+
+const log = getLogger('realtime');
 
 /** What a socket client may see of an error: never raw database text. */
 const clientError = (err) => publicError(err).body;
@@ -187,7 +192,7 @@ function guardRecovery(io) {
     try {
       return (await recoveryAllowed(session)) ? session : null;
     } catch (err) {
-      console.warn('session recovery check failed:', err.message);
+      log.warn({ err }, 'session recovery check failed');
       return null;
     }
   };
@@ -257,7 +262,7 @@ function scheduleOffline(io, userId) {
     await userService.setPresence({ userId, status: 'offline' });
     await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
   };
-  const fail = (err) => console.error('offline transition failed:', err.message);
+  const fail = (err) => log.error({ err }, 'offline transition failed');
   if (PRESENCE_OFFLINE_GRACE_MS === 0) return run().catch(fail);
   const timer = setTimeout(() => run().catch(fail), PRESENCE_OFFLINE_GRACE_MS);
   timer.unref?.();
@@ -285,7 +290,7 @@ async function flushOfflineTimers(io) {
 function startClusterTimers(io) {
   if (!clustered()) return;
   const beat = setInterval(() => {
-    presence.heartbeat().catch((err) => console.warn('presence heartbeat failed:', err.message));
+    presence.heartbeat().catch((err) => log.warn({ err }, 'presence heartbeat failed'));
   }, Math.floor(presence.PRESENCE_TTL_MS / 3));
   const reaper = setInterval(async () => {
     try {
@@ -308,7 +313,7 @@ function startClusterTimers(io) {
         await broadcastVoice(io, row.channel_id);
       }
     } catch (err) {
-      console.warn('cluster sweep failed:', err.message);
+      log.warn({ err }, 'cluster sweep failed');
     }
   }, 30_000);
   beat.unref?.();
@@ -328,7 +333,7 @@ function startClusterTimers(io) {
 export async function drainRealtime(io) {
   draining = true;
   for (const t of timers.splice(0)) clearInterval(t);
-  await flushOfflineTimers(io).catch((err) => console.warn('offline flush failed:', err.message));
+  await flushOfflineTimers(io).catch((err) => log.warn({ err }, 'offline flush failed'));
   io.emit('server_draining', { reconnect: true, retry_after_ms: 250 + Math.floor(Math.random() * 1750) });
   // Let the frame flush before the transports close.
   await new Promise((r) => setTimeout(r, 100));
@@ -345,7 +350,7 @@ export async function registerRealtime(io) {
   const redis = await initRedis();
   if (redis) {
     await attachSocketAdapter(io, redis);
-    console.log('🔀 realtime: Redis Streams adapter enabled (multi-instance mode)');
+    log.info('realtime: Redis Streams adapter enabled (multi-instance mode)');
   }
   guardRecovery(io);
   startClusterTimers(io);
@@ -353,10 +358,13 @@ export async function registerRealtime(io) {
   // Sessions ended elsewhere (logout, revoke, password change) take their
   // sockets with them.
   sessionEvents.on('revoked', (payload) => {
-    disconnectSessions(io, payload).catch((err) => console.error('session disconnect failed:', err.message));
+    disconnectSessions(io, payload).catch((err) => log.error({ err }, 'session disconnect failed'));
   });
 
   io.on('connection', (socket) => {
+    // Event counters, and a span per event when tracing is on (lib/telemetry.js).
+    instrumentSocket(socket);
+
     // --- flood protection ----------------------------------------------------
     // Cheap per-connection budgets for every inbound event; a connection that
     // keeps flooding after being throttled is dropped. See lib/rateLimit.js.
@@ -376,7 +384,7 @@ export async function registerRealtime(io) {
     // A resumed connection keeps its identity and rooms (re-validated by
     // guardRecovery) but skips `identify`, so re-register it.
     if (socket.recovered) {
-      onRecovered(io, socket).catch((err) => console.error('recovery bookkeeping failed:', err.message));
+      onRecovered(io, socket).catch((err) => log.error({ err }, 'recovery bookkeeping failed'));
     }
 
     // --- identity ------------------------------------------------------------
@@ -496,7 +504,7 @@ export async function registerRealtime(io) {
         ack?.({ ok: true, message });
         fanOutMessage(io, message);
       } catch (err) {
-        console.error('send_message failed:', err.message);
+        log.error({ err, socket_id: socket.id }, 'send_message failed');
         const { error, code } = clientError(err);
         ack?.({ ok: false, error, code });
         socket.emit('message_error', { error, code, nonce: data?.nonce });
@@ -552,7 +560,7 @@ export async function registerRealtime(io) {
         const state = await messageService.markRead({ userId, channelId, messageId });
         io.to(`user-${userId}`).emit('read_state_updated', state);
       } catch (err) {
-        console.error('mark_read failed:', err.message);
+        log.error({ err, socket_id: socket.id }, 'mark_read failed');
       }
     });
 
@@ -602,7 +610,7 @@ export async function registerRealtime(io) {
           custom_status: user.custom_status
         }, { userId, status: user.status, custom_status: user.custom_status });
       } catch (err) {
-        console.error('update_presence failed:', err.message);
+        log.error({ err, socket_id: socket.id }, 'update_presence failed');
       }
     });
 
@@ -1262,7 +1270,7 @@ export function resolveEmbedsInBackground(io, message) {
       const updated = await messageService.attachEmbeds(message.id, embeds);
       if (updated) io.to(message.channel_id).emit('message_updated', updated);
     })
-    .catch((err) => console.warn('embed resolve failed:', err.message));
+    .catch((err) => log.warn({ err: { message: err.message, code: err.code } }, 'embed resolve failed'));
 }
 
 /**
@@ -1276,6 +1284,8 @@ export function resolveEmbedsInBackground(io, message) {
 export function fanOutMessage(io, message) {
   // An idempotent retry resolves to the message that already went out.
   if (message.duplicate) return;
+  bumpMetric('messagesSent');
+  recordMessageSent();
   // An ephemeral reply goes to one person's sockets, never to the channel
   // room — everyone else must not learn it exists.
   if (message.ephemeral) {
@@ -1310,9 +1320,11 @@ export function fanOutMessage(io, message) {
 }
 
 export function pushNotifications(io, message) {
-  for (const notification of message.notifications ?? []) {
+  const notifications = message.notifications ?? [];
+  for (const notification of notifications) {
     io.to(`user-${notification.user_id}`).emit('notification', { ...notification, message });
   }
+  if (notifications.length) recordPushSend('socket', 'ok', notifications.length);
 }
 
 /** Clear stale voice rows left behind by a crash. Call once at boot. */

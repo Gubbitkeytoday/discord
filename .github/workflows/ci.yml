@@ -62,24 +62,33 @@ jobs:
           retention-days: 7
 
   test-sqlite:
-    name: Tests (SQLite)
+    name: Tests (SQLite, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Node 22 is the current floor, Node 24 LTS is what the image ships.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
     env:
       TEST_PORT_BASE: '5200'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm test
 
   test-postgres:
-    name: Tests (PostgreSQL 16)
+    name: Tests (PostgreSQL 16, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
     services:
       postgres:
         # The official image ships the contrib modules, so pg_trgm is available.
@@ -115,7 +124,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.detect.outputs.present == 'true'
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ matrix.node }}
           cache: npm
       - name: npm ci
         if: steps.detect.outputs.present == 'true'
@@ -186,30 +195,54 @@ jobs:
           retention-days: 14
 
   docker:
-    name: Docker image build
+    name: Docker image (build, SBOM, scan, sign)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write          # push to GHCR (only when REGISTRY_IMAGE is set)
+      id-token: write          # keyless cosign signing via GitHub OIDC
+      security-events: write   # upload the vulnerability scan as SARIF
+    env:
+      # Set the repository variable REGISTRY_IMAGE (e.g. ghcr.io/<owner>/antigravity-discord)
+      # to publish. Without it the image is built, scanned and discarded.
+      REGISTRY_IMAGE: ${{ vars.REGISTRY_IMAGE }}
+      PUBLISH: ${{ vars.REGISTRY_IMAGE != '' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build (no push)
+      - name: Build metadata
+        id: meta
+        run: |
+          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Build (load locally)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
           tags: antigravity-discord:ci
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+            VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Smoke test container
+      - name: Smoke test container (read-only root filesystem)
         run: |
           # Production config refuses to boot with the dev STORAGE_URL_SECRET.
-          docker run -d --name app -p 3001:3001 \
+          docker run -d --name app -p 3001:3001 --read-only --tmpfs /tmp \
             -e STORAGE_URL_SECRET="$(openssl rand -base64 32)" \
             antigravity-discord:ci
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:3001/api/live >/dev/null; then
               echo "container is live"
+              curl -fsS http://127.0.0.1:3001/api/ready
+              test "$(docker inspect -f '{{.Config.User}}' app)" != "" || { echo "::error::image runs as root"; exit 1; }
               exit 0
             fi
             sleep 2
@@ -219,6 +252,79 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs app 2>&1 | tail -n 100 || true
+
+      # --- supply chain ---------------------------------------------------------
+      - name: SBOM (syft, SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: antigravity-discord:ci
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom-${{ steps.meta.outputs.sha }}.spdx.json
+      - name: Vulnerability scan (grype)
+        id: scan
+        uses: anchore/scan-action@v6
+        with:
+          image: antigravity-discord:ci
+          # Fail on critical vulnerabilities that have a fix available: those
+          # are actionable (bump the base image or the dependency).
+          severity-cutoff: critical
+          only-fixed: true
+          fail-build: true
+          output-format: sarif
+      - name: Upload scan results
+        if: always() && steps.scan.outputs.sarif != ''
+        # Pull requests from forks get a read-only token; the scan itself
+        # still gates the build.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: container-image
+
+      # --- publish + sign (main only, and only with a registry configured) ------
+      - name: Log in to the registry
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ startsWith(vars.REGISTRY_IMAGE, 'ghcr.io/') && 'ghcr.io' || vars.REGISTRY_HOST }}
+          username: ${{ startsWith(vars.REGISTRY_IMAGE, 'ghcr.io/') && github.actor || secrets.REGISTRY_USERNAME }}
+          password: ${{ startsWith(vars.REGISTRY_IMAGE, 'ghcr.io/') && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASSWORD }}
+      - name: Push
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.sha }}
+            ${{ env.REGISTRY_IMAGE }}:latest
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+            VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+      - uses: sigstore/cosign-installer@v3
+        if: env.PUBLISH == 'true'
+      - name: Sign image and attach SBOM (keyless)
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          ref="${REGISTRY_IMAGE}@${DIGEST}"
+          cosign sign --yes "$ref"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$ref"
+          {
+            echo "### Published"
+            echo "\`$ref\`"
+            echo
+            echo "Verify: \`cosign verify $ref --certificate-identity-regexp '^${{ github.server_url }}/${{ github.repository }}/' --certificate-oidc-issuer https://token.actions.githubusercontent.com\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   audit:
     name: npm audit

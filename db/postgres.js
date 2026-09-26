@@ -22,6 +22,9 @@ import fs from 'fs';
 import { AsyncLocalStorage } from 'async_hooks';
 import { toPgPlaceholders } from './dialect.js';
 import { createMutex } from './sqlite.js';
+import { getLogger } from '../lib/logger.js';
+
+const log = getLogger('db.postgres');
 
 const OID = {
   BOOL: 16, INT8: 20, JSON: 114, NUMERIC: 1700, TIMESTAMP: 1114, TIMESTAMPTZ: 1184, JSONB: 3802
@@ -155,7 +158,7 @@ export function createPgDriver(env = process.env, { quiet = false } = {}) {
   // An idle client can die (server restart, network blip). Without a listener
   // that error would crash the process; the pool already discards the client.
   pool.on('error', (err) => {
-    console.error('⚠️  PostgreSQL idle client error:', err.message);
+    log.error({ err: { message: err.message, code: err.code } }, 'PostgreSQL idle client error');
   });
 
   // Session settings every connection needs, applied once per physical
@@ -197,7 +200,7 @@ export function createPgDriver(env = process.env, { quiet = false } = {}) {
       if (!announced) {
         announced = true;
         const { host, port, database } = target();
-        console.log(`🐘 Connected to PostgreSQL: ${database} @ ${host}:${port}`);
+        log.info({ database, host, port }, 'connected to PostgreSQL');
       }
     }
     return client;
@@ -384,6 +387,7 @@ export function createPgDriver(env = process.env, { quiet = false } = {}) {
     inTransaction: () => Boolean(current()),
     ping,
     close,
-    info: () => ({ driver: 'postgres', ...target(), pool_max: poolConfig.max })
+    info: () => ({ driver: 'postgres', ...target(), pool_max: poolConfig.max }),
+    poolStats: () => ({ total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount, max: poolConfig.max })
   };
 }

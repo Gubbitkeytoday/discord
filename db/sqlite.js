@@ -23,6 +23,9 @@
 import sqlite3 from 'sqlite3';
 import path from 'path';
 import { AsyncLocalStorage } from 'async_hooks';
+import { getLogger } from '../lib/logger.js';
+
+const log = getLogger('db.sqlite');
 
 const noop = () => {};
 
@@ -48,10 +51,10 @@ export function createSqliteDriver({ dbPath, verbose = false, quiet = false }) {
 
   const writer = new S.Database(dbPath, (err) => {
     if (err) {
-      console.error('❌ Error opening SQLite database:', err.message);
+      log.fatal({ err: { message: err.message, code: err.code } }, 'cannot open SQLite database');
       process.exit(1);
     }
-    if (!quiet) console.log(`🗄️  Connected to SQLite database: ${path.basename(dbPath)}`);
+    if (!quiet) log.info({ file: path.basename(dbPath) }, 'connected to SQLite database');
   });
   // Statements on the writer run strictly in submission order.
   writer.serialize();

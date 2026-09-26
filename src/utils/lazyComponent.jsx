@@ -22,6 +22,7 @@ class ChunkBoundary extends Component {
   componentDidCatch(error) {
     if (!isChunkLoadError(error)) return;
     console.error('Failed to load a part of the app:', error);
+    globalThis.__agTelemetry?.captureException(error);
     this.props.onError?.();
   }
 

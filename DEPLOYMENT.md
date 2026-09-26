@@ -391,7 +391,7 @@ translation audit.
 | Endpoint | Purpose | Use for |
 | --- | --- | --- |
 | `/api/live` | process is up; does **not** touch the database | liveness probe |
-| `/api/ready` | database reachable; 503 while draining | readiness probe, load-balancer check |
+| `/api/ready` | database reachable, Redis answers (only if `REDIS_URL` is set), enough free disk for uploads / the SQLite file; 503 while draining. Details under `checks` | readiness probe, load-balancer check |
 | `/api/health` | detailed status, including `database: { driver, reachable, latency_ms, pool }`; 503 if the database is unreachable | humans, dashboards |
 | `/metrics` | Prometheus text exposition | scraping |
 
@@ -405,11 +405,16 @@ Still scrape it over a private network where you can.
 
 Exported metrics include request counts by method and status, p50/p95/p99
 latency, 5xx count, live WebSocket connections, messages sent, uploads and
-process memory.
+process memory, plus (prom-client) a route-templated request-duration
+histogram, database call timings and errors, pool usage, voice participants,
+socket events, notification deliveries, disk free per volume, browser Web
+Vitals and the standard Node.js process/event-loop metrics. The full list,
+tracing, dashboards and alerts are in [Observability](#14-observability).
 
 Logs are JSON in production (`LOG_FORMAT=json`), one object per line, each with a
 `request_id` that is also returned in the `X-Request-Id` response header — so a
-user-reported failure can be found in the logs.
+user-reported failure can be found in the logs. Passwords, tokens, cookies,
+e-mail addresses and message content are redacted before a line is written.
 
 ### Backups
 
@@ -441,8 +446,26 @@ npm run backup:restore backups/discord-20260801-040845.db -- --force
 The previous database is renamed aside rather than deleted. Migrations run
 automatically on the next connect.
 
-**In Docker**, snapshots go to the `app-backups` volume (`BACKUP_DIR=/backups`),
-separate from the data volume, so recreating the container keeps them:
+**In Docker with PostgreSQL** (the compose default): the app image is
+distroless and ships no `pg_dump`, so dump the database from the `postgres`
+container, which always has tools matching the server, and copy the uploads
+out of the app container (`docker compose cp` works without a shell):
+
+```bash
+mkdir -p backups
+docker compose exec -T postgres pg_dump -U antigravity -d antigravity --format=custom \
+  > backups/discord-$(date +%Y%m%d-%H%M%S).dump
+docker compose cp app:/data/uploads ./backups/uploads-$(date +%F)
+# copy them off the host — a backup on the same disk is not a backup
+```
+
+Restore: `docker compose stop app` (and `app-2` with the `scale` profile), then
+`docker compose exec -T postgres pg_restore -U antigravity -d antigravity --clean --if-exists --single-transaction < backups/<file>.dump`,
+then `docker compose start app`.
+
+**In Docker with SQLite** (`DATABASE_URL=` empty), snapshots go to the
+`app-backups` volume (`BACKUP_DIR=/backups`), separate from the data volume, so
+recreating the container keeps them:
 
 ```bash
 docker compose exec app node scripts/backup.mjs create --files
@@ -566,7 +589,7 @@ posters).
 | Renditions | WebP at `MEDIA_WIDTHS` (160/480/960/1920, never enlarged); avatars and server icons square-cropped to 64/128/256/512; emoji 48/96/160 and stickers 160/320 fitted, never cropped; animated GIF/WebP → animated WebP up to 640 px plus a still |
 | AVIF | same widths, in the background at effort 2 (`MEDIA_AVIF=0` turns it off). Measured per 1920 px rendition on one core: WebP ~0.65 s, AVIF effort 2 ~1.35 s, effort 4 (sharp's default) ~9 s |
 | HEIC | recognised and metadata-stripped; prebuilt sharp cannot decode HEVC, so HEIC stays a downloadable file (and is refused for avatars/emoji) unless sharp is built against a libheif with HEVC |
-| Video | dimensions (also from the MP4/WebM header without ffmpeg), duration, and a poster frame via system ffmpeg/ffprobe. The Docker image installs ffmpeg only with `--build-arg WITH_FFMPEG=1` (it adds a few hundred MB to the image) |
+| Video | dimensions (also from the MP4/WebM header without ffmpeg), duration, and a poster frame via system ffmpeg/ffprobe. The Docker image includes ffmpeg only with `--build-arg WITH_FFMPEG=1`: the runtime is distroless (no apt), so static `ffmpeg`/`ffprobe` binaries are copied from `FFMPEG_IMAGE` (default `mwader/static-ffmpeg:8.1.2`) into `/usr/local/bin`; the default build pulls nothing extra |
 
 Serving: `GET /api/media/:id?w=<px>` picks the smallest rendition at least
 `w` wide, in AVIF → WebP → original order by the request's `Accept` (wildcards
@@ -1059,3 +1082,201 @@ only the sender, or nothing private. Subscriptions the push service reports as
 gone (404/410) are deleted. On iPhone/iPad, push works only after "Add to Home
 Screen" (iOS 16.4+); the app explains this instead of offering a prompt that
 cannot work.
+
+---
+
+## 14. Observability
+
+Everything in this section is **optional and off by default**: with none of
+the variables below set, the app behaves exactly as before (JSON logs on
+stdout, `/metrics`, health endpoints). Each piece switches on independently.
+
+### Logs
+
+Structured JSON (pino) in production, a readable one-line format in
+development (`LOG_FORMAT=json|pretty`, `LOG_LEVEL=trace|debug|info|warn|error|fatal|silent`).
+Every line written while handling a request or a socket event carries that
+request's `request_id` (and `trace_id`/`span_id` when tracing is on). Keys such
+as `password`, `token`, `authorization`, `cookie`, `email`, `content` are
+replaced with `[REDACTED]` at any depth, and strings are scrubbed for e-mail
+addresses, bearer tokens, credentials in URLs and token query parameters. IP
+addresses and user ids are kept (security investigation needs them): set a log
+retention that matches your privacy notice.
+
+### Metrics
+
+`/metrics` (behind `METRICS_TOKEN` in production) now combines the original
+`app_*` series with prom-client's. Useful ones:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `app_http_request_duration_seconds` | histogram | `method`, `route` (template, e.g. `/api/channels/:channelId/messages`), `status_code` |
+| `app_db_query_duration_seconds`, `app_db_query_errors_total` | histogram, counter | `driver`, `operation` (run/get/all/exec/transaction) |
+| `app_db_pool_connections` | gauge | `state` = total/idle/waiting/max (PostgreSQL) |
+| `app_socket_connections`, `app_socket_events_total` | gauge, counter | `event` |
+| `app_messages_sent_total` | counter | — |
+| `app_voice_participants` | gauge | — |
+| `app_push_sends_total` | counter | `channel`, `result` |
+| `app_disk_free_bytes`, `app_disk_total_bytes` | gauge | `volume` = storage/database |
+| `app_web_vitals_{lcp,inp,fcp,ttfb}_seconds`, `app_web_vitals_cls` | histogram | `rating` |
+| `nodejs_eventloop_lag_seconds`, `process_*`, `nodejs_*` | prom-client defaults | — |
+
+### Tracing (OpenTelemetry)
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `http://lgtm:4318`) and start
+Node with the preload — the Docker image always does:
+
+```bash
+NODE_OPTIONS="--import ./lib/otel-preload.mjs" npm start
+```
+
+You get HTTP server spans, Express route spans and `pg` query spans
+(auto-instrumented), one span per database adapter call on both SQLite and
+PostgreSQL (statement text with literals stripped, **never** parameters), one
+span per inbound Socket.IO event, the metrics above pushed over OTLP (same
+series names after Prometheus' OTLP translation, so the dashboard works either
+way), and the logs as OTLP log records correlated with their traces
+(`OTEL_LOGS_EXPORTER=none` keeps logs on stdout only). All standard `OTEL_*`
+variables apply; in production sample, e.g.
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1`.
+Without the endpoint the SDK is not loaded at all (a test asserts this).
+Without the preload (plain `npm start` with the endpoint set) database/socket
+spans and metrics still work; HTTP/Express/pg auto-instrumentation does not,
+and the log says so.
+
+### Error tracking (Sentry protocol — GlitchTip or Sentry)
+
+- `SENTRY_DSN` — server: 5xx errors, uncaught exceptions and unhandled
+  rejections, tagged with `request_id`, route and a pseudonymous user id.
+  Request headers, cookies, bodies, e-mails and IPs are removed before sending.
+- `SENTRY_BROWSER_DSN` — browser: `@sentry/browser` is downloaded **only**
+  when this is set (a lazily loaded chunk), errors only (no replay, no
+  tracing), PII scrubbed in the browser and again on the server, which
+  tunnels the reports (`POST /api/telemetry/errors`), so the CSP needs no
+  change. Envelopes for any other DSN are refused.
+- Release = `APP_RELEASE` (the image sets it to the git sha).
+
+Self-hosting [GlitchTip](https://glitchtip.com) (Sentry-compatible, much
+lighter than self-hosted Sentry) takes a Postgres, a Redis/Valkey and two
+containers; create one project for the server and one for the browser and
+paste their DSNs.
+
+### Web Vitals
+
+For `WEB_VITALS_SAMPLE_RATE` of page loads (default 0.25) the client sends LCP,
+INP, CLS, FCP and TTFB as one `sendBeacon` to `POST /api/telemetry/vitals` when
+the page is hidden. Only name, value and rating are accepted (no URL, user
+agent or user id); the endpoint validates ranges, caps the payload at 4 KB and
+is rate-limited per IP (`RATE_LIMIT_VITALS_PER_MIN`, default 30). Turn it off
+with `WEB_VITALS_ENABLED=0`.
+
+### The bundled stack: compose `observability` profile
+
+```bash
+# .env
+OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318
+GRAFANA_ADMIN_PASSWORD=<openssl rand -base64 24>
+
+docker compose --profile observability up -d
+ssh -L 3000:127.0.0.1:3000 you@host      # then open http://localhost:3000
+```
+
+`grafana/otel-lgtm` runs Grafana, Prometheus, Tempo, Loki and an OpenTelemetry
+Collector in one container, pre-provisioned with the **Antigravity Discord —
+Overview** dashboard (`ops/grafana/dashboards/`) and alert rules
+(`ops/alerts/grafana-alerting.yml`). Grafana is bound to `127.0.0.1` and has
+anonymous access disabled; the OTLP ports are not published. Add a contact
+point (Alerting → Contact points) so alerts reach someone. It is sized for one
+small node; for longer retention or several hosts send OTLP to a managed or
+dedicated backend instead — only the endpoint changes.
+
+Already run Prometheus? Scrape `/metrics` with the bearer token and load
+`ops/alerts/antigravity.rules.yml` (`promtool check rules` passes); import the
+dashboard JSON into your Grafana. Panels marked "scrape only" use series that
+only the scrape provides (process CPU/memory, event-loop p99, in-flight
+queries).
+
+### Alerts and runbooks
+
+| Alert | Fires when | Runbook |
+| --- | --- | --- |
+| AntigravityDown | no telemetry for 5 min | `ops/runbooks/db-down.md` |
+| AntigravityHighErrorRate | > 5% 5xx for 10 min | `ops/runbooks/high-latency.md` |
+| AntigravityHighLatency | p95 > 1 s for 10 min | `ops/runbooks/high-latency.md` |
+| AntigravityDatabaseErrors | > 0.5 failed DB calls/s | `ops/runbooks/db-down.md` |
+| AntigravityEventLoopLag / SlowQueries / DbPoolSaturated | loop > 200 ms, DB p95 > 250 ms, pool queueing | `ops/runbooks/high-latency.md` |
+| AntigravityDiskLow / DiskCritical | < 10% / < 3% free | `ops/runbooks/disk-full.md` |
+| AntigravitySocketsDropped | sockets halve in 10 min | `ops/runbooks/turn-livekit.md` |
+
+Also in `ops/runbooks/`: restoring from backup, and the **PDPA 72-hour breach
+notification** checklist.
+
+### Container hardening
+
+The image is `gcr.io/distroless/nodejs24-debian13:nonroot`: no shell, no
+package manager, non-root (uid 1000), `tini` as PID 1, a `HEALTHCHECK` on `/api/live`,
+OCI labels (`org.opencontainers.image.revision` = git sha). It runs with a
+read-only root filesystem — the app writes only to `/data` and `/backups`:
+
+```yaml
+  app:
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+```
+
+Optional ffmpeg for the media pipeline: `docker build --build-arg WITH_FFMPEG=1 .`
+(static binaries, see [Media pipeline](#7a-media-pipeline)). The image has no
+`pg_dump`; back up PostgreSQL from the `postgres` container (see
+[Backups](#backups)).
+
+There is no shell, so debug with `docker compose exec app node -e "…"` or
+`docker debug` rather than `sh`. CI publishes an SPDX SBOM for every build,
+scans the image (grype; fails on fixable critical CVEs) and, when the
+`REGISTRY_IMAGE` repository variable is set, pushes on `main` and signs the
+image keylessly with cosign. Verify before deploying:
+
+```bash
+cosign verify <registry>/<image>@<digest> \
+  --certificate-identity-regexp '^https://github.com/<owner>/<repo>/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+---
+
+## 15. Upgrading
+
+### To this release (Node 24, distroless image)
+
+- **Runtime is Node.js 24 LTS.** CI tests on Node 22 and 24; outside Docker
+  either works (`engines` still allows >= 20.17, but test on 22+). The full test
+  suite passes on Node 24.21 with the same prebuilt `sqlite3` 6.x and `sharp`
+  binaries (both are N-API, so no rebuild is needed when switching majors).
+- **Base images:** build `node:24-trixie-slim`, run
+  `gcr.io/distroless/nodejs24-debian13:nonroot`. Both are Debian 13 (glibc
+  2.41), which the `sqlite3` 6.x prebuilt binaries require (≥ 2.38; bookworm
+  had 2.36). If the prebuilt does not load, the build compiles it from source.
+- **Volume ownership is unchanged:** the process still runs as uid 1000
+  (the old image's `node` user), so existing volumes need nothing. If you run
+  with a different `user:`, `chown -R` the `app-data` and `app-backups`
+  volumes to it first.
+
+- **No shell in the container:** scripts that ran `docker compose exec app sh -c …`
+  must call `node` directly (`docker compose exec app node scripts/backup.mjs …`).
+  With PostgreSQL, run `pg_dump` in the `postgres` container (see [Backups](#backups)).
+- **Logs** are pino JSON: the same `request_id`, `level`, `time` fields, with
+  `msg` instead of free text and HTTP access fields nested under `http`.
+  Adjust log queries that matched the old emoji-prefixed messages.
+- `/api/ready` now also fails on critically low disk (`READY_DISK_MIN_FREE_MB`)
+  and, if `REDIS_URL` is set, on Redis. `/api/health` and `/metrics` are
+  backward compatible.
+
+### Any release
+
+1. Read the release notes for schema changes; **back up first** (migrations are forward-only).
+2. `git pull && docker compose up -d --build` (or pull the signed image by digest).
+3. Watch `/api/ready` and the dashboard's 5xx/latency panels for 15 minutes.
+4. Roll back by redeploying the previous image; restore the backup only if a
+   migration ran and the old code cannot read the new schema
+   (`ops/runbooks/restore-from-backup.md`).
