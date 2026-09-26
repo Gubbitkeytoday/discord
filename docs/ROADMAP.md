@@ -33,6 +33,47 @@ AutoMod preset + สแกนชื่อโปรไฟล์, ระบบเ�
 E2EE ของข้อความ, แอป native iOS/Android (ใช้ PWA แทน), สแกน CSAM เอง (ใช้ Cloudflare CSAM tool แทน),
 ระบบรายได้/Nitro, age verification ด้วยบัตรประชาชน, และการย้ายไป multi-node/Postgres ก่อนที่ metrics จะบอกว่าจำเป็น
 
+**ความคืบหน้า (26 ก.ย. 2026):** ทำเสร็จแล้ว — PWA + Web Push (P0-1), เติมข้อความที่พลาดหลัง reconnect (P0-2),
+LiveKit SFU (P1-2), metrics + OpenTelemetry + dashboard (P1-8), media pipeline (P1-9), passkeys (P1-10),
+และ PostgreSQL + Redis สำหรับหลาย instance (P2) · ทำไปบางส่วน — TURN (มี endpoint และ coturn profile แต่ยังไม่เปิดเป็นค่าเริ่มต้น),
+ป้องกัน fan-out + load test, สำรองข้อมูล (มีสคริปต์ Docker + restore drill แต่ยังไม่มี gauge อายุ backup),
+code-split (ยังไม่ virtualize) · ยังไม่เริ่ม — โหมดการสมัคร/captcha (P0-4), หน้า admin ระดับ instance (P0-5),
+Privacy Policy/retention (P0-8), AutoMod preset, สิทธิ์ใหม่ของ Discord, `Intl.Segmenter`, `role="log"`
+
+---
+
+## Status (2026-09-26)
+
+Checked against the code on `claude/dreamy-goldberg-p3o5ao` (schema v38). ✅ done · 🟡 partial · ⬜ not started.
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| P0-1 PWA + Web Push | ✅ | Manifest, service worker with offline shell, VAPID push (`services/push.js`), per-device settings; `npm run e2e:pwa` in CI |
+| P0-2 Missed-event recovery | ✅ | Socket.IO connection-state recovery (`SOCKET_RECOVERY_MS`), REST catch-up after a restart, reconnect banner; covered by `e2e:integration` |
+| P0-3 TURN by default | 🟡 | `GET /api/voice/ice-servers` mints per-user TURN REST credentials; coturn `turn` compose profile (TLS off, NAT guidance incl. NAS). Not on by default; no `turn:check` script or boot warning yet |
+| P0-4 Registration modes / PoW captcha | ⬜ | Only a per-IP registration rate limit (`RATE_LIMIT_REGISTER_PER_HOUR`) |
+| P0-5 Instance admin console | ⬜ | `ADMIN_TOKEN` API endpoints only |
+| P0-6 Fan-out protection + load test | 🟡 | Per-socket flood guard with per-event budgets, write admission control, presence scoped to related users, load suite in `scripts/load/`; steady chat now holds 500 users at 50 msg/s with 0 errors (docs/PERFORMANCE.md). No kill-switch env vars |
+| P0-7 Proven backups + runbook | 🟡 | `npm run backup` (SQLite `VACUUM INTO` / `pg_dump`), `scripts/ops/docker-backup.sh backup/verify/restore/drill` (restore drill into a scratch database), `ops/runbooks/`. No backup-age gauge or CI restore job |
+| P0-8 Privacy policy / consent / retention | ⬜ | Export and anonymising deletion exist (`services/dataRights.js`) |
+| P1-1 Code-split + virtualize | 🟡 | Lazy-loaded settings, voice, forum, modals and vendor chunks; message list not virtualized |
+| P1-2 LiveKit SFU | ✅ | `livekit` profile, server-side token minting after permission checks, simulcast, optional media E2EE |
+| P1-3 AutoMod presets + profile scanning | ⬜ | |
+| P1-4 Enforcement notices + appeals | ⬜ | |
+| P1-5 Permission bits parity (2025–26) | ⬜ | `PIN_MESSAGES`, `BYPASS_SLOWMODE` not yet split out |
+| P1-6 Thai-aware text (`Intl.Segmenter`) | ⬜ | Thai search works (trigram); no segmenter-based highlighting/truncation |
+| P1-7 Screen-reader pass (`role="log"`) | ⬜ | Static `npm run a11y` audit only |
+| P1-8 Metrics + OpenTelemetry | ✅ | prom-client metrics, OTel traces/metrics/logs, Sentry-protocol errors, Web Vitals, Grafana dashboard + alert rules (`observability` profile) |
+| P1-9 Media pipeline | ✅ | EXIF strip, WebP/AVIF renditions, thumbhash, posters via optional ffmpeg, immutable content-addressed URLs; message attachments now carry the rendition/thumbhash fields |
+| P1-10 Security follow-ups | 🟡 | Passkeys ✅, `npm audit --omit=dev` gate, container scan with grype, CORP on uploads; `style-src 'unsafe-inline'` remains |
+| P2 Horizontal scale | ✅ | PostgreSQL + Socket.IO Redis Streams adapter + shared rate limits/presence (`scale` profile), with command timeouts and a local fallback when Redis stalls |
+| P2 others | ⬜ | Discord import, Meilisearch, catch-up view, activities, scheduled messages |
+
+Self-hosting polish from the persona study (docs/ux-personas/selfhosters-power.md) also landed:
+a boot alert for Secure cookies over plain http, `HTTP_PORT`/`HTTPS_PORT` and a `no-proxy`
+compose profile for NAS devices, a Synology/QNAP guide, `npm run secrets`, a working
+`npm run seed`, and a generated environment reference.
+
 ---
 
 ## Guiding principles

@@ -8,7 +8,7 @@
 
 import { runQuery, getQuery, allQuery, transaction, sql, isPostgres } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
-import { getFile, addReference, releaseReference, formatBytes } from '../storageService.js';
+import { withUrls, addReference, releaseReference, formatBytes } from '../storageService.js';
 import { validateEmbeds, validateComponents } from './applications.js';
 import { getFileType } from '../lib/mediaProbe.js';
 import { ApiError } from '../lib/httpUtils.js';
@@ -113,27 +113,94 @@ function normaliseWaveform(input) {
   return points.join(',');
 }
 
-function attachmentToWire(row) {
+/**
+ * The wire shape of one attachment. `row` is the attachments row; `file` is
+ * the files row resolved through storageService.withUrls (null when the file
+ * is gone). Media fields come from the file, because the media pipeline fills
+ * them in *after* the message is posted (dimensions of a HEIC, a video's
+ * poster, renditions finishing in the background) — the copies on the
+ * attachments row are only what was known at send time.
+ *
+ * Everything the client needs to render without layout shift and at the right
+ * size, matching the /api/upload descriptor (routes/files.js toDescriptor):
+ *   width/height    display size, EXIF orientation applied
+ *   thumbhash       ~25-byte placeholder (base64), `placeholder` the older data URI
+ *   renditions      [{ format, width, height, url, … }] and `srcset` per format
+ *   display_url     /api/media/<id>: best format for the browser (?w=<px>)
+ *   poster_url      first frame of a video
+ *   media_status    'ready' | 'processing' | 'failed' | 'unsupported' | null
+ *   download_url    the original, as an attachment
+ */
+function attachmentToWire(row, file = null) {
+  const variants = file?.variants ?? {};
   return {
     id: row.id,
     file_id: row.file_id,
-    url: row.url,
-    thumbnail_url: row.thumbnail_url ?? row.url,
+    url: file?.url ?? null,
+    thumbnail_url: variants.thumb?.url ?? variants.medium?.url ?? file?.url ?? null,
+    download_url: file?.download_url ?? (row.file_id ? `/api/files/${row.file_id}?download=1` : null),
+    display_url: file?.display_url ?? null,
+    poster_url: variants.poster?.url ?? null,
     filename: row.filename,
-    file_type: getFileType(row.content_type),
+    // withUrls downgrades undisplayable media (HEIC without a decoder) to 'file'.
+    file_type: file?.file_type ?? getFileType(row.content_type),
     mimetype: row.content_type,
     size: row.size,
     size_human: formatBytes(row.size ?? 0),
-    width: row.width,
-    height: row.height,
-    duration_secs: row.duration_secs,
+    width: file?.width ?? row.width,
+    height: file?.height ?? row.height,
+    duration_secs: file?.duration_secs ?? row.duration_secs,
+    is_animated: Boolean(file?.is_animated),
     // Present only on a voice note; its presence is what tells the client to
     // render a player instead of a file chip.
     waveform: row.waveform ? row.waveform.split(',').map(Number) : null,
-    placeholder: row.placeholder ?? null,
+    placeholder: file?.blurhash ?? null,
+    thumbhash: file?.thumbhash ?? null,
+    media_status: file?.media_status ?? null,
+    renditions: file?.renditions ?? [],
+    srcset: file?.srcset ?? {},
     description: row.description,
     is_spoiler: Boolean(row.is_spoiler)
   };
+}
+
+/**
+ * files + file_variants + file_renditions for many ids in three queries —
+ * the same result as storageService.getFile() per id (which is three queries
+ * *each*, and was the N+1 in hydrate: docs/PERFORMANCE.md, "Smaller items").
+ */
+async function loadFilesWithUrls(fileIds) {
+  const ids = [...new Set(fileIds.filter(Boolean))];
+  const byId = new Map();
+  if (!ids.length) return byId;
+  const marks = ids.map(() => '?').join(',');
+  const [files, variants, renditions] = await Promise.all([
+    allQuery(`SELECT * FROM files WHERE id IN (${marks}) AND deleted_at IS NULL`, ids),
+    allQuery(
+      `SELECT file_id, kind, storage_key, mime_type, width, height, size
+         FROM file_variants WHERE file_id IN (${marks})`,
+      ids
+    ),
+    allQuery(
+      `SELECT file_id, bucket, format, storage_key, mime_type, width, height, size, animated
+         FROM file_renditions WHERE file_id IN (${marks}) ORDER BY format, bucket`,
+      ids
+    )
+  ]);
+  const group = (rows) => {
+    const map = new Map();
+    for (const { file_id: fileId, ...rest } of rows) {
+      if (!map.has(fileId)) map.set(fileId, []);
+      map.get(fileId).push(rest);
+    }
+    return map;
+  };
+  const variantsByFile = group(variants);
+  const renditionsByFile = group(renditions);
+  for (const file of files) {
+    byId.set(file.id, withUrls(file, variantsByFile.get(file.id) ?? [], renditionsByFile.get(file.id) ?? []));
+  }
+  return byId;
 }
 
 /**
@@ -160,16 +227,12 @@ async function hydrate(rows, viewerId = null) {
     )
   ]);
 
-  // Resolve URLs through the storage layer so visibility rules are respected.
+  // Resolve URLs through the storage layer (withUrls) so visibility rules are
+  // respected — batched: three queries for every attachment on the page.
+  const filesById = await loadFilesWithUrls(attachmentRows.map((row) => row.file_id));
   const attachmentsByMessage = new Map();
   for (const row of attachmentRows) {
-    const file = await getFile(row.file_id);
-    const wire = attachmentToWire({
-      ...row,
-      url: file?.url ?? null,
-      placeholder: file?.blurhash ?? null,
-      thumbnail_url: file?.variants?.thumb?.url ?? file?.variants?.medium?.url ?? file?.url ?? null
-    });
+    const wire = attachmentToWire(row, filesById.get(row.file_id) ?? null);
     if (!attachmentsByMessage.has(row.message_id)) attachmentsByMessage.set(row.message_id, []);
     attachmentsByMessage.get(row.message_id).push(wire);
   }
@@ -413,23 +476,38 @@ export async function createMessage({
   }
 
   // Client-supplied nonce makes retries idempotent: a dropped ack must not
-  // produce a duplicate message.
-  if (nonce) {
+  // produce a duplicate message. The unique index idx_messages_nonce
+  // (channel_id, user_id, nonce) is the check: the INSERT below does nothing
+  // on a conflict, so an ordinary send no longer pays a SELECT first. This
+  // looks up the original only once we know there is one.
+  const replayOf = async () => {
+    if (!nonce) return null;
     const existing = await getQuery(
       `SELECT id FROM messages WHERE channel_id = ? AND user_id = ? AND nonce = ?`,
       [channelId, userId, nonce]
     );
-    if (existing) {
-      // A retried send must not fan out again — the first attempt already did.
-      return withDelivery(await getMessage(existing.id, userId), {
-        notifications: [], audience: [], duplicate: true
-      });
+    if (!existing) return null;
+    // A retried send must not fan out again — the first attempt already did.
+    return withDelivery(await getMessage(existing.id, userId), {
+      notifications: [], audience: [], duplicate: true
+    });
+  };
+
+  // Moderation runs before anything is written, so a blocked message never
+  // exists — not even as a soft-deleted row. A retry of a send that already
+  // went through can trip slowmode (the original *is* the last message); it
+  // gets the original back rather than an error.
+  if (!skipModeration) {
+    try {
+      await moderate();
+    } catch (err) {
+      const replay = await replayOf();
+      if (replay) return replay;
+      throw err;
     }
   }
 
-  // Moderation runs before anything is written, so a blocked message never
-  // exists — not even as a soft-deleted row.
-  if (!skipModeration) {
+  async function moderate() {
     // The access check above already resolved the sender's roles.
     const { roleIds } = senderRoleIds
       ? { roleIds: senderRoleIds }
@@ -472,17 +550,25 @@ export async function createMessage({
   const messageId = generateId();
   let notifications = [];
 
+  let duplicateNonce = false;
   await transaction(async () => {
-    await runQuery(
+    duplicateNonce = false;   // the callback can be retried
+    const inserted = await runQuery(
       `INSERT INTO messages (id, channel_id, server_id, user_id, content, type,
                              reply_to_id, mention_everyone, tts, nonce, sticker_id,
                              embeds, components, application_id, ephemeral_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${nonce ? ' ON CONFLICT DO NOTHING' : ''}`,
       [messageId, channelId, channel.server_id, userId, trimmed,
        replyToId ? 'reply' : type, replyToId, mentions.everyone ? 1 : 0, tts ? 1 : 0, nonce,
        sticker?.id ?? null, JSON.stringify(richEmbeds), JSON.stringify(messageComponents),
        applicationId, ephemeralUserId]
     );
+    // Same (channel, author, nonce) already stored: this is a retry. Write
+    // nothing else; the original is returned below.
+    if (nonce && Number(inserted?.changes) === 0) {
+      duplicateNonce = true;
+      return;
+    }
 
     await indexForSearch(messageId, channelId, trimmed);
 
@@ -585,6 +671,13 @@ export async function createMessage({
     // would make every concurrent send in a busy channel conflict on the
     // channel row and retry.
   }, { isolation: 'read committed' });
+
+  if (duplicateNonce) {
+    const replay = await replayOf();
+    if (replay) return replay;
+    // Unreachable unless the original was hard-deleted in between.
+    throw new ApiError('A message with this nonce is already being sent', { status: 409, code: 'DUPLICATE_NONCE' });
+  }
 
   // Everyone else in the channel gains an unread (lazily: last_message_id
   // moved past their marker), a mention badge if named, and whatever their

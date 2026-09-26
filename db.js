@@ -19,6 +19,7 @@ import { DISCORD_EPOCH } from './lib/snowflake.js';
 import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
 import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
+import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
 
@@ -664,6 +665,20 @@ const MIGRATIONS = [
       );
       await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
     }
+  }
+  // safety (v39–v40): age, instance admin, report routing, message requests,
+  // instance settings + audit log. See db/migrations/safety.js.
+  ,{
+    version: 39,
+    name: 'safety: age, instance admin, report routing, message requests',
+    up: () => safetyV39Sqlite({ runQuery, allQuery }),
+    postgres: () => safetyV39Postgres({ runQuery })
+  }
+  ,{
+    version: 40,
+    name: 'safety: instance settings and admin audit log',
+    up: () => safetyV40Sqlite({ runQuery }),
+    postgres: () => safetyV40Postgres({ runQuery })
   }
 ];
 

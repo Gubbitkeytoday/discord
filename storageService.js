@@ -1064,6 +1064,8 @@ function makeUploader(category, { maxFiles = 1 } = {}) {
   const rules = CATEGORY_RULES[category];
   return multer({
     storage: multer.memoryStorage(),
+    // Browsers send non-ASCII filenames (Thai etc.) as UTF-8.
+    defParamCharset: 'utf8',
     limits: { fileSize: rules.maxSize, files: maxFiles, fields: 20 },
     fileFilter: (req, file, cb) => {
       // Cheap pre-filter on the declared type; storeFile does the real check.

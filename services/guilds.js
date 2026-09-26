@@ -15,6 +15,7 @@ import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { normaliseColor } from '../lib/validate.js';
 import { proxiedImageUrl } from '../lib/mediaUrls.js';
+import { publicStatus } from '../lib/presence.js'; // safety: invisible → offline
 import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
@@ -247,15 +248,19 @@ export async function getServerDetail(serverId, viewerId = null) {
     .filter((c) => c.type === 'category')
     .map((c) => ({ id: c.id, name: c.name, position: c.position }));
 
-  const memberRows = await allQuery(
+  // No bio here: a member list is seen by every member, and a bio set to
+  // "friends only" must not leak through it (the profile endpoint applies
+  // visibility). Status goes through publicStatus: "invisible" is shown as
+  // offline to everyone but its owner.
+  const memberRows = (await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
-            u.status, u.custom_status, u.bio, u.is_bot,
+            u.status, u.custom_status, u.is_bot,
             sm.nickname, sm.avatar_url AS member_avatar_url, sm.joined_at, sm.timeout_until
        FROM server_members sm
        JOIN users u ON u.id = sm.user_id
       WHERE sm.server_id = ? AND sm.left_at IS NULL AND u.deleted_at IS NULL`,
     [serverId]
-  );
+  )).map((m) => ({ ...m, status: publicStatus(m.status, viewerId, m.id) }));
 
   const roleRows = await allQuery(
     `SELECT mr.user_id, r.id, r.name, r.color, r.position, r.permissions, r.hoist, r.managed, r.icon_url
