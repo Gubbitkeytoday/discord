@@ -198,6 +198,20 @@ function assertSafeAttrValue(name, value) {
   }
 }
 
+/** Drops <!-- … --> comments in one linear pass; an unterminated one is rejected. */
+function stripComments(src) {
+  let out = '';
+  let from = 0;
+  for (;;) {
+    const open = src.indexOf('<!--', from);
+    if (open === -1) return out + src.slice(from);
+    const close = src.indexOf('-->', open + 4);
+    if (close === -1) throw unsafe('unterminated comment');
+    out += src.slice(from, open);
+    from = close + 3;
+  }
+}
+
 /**
  * Strict allow-list SVG sanitiser (no DOM needed; runs on the server).
  * Dangerous input is *rejected* with a reason rather than silently repaired,
@@ -210,8 +224,8 @@ export function sanitizeSvg(input) {
   if (Buffer.byteLength(src, 'utf8') > MAX_SVG_BYTES) throw unsafe('larger than 64 KB');
   src = src.replace(/^﻿/, '').replace(/^\s*<\?xml[^>]*\?>/i, '');
   if (/<!DOCTYPE|<!ENTITY|<!\[CDATA\[/i.test(src)) throw unsafe('DOCTYPE, ENTITY and CDATA are not allowed');
-  src = src.replace(/<!--[\s\S]*?-->/g, '');
-  if (/<!--|<\?|<!/.test(src)) throw unsafe('processing instructions and declarations are not allowed');
+  src = stripComments(src);
+  if (src.includes('<?') || src.includes('<!')) throw unsafe('processing instructions and declarations are not allowed');
 
   const out = [];
   const stack = [];

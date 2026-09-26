@@ -548,7 +548,7 @@ const IDENTITY_USER_COLUMNS = `id, is_bot, is_system, created_at, email, email_v
  */
 export async function identities(userIds, { serverId = null } = {}) {
   const ids = [...new Set((userIds ?? []).map(String).filter(Boolean))].slice(0, 200);
-  if (!ids.length) return {};
+  if (!ids.length) return Object.create(null);
   const marks = ids.map(() => '?').join(',');
   const users = await allQuery(
     `SELECT ${IDENTITY_USER_COLUMNS} FROM users WHERE id IN (${marks}) AND deleted_at IS NULL`, ids
@@ -617,7 +617,8 @@ export async function identities(userIds, { serverId = null } = {}) {
   const hideCosmetics = Boolean(Number(server?.cosmetics_hidden ?? 0));
   const newDays = Number(server?.new_member_badge_days ?? 7);
 
-  const out = {};
+  // Keyed by user id: no prototype, so an id can never reach Object.prototype.
+  const out = Object.create(null);
   for (const u of users) {
     const pick = equippedIds.get(u.id);
     const member = members.get(u.id);
@@ -651,7 +652,8 @@ export async function identities(userIds, { serverId = null } = {}) {
 }
 
 export async function identityOf(userId, opts) {
-  return (await identities([userId], opts))[userId] ?? null;
+  const all = await identities([userId], opts);
+  return Object.hasOwn(all, userId) ? all[userId] : null;
 }
 
 // --- mutual friends ------------------------------------------------------------------------

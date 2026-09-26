@@ -537,3 +537,14 @@ describe('badges, new members, full profile and reports', () => {
     assert.equal(JSON.parse(snap.context).profile.user.pronouns, 'they/them');
   });
 });
+
+test('SVG comments are stripped in linear time; unterminated or nested markers are rejected', async () => {
+  const { sanitizeSvg } = await import('../services/cosmetics.js');
+  const ok = sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!-- note --><rect width="1" height="1"/></svg>');
+  assert.ok(!ok.includes('note'));
+  const started = Date.now();
+  assert.throws(() => sanitizeSvg(`<svg xmlns="http://www.w3.org/2000/svg">${'<!--'.repeat(15000)}</svg>`));
+  assert.ok(Date.now() - started < 500, 'repeated <!-- must not be slow');
+  assert.throws(() => sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><!-- x -- --></svg><!'));
+  assert.throws(() => sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><<!-- -->!DOCTYPE x></svg>'));
+});
