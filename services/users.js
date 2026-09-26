@@ -389,6 +389,16 @@ export function listBlocked(userId) {
 // --- settings ----------------------------------------------------------------
 
 export async function updateChannelSettings({ userId, channelId, patch }) {
+  // Stored as a timestamp and compared against "now", so it must be a real
+  // instant — normalised to ISO so both database engines store the same thing.
+  let mutedUntil = null;
+  if (patch.mutedUntil !== undefined && patch.mutedUntil !== null && patch.mutedUntil !== '') {
+    const at = new Date(patch.mutedUntil);
+    if (Number.isNaN(at.getTime())) {
+      throw new ApiError('mutedUntil must be a valid date', { code: 'INVALID_MUTED_UNTIL' });
+    }
+    mutedUntil = at.toISOString();
+  }
   await runQuery(
     `INSERT INTO channel_settings (user_id, channel_id, muted, muted_until, notification_level, collapsed)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -397,7 +407,7 @@ export async function updateChannelSettings({ userId, channelId, patch }) {
        muted_until = excluded.muted_until,
        notification_level = COALESCE(excluded.notification_level, channel_settings.notification_level),
        collapsed = COALESCE(excluded.collapsed, channel_settings.collapsed)`,
-    [userId, channelId, patch.muted ? 1 : 0, patch.mutedUntil ?? null,
+    [userId, channelId, patch.muted ? 1 : 0, mutedUntil,
      patch.notificationLevel ?? 'inherit', patch.collapsed ? 1 : 0]
   );
   return getQuery(

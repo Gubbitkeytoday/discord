@@ -70,6 +70,65 @@ export const sql = Object.freeze({
   int: (expr) => `CAST(${expr} AS INTEGER)`
 });
 
+// --- error classification ----------------------------------------------------
+//
+// Both drivers mark their errors with `isDatabaseError`. SQLite reports every
+// constraint as SQLITE_CONSTRAINT with the kind in the message; Postgres uses
+// SQLSTATE codes.
+
+const sqliteConstraint = (err, pattern) =>
+  err?.code === 'SQLITE_CONSTRAINT' && pattern.test(String(err.message));
+
+/** A UNIQUE / PRIMARY KEY violation, on either engine. */
+export function isUniqueViolation(err) {
+  return (err?.isDatabaseError && err.code === '23505') || sqliteConstraint(err, /UNIQUE|PRIMARY KEY/);
+}
+
+/** A FOREIGN KEY violation, on either engine. */
+export function isForeignKeyViolation(err) {
+  return (err?.isDatabaseError && err.code === '23503') || sqliteConstraint(err, /FOREIGN KEY/);
+}
+
+/** Any integrity-constraint violation (unique, FK, NOT NULL, CHECK), on either engine. */
+export function isConstraintViolation(err) {
+  if (!err?.isDatabaseError) return false;
+  return err.code === 'SQLITE_CONSTRAINT' || (typeof err.code === 'string' && err.code.startsWith('23'));
+}
+
+/**
+ * Map a database error to what an API client may be told: an HTTP status, a
+ * stable machine code and a generic message. Never the engine's own text,
+ * which names tables, columns and constraints. Returns null for errors that
+ * are not from the database.
+ */
+export function classifyDatabaseError(err) {
+  if (err?.code === 'DB_CLOSED') {
+    return { status: 503, code: 'SERVICE_UNAVAILABLE', message: 'The server is restarting — try again shortly' };
+  }
+  if (!err?.isDatabaseError) return null;
+  if (isUniqueViolation(err)) {
+    return { status: 409, code: 'CONFLICT', message: 'That already exists' };
+  }
+  if (isForeignKeyViolation(err)) {
+    return { status: 409, code: 'REFERENCE_CONFLICT', message: 'A referenced item does not exist or is still in use' };
+  }
+  if (isConstraintViolation(err)) {
+    return { status: 400, code: 'INVALID_INPUT', message: 'The request contains an invalid value' };
+  }
+  const code = String(err.code ?? '');
+  // 22xxx data exceptions: bad number/date syntax, value out of range, …
+  if (code.startsWith('22') || err.code === 'SQLITE_MISMATCH' || err.code === 'SQLITE_TOOBIG') {
+    return { status: 400, code: 'INVALID_INPUT', message: 'The request contains an invalid value' };
+  }
+  if (code === '40001' || code === '40P01' || code === '55P03' || err.code === 'SQLITE_BUSY') {
+    return { status: 503, code: 'BUSY', message: 'The server is busy — try again' };
+  }
+  if (code === '57014') {
+    return { status: 503, code: 'TIMEOUT', message: 'The request took too long' };
+  }
+  return { status: 500, code: 'INTERNAL_ERROR', message: 'Internal server error' };
+}
+
 /**
  * Rewrite `?` placeholders to `$1…$n` for Postgres.
  *

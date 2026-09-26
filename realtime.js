@@ -18,6 +18,10 @@ import { assertChannelAccess, canInChannel } from './services/access.js';
 import { resolveBotToken } from './services/applications.js';
 import { checkSocketLimit } from './lib/rateLimit.js';
 import { resolvePermissions } from './services/guilds.js';
+import { ApiError, publicError } from './lib/httpUtils.js';
+
+/** What a socket client may see of an error: never raw database text. */
+const clientError = (err) => publicError(err).body;
 
 // Ephemeral state: typing indicators and the socket↔user mapping. These are
 // intentionally in-memory — they are meaningless after a restart.
@@ -176,39 +180,40 @@ export function registerRealtime(io) {
         fanOutMessage(io, message);
       } catch (err) {
         console.error('send_message failed:', err.message);
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('message_error', { error: err.message, code: err.code, nonce: data?.nonce });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('message_error', { error, code, nonce: data?.nonce });
       }
     });
 
     socket.on('edit_message', async ({ messageId, content }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const message = await messageService.editMessage({ messageId, userId, content });
         io.to(message.channel_id).emit('message_updated', message);
         ack?.({ ok: true, message });
       } catch (err) {
-        ack?.({ ok: false, error: err.message });
+        ack?.({ ok: false, ...clientError(err) });
       }
     });
 
     socket.on('delete_message', async ({ messageId }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const result = await messageService.deleteMessage({ messageId, userId });
         if (result) io.to(result.channel_id).emit('message_deleted', messageId);
         ack?.({ ok: true });
       } catch (err) {
-        ack?.({ ok: false, error: err.message });
+        ack?.({ ok: false, ...clientError(err) });
       }
     });
 
     socket.on('toggle_reaction', async ({ messageId, channelId, emoji }, ack) => {
       try {
         const userId = socket.data.userId;
-        if (!userId) throw new Error('Authentication required');
+        if (!userId) throw ApiError.unauthorized();
         const result = await messageService.toggleReaction({ messageId, userId, emoji });
         io.to(result.channelId ?? channelId).emit('reaction_updated', {
           messageId: result.messageId,
@@ -217,8 +222,9 @@ export function registerRealtime(io) {
         });
         ack?.({ ok: true });
       } catch (err) {
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('action_error', { action: 'toggle_reaction', error: err.message, code: err.code });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('action_error', { action: 'toggle_reaction', error, code });
       }
     });
 
@@ -289,8 +295,9 @@ export function registerRealtime(io) {
       try {
         await assertChannelAccess({ channelId, userId, permission: 'CONNECT' });
       } catch (err) {
-        ack?.({ ok: false, error: err.message, code: err.code });
-        socket.emit('voice_error', { channelId, code: err.code ?? 'FORBIDDEN', error: err.message });
+        const { error, code } = clientError(err);
+        ack?.({ ok: false, error, code });
+        socket.emit('voice_error', { channelId, code, error });
         return;
       }
       // One voice channel per user: joining another leaves the old one first.

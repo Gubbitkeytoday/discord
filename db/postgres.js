@@ -327,7 +327,9 @@ export function createPgDriver(env = process.env, { quiet = false } = {}) {
           await sleep(backoff);
           continue;
         }
-        throw err.isDatabaseError || !err.code ? err : decorate(err, 'COMMIT');
+        // A failed BEGIN/COMMIT is a driver error too; fn's own errors
+        // (ApiError and friends) pass through untouched.
+        throw err instanceof pg.DatabaseError && !err.isDatabaseError ? decorate(err, 'COMMIT') : err;
       } finally {
         root.active = false;
         client.release(discard || undefined);

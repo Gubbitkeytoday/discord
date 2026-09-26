@@ -484,24 +484,9 @@ export const inTransaction = () => driver.inTransaction();
 
 // --- error classification ----------------------------------------------------
 
-const sqliteConstraint = (err, pattern) =>
-  err?.code === 'SQLITE_CONSTRAINT' && pattern.test(String(err.message));
-
-/** A UNIQUE / PRIMARY KEY violation, on either engine. */
-export function isUniqueViolation(err) {
-  return (err?.isDatabaseError && err.code === '23505') || sqliteConstraint(err, /UNIQUE|PRIMARY KEY/);
-}
-
-/** A FOREIGN KEY violation, on either engine. */
-export function isForeignKeyViolation(err) {
-  return (err?.isDatabaseError && err.code === '23503') || sqliteConstraint(err, /FOREIGN KEY/);
-}
-
-/** Any integrity-constraint violation (unique, FK, NOT NULL, CHECK), on either engine. */
-export function isConstraintViolation(err) {
-  if (!err?.isDatabaseError) return false;
-  return err.code === 'SQLITE_CONSTRAINT' || (typeof err.code === 'string' && err.code.startsWith('23'));
-}
+export {
+  isUniqueViolation, isForeignKeyViolation, isConstraintViolation, classifyDatabaseError
+} from './db/dialect.js';
 
 // --- health ------------------------------------------------------------------
 
