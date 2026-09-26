@@ -13,7 +13,8 @@ import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import crypto from 'crypto';
-import { assertPermission, getServerDetail, writeAuditLog } from './guilds.js';
+import { assertPermission, getServerDetail, writeAuditLog, applyNewServerSafetyDefaults } from './guilds.js';
+import { parseBuiltinCode, builtinTemplateData, resolveLang, BUILTIN_TEMPLATE_KEYS } from './admin/defaults.js';
 import { DEFAULT_PERMISSIONS } from '../lib/permissions.js';
 
 export const TEMPLATE_VERSION = 1;
@@ -126,9 +127,33 @@ export async function getServerTemplate(serverId, userId) {
   return row ? shape(row) : null;
 }
 
+/**
+ * A template row by code. Built-in templates (`builtin-<key>[-<lang>]`) are
+ * synthesised on the fly in the requested language, with the user's saved
+ * language as the fallback, so the gallery needs no rows in the database.
+ */
+async function loadTemplateRow(code, userId = null) {
+  const builtin = parseBuiltinCode(code);
+  if (builtin) {
+    let lang = builtin.lang;
+    if (!lang && userId) {
+      const saved = (await getQuery(`SELECT locale FROM users WHERE id = ?`, [userId]))?.locale ?? null;
+      lang = resolveLang(saved);
+    }
+    const data = builtinTemplateData(builtin.key, lang ?? 'en');
+    return {
+      code, name: data.source.name, description: null, source_server_id: null, creator_id: null,
+      usage_count: 0, created_at: null, updated_at: null, data: JSON.stringify(data), builtin: true
+    };
+  }
+  return getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+}
+
+export { BUILTIN_TEMPLATE_KEYS };
+
 /** Public preview of a template by code — what the "use template" screen shows. */
-export async function getTemplate(code) {
-  const row = await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+export async function getTemplate(code, userId = null) {
+  const row = await loadTemplateRow(code, userId);
   if (!row) throw ApiError.notFound('Template');
   const data = JSON.parse(row.data);
   return {
@@ -146,7 +171,7 @@ export async function getTemplate(code) {
  * ids; local keys are re-mapped so overwrites point at the new roles.
  */
 export async function useTemplate({ code, userId, name, iconUrl = null }) {
-  const row = await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+  const row = await loadTemplateRow(code, userId);
   if (!row) throw ApiError.notFound('Template');
   const data = JSON.parse(row.data);
   if (data.version !== TEMPLATE_VERSION) throw new ApiError('Unsupported template version', { code: 'TEMPLATE_VERSION' });
@@ -223,7 +248,8 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       `UPDATE servers SET system_channel_id = ?, rules_channel_id = ?, afk_channel_id = ? WHERE id = ?`,
       [chanIds.get(data.system_channel) ?? null, chanIds.get(data.rules_channel) ?? null, chanIds.get(data.afk_channel) ?? null, serverId]
     );
-    await runQuery(`UPDATE server_templates SET usage_count = usage_count + 1 WHERE code = ?`, [code]);
+    if (!row.builtin) await runQuery(`UPDATE server_templates SET usage_count = usage_count + 1 WHERE code = ?`, [code]);
+    await applyNewServerSafetyDefaults(serverId);
     await writeAuditLog({ serverId, userId, actionType: 'SERVER_CREATE', targetId: serverId, changes: [{ key: 'template', new: code }] });
   });
 

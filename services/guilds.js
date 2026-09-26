@@ -19,8 +19,34 @@ import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
 } from '../lib/permissions.js';
+import { defaultChannelNames } from './admin/defaults.js';
 
-const DEFAULT_CATEGORY_NAMES = { text: 'TEXT CHANNELS', voice: 'VOICE CHANNELS' };
+/**
+ * Raid protection is on for every new server, as Discord's is: a flood of
+ * joins turns membership screening on (newcomers can read but not post until
+ * they accept the rules) and alerts the moderators. It never locks real
+ * people out on its own; "Lock now" stays a moderator's decision.
+ */
+export const NEW_SERVER_RAID_DEFAULTS = Object.freeze({
+  raid_protection: 1, raid_join_threshold: 20, raid_join_window_secs: 60, raid_action: 'screen'
+});
+
+export async function applyNewServerSafetyDefaults(serverId) {
+  const d = NEW_SERVER_RAID_DEFAULTS;
+  await runQuery(
+    `UPDATE servers SET raid_protection = ?, raid_join_threshold = ?, raid_join_window_secs = ?, raid_action = ?
+      WHERE id = ?`,
+    [d.raid_protection, d.raid_join_threshold, d.raid_join_window_secs, d.raid_action, serverId]
+  );
+}
+
+/** Do two overwrite lists grant exactly the same thing? */
+function sameOverwrites(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  const key = (o) => `${o.target_type}:${o.target_id}:${toBigInt(o.allow)}:${toBigInt(o.deny)}`;
+  const set = new Set(a.map(key));
+  return b.every((o) => set.has(key(o)));
+}
 
 // --- permissions -------------------------------------------------------------
 
@@ -232,20 +258,40 @@ export async function getServerDetail(serverId, viewerId = null) {
       .map((row) => row.channel_id)
   );
 
+  // "Synced with category": a child whose overwrites equal its category's,
+  // exactly as Discord decides it. Only computed when there are categories.
+  const overwritesOf = new Map();
+  if (categoryNames.size) {
+    const rows = await allQuery(
+      `SELECT channel_id, target_type, target_id, allow, deny FROM channel_overwrites
+        WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ? AND deleted_at IS NULL)`,
+      [serverId]
+    );
+    for (const o of rows) {
+      if (!overwritesOf.has(o.channel_id)) overwritesOf.set(o.channel_id, []);
+      overwritesOf.get(o.channel_id).push(o);
+    }
+  }
+
   const channels = allChannels
     .filter((c) => c.type !== 'category' && c.type !== 'thread')
     .map((c) => ({
       ...c,
       is_private: privateChannelIds.has(c.id),
-      // Derived compatibility field for the sidebar's grouping.
-      category: categoryNames.get(c.parent_id)
-        ?? DEFAULT_CATEGORY_NAMES[c.type]
-        ?? 'TEXT CHANNELS'
+      // Derived compatibility field for the sidebar's grouping. A channel
+      // outside any category has none (Discord lists those first, headerless).
+      category: categoryNames.get(c.parent_id) ?? null,
+      permissions_synced: categoryNames.has(c.parent_id)
+        ? sameOverwrites(overwritesOf.get(c.id), overwritesOf.get(c.parent_id))
+        : null
     }));
 
   const categories = allChannels
     .filter((c) => c.type === 'category')
-    .map((c) => ({ id: c.id, name: c.name, position: c.position }));
+    .map((c) => ({
+      id: c.id, name: c.name, position: c.position,
+      is_private: privateChannelIds.has(c.id)
+    }));
 
   const memberRows = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
@@ -320,9 +366,16 @@ export async function getServerDetail(serverId, viewerId = null) {
 
 // --- writes ------------------------------------------------------------------
 
-export async function createServer({ name, iconUrl = null, iconFileId = null, ownerId }) {
+export async function createServer({ name, iconUrl = null, iconFileId = null, ownerId, locale = null }) {
   const trimmed = String(name ?? '').trim();
   if (!trimmed) throw new ApiError('Server name is required', { code: 'INVALID_NAME' });
+  // The first category and channel names follow the creator's language: the
+  // one the client sent, else the one saved on the account.
+  let lang = locale;
+  if (!lang && ownerId) {
+    lang = (await getQuery(`SELECT locale FROM users WHERE id = ?`, [ownerId]))?.locale ?? null;
+  }
+  const names = defaultChannelNames(lang, { trustDefault: Boolean(locale) });
 
   const serverId = generateId();
   // Remote icons (including the generated default) are served through the
@@ -359,12 +412,13 @@ export async function createServer({ name, iconUrl = null, iconFileId = null, ow
     const generalText   = generateId();
     const generalVoice  = generateId();
 
-    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, 'TEXT CHANNELS', 'category', 0)`, [textCategory, serverId]);
-    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position) VALUES (?, ?, ?, 'general', 'text', 1)`, [generalText, serverId, textCategory]);
-    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, 'VOICE CHANNELS', 'category', 2)`, [voiceCategory, serverId]);
-    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position, bitrate) VALUES (?, ?, ?, 'General Voice', 'voice', 3, 64000)`, [generalVoice, serverId, voiceCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', 0)`, [textCategory, serverId, names.textCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position) VALUES (?, ?, ?, ?, 'text', 1)`, [generalText, serverId, textCategory, names.general]);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', 2)`, [voiceCategory, serverId, names.voiceCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position, bitrate) VALUES (?, ?, ?, ?, 'voice', 3, 64000)`, [generalVoice, serverId, voiceCategory, names.generalVoice]);
 
     await runQuery(`UPDATE servers SET system_channel_id = ? WHERE id = ?`, [generalText, serverId]);
+    await applyNewServerSafetyDefaults(serverId);
     await writeAuditLog({ serverId, userId: ownerId, actionType: 'SERVER_CREATE', targetId: serverId });
   });
 
@@ -401,8 +455,10 @@ export async function createChannel({
     ? trimmed.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '')
     : trimmed;
 
-  let resolvedParent = parentId;
+  let resolvedParent = type === 'category' ? null : parentId;
+  if (type === 'category') categoryName = null;
   if (resolvedParent) await assertCategoryOf(serverId, resolvedParent);
+  if (typeof categoryName === 'string') categoryName = categoryName.trim().slice(0, 100) || null;
   if (!resolvedParent && categoryName) {
     const existing = await getQuery(
       `SELECT id FROM channels WHERE server_id = ? AND type = 'category' AND name = ? AND deleted_at IS NULL`,
@@ -440,7 +496,7 @@ export async function createChannel({
     ? await getQuery(`SELECT name FROM channels WHERE id = ?`, [resolvedParent])
     : null;
 
-  return { ...channel, category: category?.name ?? DEFAULT_CATEGORY_NAMES[type] ?? 'TEXT CHANNELS' };
+  return { ...channel, category: category?.name ?? null, is_private: false };
 }
 
 export async function updateChannel({ channelId, patch, userId }) {
@@ -506,7 +562,7 @@ export async function updateChannel({ channelId, patch, userId }) {
   const category = updated.parent_id
     ? await getQuery(`SELECT name FROM channels WHERE id = ? AND type = 'category'`, [updated.parent_id])
     : null;
-  return { ...updated, category: category?.name ?? DEFAULT_CATEGORY_NAMES[updated.type] ?? (updated.type === 'thread' ? null : 'TEXT CHANNELS') };
+  return { ...updated, category: category?.name ?? null };
 }
 
 export async function deleteChannel({ channelId, userId }) {
@@ -520,6 +576,15 @@ export async function deleteChannel({ channelId, userId }) {
     } else {
       await assertPermission({ userId, serverId: channel.server_id, channelId, permission: 'MANAGE_CHANNELS' });
     }
+  }
+  // Deleting a category keeps its channels, as on Discord: they move out to
+  // the top level (and keep their own permission overwrites).
+  if (channel.type === 'category') {
+    await runQuery(
+      `UPDATE channels SET parent_id = NULL, updated_at = ${sql.now}
+        WHERE parent_id = ? AND type != 'thread' AND deleted_at IS NULL`,
+      [channelId]
+    );
   }
   // Threads die with their parent, as on Discord.
   await runQuery(
@@ -697,15 +762,20 @@ export async function createRole({ serverId, name, color = null, permissions = '
   await assertCanManageRole({ serverId, actorId: userId, permissions });
   name = trimmed;
   color = normaliseColor(color, 'color') ?? null;
-  const { maxPos } = await getQuery(
-    `SELECT COALESCE(MAX(position), 0) AS "maxPos" FROM roles WHERE server_id = ?`, [serverId]
-  );
+  // Discord puts a new role at the bottom, just above @everyone: it starts
+  // with no power over anyone, and the creator drags it up if they mean to.
   const roleId = generateId();
-  await runQuery(
-    `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [roleId, serverId, name, color, maxPos + 1, String(permissions), hoist ? 1 : 0, mentionable ? 1 : 0]
-  );
+  await transaction(async () => {
+    await runQuery(
+      `UPDATE roles SET position = position + 1 WHERE server_id = ? AND position >= 1 AND is_everyone = 0`,
+      [serverId]
+    );
+    await runQuery(
+      `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+      [roleId, serverId, name, color, String(permissions), hoist ? 1 : 0, mentionable ? 1 : 0]
+    );
+  });
   await writeAuditLog({ serverId, userId, actionType: 'ROLE_CREATE', targetType: 'role', targetId: roleId });
   return getQuery(`SELECT * FROM roles WHERE id = ?`, [roleId]);
 }
@@ -1208,18 +1278,67 @@ export async function writeAuditLog({
   );
 }
 
-export async function listAuditLog(serverId, { limit = 50, before = null } = {}) {
+/**
+ * The audit log, newest first. Each entry names its actor *and* its target —
+ * "nat banned freenitro_3", not "nat banned a member" — with the target's
+ * current name resolved from the user, channel or role it points at.
+ * Filters: `actionType` (exact, or a prefix ending in '*', e.g. 'MEMBER_*'),
+ * `userId` (the actor) and `targetId`.
+ */
+export async function listAuditLog(serverId, { limit = 50, before = null, actionType = null, userId = null, targetId = null } = {}) {
   const params = [serverId];
   let where = 'al.server_id = ?';
   if (before) { where += ' AND al.id < ?'; params.push(before); }
-  params.push(Math.min(limit, 100));
+  if (actionType) {
+    const clean = String(actionType).toUpperCase().replace(/[^A-Z_*]/g, '').slice(0, 60);
+    if (clean.endsWith('*')) { where += ' AND al.action_type LIKE ?'; params.push(`${clean.slice(0, -1)}%`); }
+    else if (clean) { where += ' AND al.action_type = ?'; params.push(clean); }
+  }
+  if (userId) { where += ' AND al.user_id = ?'; params.push(String(userId)); }
+  if (targetId) { where += ' AND al.target_id = ?'; params.push(String(targetId)); }
+  params.push(Math.min(Math.max(Number(limit) || 50, 1), 100));
   const rows = await allQuery(
-    `SELECT al.*, u.username, u.display_name, u.avatar_url
-       FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id
+    `SELECT al.*, u.username, u.display_name, u.avatar_url,
+            tu.username AS target_username, tu.display_name AS target_display_name,
+            tu.avatar_url AS target_avatar_url,
+            tc.name AS target_channel_name, tc.type AS target_channel_type,
+            tr.name AS target_role_name, tr.color AS target_role_color
+       FROM audit_logs al
+       LEFT JOIN users u ON u.id = al.user_id
+       LEFT JOIN users tu ON al.target_type = 'user' AND tu.id = al.target_id
+       LEFT JOIN channels tc ON al.target_type = 'channel' AND tc.id = al.target_id
+       LEFT JOIN roles tr ON al.target_type = 'role' AND tr.id = al.target_id
       WHERE ${where} ORDER BY al.id DESC LIMIT ?`,
     params
   );
-  return rows.map((r) => ({ ...r, changes: JSON.parse(r.changes || '[]') }));
+  return rows.map((r) => {
+    const changes = typeof r.changes === 'string' ? JSON.parse(r.changes || '[]') : (r.changes ?? []);
+    let target = null;
+    if (r.target_type === 'user' && r.target_id) {
+      target = {
+        type: 'user', id: r.target_id,
+        name: r.target_display_name || r.target_username || null,
+        username: r.target_username ?? null, avatar_url: r.target_avatar_url ?? null
+      };
+    } else if (r.target_type === 'channel' && r.target_id) {
+      target = { type: 'channel', id: r.target_id, name: r.target_channel_name ?? null, channel_type: r.target_channel_type ?? null };
+    } else if (r.target_type === 'role' && r.target_id) {
+      target = { type: 'role', id: r.target_id, name: r.target_role_name ?? null, color: r.target_role_color ?? null };
+    } else if (r.target_id) {
+      target = { type: r.target_type ?? null, id: r.target_id, name: null };
+    }
+    // A deleted channel or role no longer resolves; its name is usually in
+    // the change list of the entry that deleted or created it.
+    if (target && !target.name) {
+      const named = changes.find((c) => c?.key === 'name');
+      if (named) target.name = named.old ?? named.new ?? null;
+    }
+    const {
+      target_username: _a, target_display_name: _b, target_avatar_url: _c,
+      target_channel_name: _d, target_channel_type: _e, target_role_name: _f, target_role_color: _g, ...rest
+    } = r;
+    return { ...rest, changes, target };
+  });
 }
 
 /**
