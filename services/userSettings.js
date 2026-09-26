@@ -154,21 +154,23 @@ function parse(json, fallback) {
   try { return JSON.parse(json); } catch { return fallback; }
 }
 
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
 /**
  * Merge one level deep: a category is a flat object except for
  * `notifications.sounds`, which callers patch a key at a time.
  */
 function merge(base, patch) {
-  const out = { ...base };
-  for (const [key, value] of Object.entries(patch ?? {})) {
-    if (value && typeof value === 'object' && !Array.isArray(value)
-        && base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) {
-      out[key] = { ...base[key], ...value };
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
+  // Built with Object.fromEntries rather than `out[key] = …`: a JSON body can
+  // carry an own "__proto__" key, and assigning that would swap the merged
+  // object's prototype instead of storing a setting. Such keys are dropped.
+  const entries = Object.entries(patch ?? {})
+    .filter(([key]) => key !== '__proto__' && key !== 'constructor' && key !== 'prototype')
+    .map(([key, value]) => [key,
+      isPlainObject(value) && Object.hasOwn(base, key) && isPlainObject(base[key])
+        ? { ...base[key], ...value }
+        : value]);
+  return { ...base, ...Object.fromEntries(entries) };
 }
 
 /** Everything, defaults filled in for anything never saved. */

@@ -105,6 +105,18 @@ describe('authentication', () => {
 });
 
 describe('rate limiting', () => {
+  test('current-password guesses on change-password are throttled per user', async () => {
+    const statuses = [];
+    for (let i = 0; i < 11; i += 1) {
+      const res = await api('POST', '/api/auth/change-password', {
+        current_password: `wrong-${i}`, new_password: 'never-applied-1'
+      }, { 'x-user-id': 'user-4' });
+      statuses.push(res.status);
+    }
+    assert.deepEqual(statuses.slice(0, 10), Array(10).fill(401));
+    assert.equal(statuses[10], 429);
+  });
+
   test('repeated failed logins are throttled', async () => {
     let throttled = false;
     for (let i = 0; i < 16; i += 1) {
