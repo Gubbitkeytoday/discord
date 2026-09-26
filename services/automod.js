@@ -265,8 +265,10 @@ export async function assertCanSpeak({ serverId, channelId, userId, permissions 
   if (slowmode <= 0) return;
 
   const last = await getQuery(
+    // Deleted messages count too: otherwise send → delete → send walks
+    // straight through slowmode.
     `SELECT created_at FROM messages
-      WHERE channel_id = ? AND user_id = ? AND deleted_at IS NULL
+      WHERE channel_id = ? AND user_id = ?
       ORDER BY id DESC LIMIT 1`,
     [channelId, userId]
   );

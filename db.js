@@ -520,7 +520,20 @@ async function rebuildLegacySchema() {
   console.warn('♻️  Legacy tables dropped; rebuilding with schema v1.');
 }
 
-export async function initDB({ seed = true } = {}) {
+/**
+ * Seed accounts share a published password (db/seed.js SEED_PASSWORD) and own
+ * the seeded servers, so seeding a production database would hand out an
+ * owner login to anyone who has read this repository. Production therefore
+ * never seeds unless SEED_DATABASE=1 is set explicitly.
+ */
+export function shouldSeed(env = process.env) {
+  if (env.SEED_DATABASE !== undefined && env.SEED_DATABASE !== '') {
+    return ['1', 'true', 'yes', 'on'].includes(String(env.SEED_DATABASE).toLowerCase());
+  }
+  return env.NODE_ENV !== 'production';
+}
+
+export async function initDB({ seed = shouldSeed() } = {}) {
   // WAL keeps readers unblocked while a write transaction is open — needed once
   // socket handlers and HTTP routes write concurrently.
   await runQuery('PRAGMA journal_mode = WAL');

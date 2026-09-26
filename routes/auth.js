@@ -11,7 +11,9 @@ import {
   hashPassword, verifyPassword, createSession, revokeSession, revokeAllSessions,
   extractToken, sessionCookie, clearedCookie, SESSION_TTL_MS
 } from '../lib/auth.js';
-import { loginRateLimit } from '../lib/rateLimit.js';
+import { loginRateLimit, rateLimit } from '../lib/rateLimit.js';
+import { config } from '../lib/config.js';
+import { verifyMfaChallenge } from '../services/accountSecurity.js';
 
 const router = express.Router();
 
@@ -23,7 +25,17 @@ const PUBLIC_USER = `
   storage_used, storage_quota, created_at
 `;
 
-const secureCookies = process.env.SECURE_COOKIES === '1';
+// From validated config, which defaults to on in production and understands
+// 'true'/'yes' as well as '1' — reading the raw env here used to leave cookies
+// without Secure in production unless the value was exactly '1'.
+const secureCookies = config.secureCookies;
+
+// Account creation is unauthenticated and cheap to script; keyed by IP.
+const registerRateLimit = rateLimit({
+  name: 'register',
+  limit: Math.max(1, Number(process.env.RATE_LIMIT_REGISTER_PER_HOUR) || 10),
+  windowMs: 60 * 60_000, byIpOnly: true
+});
 
 /** Four random digits, avoiding a collision with the same username. */
 async function allocateDiscriminator(username) {
@@ -37,7 +49,7 @@ async function allocateDiscriminator(username) {
   throw ApiError.conflict('ชื่อผู้ใช้นี้เต็มแล้ว ลองชื่ออื่น');
 }
 
-router.post('/auth/register', asyncRoute(async (req, res) => {
+router.post('/auth/register', registerRateLimit, asyncRoute(async (req, res) => {
   const username = String(req.body?.username ?? '').trim();
   const displayName = String(req.body?.display_name ?? username).trim().slice(0, 80);
   const email = req.body?.email ? String(req.body.email).trim().toLowerCase() : null;
@@ -95,6 +107,19 @@ router.post('/auth/login', loginRateLimit, asyncRoute(async (req, res) => {
   const ok = await verifyPassword(password, user?.password_hash ?? 'scrypt$16384$8$1$AA$AA');
   if (!user || !ok) {
     throw new ApiError('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง', { status: 401, code: 'INVALID_CREDENTIALS' });
+  }
+
+  // Second factor. Without this, enabling 2FA protected nothing: a password
+  // alone still produced a full session. No session is issued until a valid
+  // TOTP or single-use recovery code arrives alongside the password.
+  if (user.mfa_enabled) {
+    const code = String(req.body?.mfa_code ?? req.body?.code ?? '').trim();
+    if (!code) {
+      throw new ApiError('ต้องใส่รหัสยืนยันตัวตนสองชั้น', { status: 401, code: 'MFA_REQUIRED' });
+    }
+    if (!(await verifyMfaChallenge({ userId: user.id, code }))) {
+      throw new ApiError('รหัสยืนยันตัวตนสองชั้นไม่ถูกต้อง', { status: 401, code: 'INVALID_MFA_CODE' });
+    }
   }
 
   const { token, expiresAt } = await createSession({

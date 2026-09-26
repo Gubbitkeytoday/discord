@@ -88,6 +88,12 @@ export function registerRealtime(io) {
         socket.emit('identify_error', { error: 'Authentication required', code: 'UNAUTHENTICATED' });
         return;
       }
+      // One socket, one identity. Re-identifying as someone else would leave
+      // the socket in the first user's rooms and its id in their presence set.
+      if (socket.data.userId && socket.data.userId !== resolvedId) {
+        socket.emit('identify_error', { error: 'Socket already identified', code: 'ALREADY_IDENTIFIED' });
+        return;
+      }
       userId = resolvedId;
       socket.data.userId = userId;
       if (!socketsByUser.has(userId)) socketsByUser.set(userId, new Set());
@@ -216,7 +222,7 @@ export function registerRealtime(io) {
       }
     });
 
-    socket.on('mark_read', async ({ channelId, messageId }) => {
+    socket.on('mark_read', async ({ channelId, messageId } = {}) => {
       try {
         const userId = socket.data.userId;
         if (!userId || !channelId) return;
@@ -229,9 +235,12 @@ export function registerRealtime(io) {
 
     // --- typing --------------------------------------------------------------
 
-    socket.on('typing_start', ({ channelId, displayName }) => {
+    socket.on('typing_start', ({ channelId, displayName } = {}) => {
       const userId = socket.data.userId;
       if (!channelId || !userId) return;
+      // Only in a channel this socket joined through join_channel's access
+      // check; otherwise anyone could announce typing in any channel by id.
+      if (!socket.rooms.has(channelId)) return;
       if (!typing.has(channelId)) typing.set(channelId, new Map());
       const channelTyping = typing.get(channelId);
 
@@ -243,13 +252,13 @@ export function registerRealtime(io) {
       socket.to(channelId).emit('typing', { channelId, userId, displayName });
     });
 
-    socket.on('typing_stop', ({ channelId }) => {
+    socket.on('typing_stop', ({ channelId } = {}) => {
       if (socket.data.userId) clearTyping(io, channelId, socket.data.userId);
     });
 
     // --- presence ------------------------------------------------------------
 
-    socket.on('update_presence', async ({ status, customStatus }) => {
+    socket.on('update_presence', async ({ status, customStatus } = {}) => {
       try {
         const userId = socket.data.userId;
         if (!userId) return;
@@ -343,9 +352,12 @@ export function registerRealtime(io) {
 
     socket.on('voice_state_change', async ({
       channelId, isMuted, isDeafened, isSpeaking, isVideo, isStreaming
-    }) => {
+    } = {}) => {
       const userId = socket.data.userId;
       if (!userId || !channelId) return;
+      // The state and the speaking indicator belong to the room this socket
+      // is actually in; a claimed channelId must not reach another room.
+      if (!socket.rooms.has(`voice-${channelId}`)) return;
       const sets = [];
       const params = [];
       if (isMuted !== undefined) {
@@ -437,7 +449,7 @@ export function registerRealtime(io) {
      * through the REST API, and this only tells the room to play the burst.
      * Nothing is stored, and the sender must be able to see the channel.
      */
-    socket.on('super_reaction', async ({ channelId, messageId, emoji }) => {
+    socket.on('super_reaction', async ({ channelId, messageId, emoji } = {}) => {
       const userId = socket.data.userId;
       if (!userId || !channelId || !messageId || !emoji) return;
       const allowed = await canInChannel({ channelId, userId, permission: 'ADD_REACTIONS' });
@@ -447,7 +459,7 @@ export function registerRealtime(io) {
       });
     });
 
-    socket.on('play_sound', async ({ channelId, soundId }) => {
+    socket.on('play_sound', async ({ channelId, soundId } = {}) => {
       const userId = socket.data.userId;
       if (!userId || !channelId || !soundId) return;
 
@@ -477,9 +489,10 @@ export function registerRealtime(io) {
       });
     });
 
-    socket.on('leave_voice', async ({ channelId }) => {
+    socket.on('leave_voice', async ({ channelId } = {}) => {
       const userId = socket.data.userId;
       if (!userId) return;
+      if (socket.data.voiceChannelId) socket.leave(`voice-${socket.data.voiceChannelId}`);
       socket.leave(`voice-${channelId}`);
       socket.data.voiceChannelId = null;
       await runQuery(`DELETE FROM voice_states WHERE user_id = ?`, [userId]);
@@ -488,14 +501,25 @@ export function registerRealtime(io) {
 
     // --- WebRTC signalling (server only relays; media is peer-to-peer) --------
 
-    socket.on('webrtc_offer', ({ targetSocketId, offer }) => {
-      io.to(targetSocketId).emit('webrtc_offer', { senderSocketId: socket.id, offer });
+    // `io.to(x)` addresses *any* room, so an unchecked targetSocketId of a
+    // channel or `user-…` id broadcast signalling to a whole audience, and an
+    // anonymous socket could push offers at anyone. Relay only between two
+    // identified sockets that share the same voice room.
+    const relayTarget = (targetSocketId) => {
+      if (!socket.data.userId || typeof targetSocketId !== 'string') return null;
+      const target = io.sockets.sockets.get(targetSocketId);
+      const room = socket.data.voiceChannelId;
+      if (!target || !room || target.data.voiceChannelId !== room) return null;
+      return target;
+    };
+    socket.on('webrtc_offer', ({ targetSocketId, offer } = {}) => {
+      relayTarget(targetSocketId)?.emit('webrtc_offer', { senderSocketId: socket.id, offer });
     });
-    socket.on('webrtc_answer', ({ targetSocketId, answer }) => {
-      io.to(targetSocketId).emit('webrtc_answer', { senderSocketId: socket.id, answer });
+    socket.on('webrtc_answer', ({ targetSocketId, answer } = {}) => {
+      relayTarget(targetSocketId)?.emit('webrtc_answer', { senderSocketId: socket.id, answer });
     });
-    socket.on('webrtc_ice_candidate', ({ targetSocketId, candidate }) => {
-      io.to(targetSocketId).emit('webrtc_ice_candidate', { senderSocketId: socket.id, candidate });
+    socket.on('webrtc_ice_candidate', ({ targetSocketId, candidate } = {}) => {
+      relayTarget(targetSocketId)?.emit('webrtc_ice_candidate', { senderSocketId: socket.id, candidate });
     });
 
     // --- teardown ------------------------------------------------------------
@@ -537,6 +561,85 @@ export function registerRealtime(io) {
 }
 
 // --- helpers -----------------------------------------------------------------
+
+/**
+ * Re-check every channel room a user's sockets are in and drop the ones they
+ * may no longer view. Room membership is an access decision taken once, at
+ * join_channel; without this a kicked/banned member, someone removed from a
+ * group DM, or a member who just lost VIEW_CHANNEL to an overwrite or role
+ * change keeps receiving that channel's messages until they reconnect.
+ *
+ * `userIds` null means "everyone in these rooms" (used after a permission
+ * change that can affect many members). `serverId` also re-checks the guild
+ * room itself.
+ */
+export async function revalidateRooms(io, { userIds = null, serverId = null, channelIds = null } = {}) {
+  // Scope is always a guild or an explicit channel list, so a room that
+  // belongs to something else (another guild's room) is never touched.
+  if (!io || (!serverId && !channelIds?.length)) return;
+  let sockets;
+  if (userIds) {
+    sockets = [];
+    for (const uid of userIds) sockets.push(...(await io.in(`user-${uid}`).fetchSockets()));
+  }
+  const serverChannels = serverId
+    ? new Set((await allQuery(`SELECT id FROM channels WHERE server_id = ?`, [serverId])).map((c) => c.id))
+    : null;
+  if (!sockets) {
+    // A socket can sit in a channel room without the guild room, so both.
+    const rooms = serverId ? [serverId, ...serverChannels] : channelIds;
+    sockets = await io.in(rooms).fetchSockets();
+  }
+  const verdicts = new Map();   // `${userId}:${room}` -> boolean
+  const check = async (userId, room, fn) => {
+    const key = `${userId}:${room}`;
+    if (!verdicts.has(key)) verdicts.set(key, await fn().catch(() => false));
+    return verdicts.get(key);
+  };
+
+  for (const sock of sockets) {
+    const userId = sock.data?.userId;
+    if (!userId) continue;
+    for (const room of [...sock.rooms]) {
+      if (room === sock.id || room.startsWith('user-') || room.startsWith('application-')) continue;
+      if (serverId && room === serverId) {
+        const member = await check(userId, room, async () =>
+          (await resolvePermissions({ userId, serverId })).isMember);
+        if (!member) sock.leave(room);
+        continue;
+      }
+      if (room.startsWith('voice-')) continue;
+      if (channelIds && !channelIds.includes(room)) continue;
+      if (serverChannels && !channelIds && !serverChannels.has(room)) continue;
+      const allowed = await check(userId, room, () =>
+        canInChannel({ channelId: room, userId, permission: 'VIEW_CHANNEL' }));
+      if (!allowed) sock.leave(room);
+    }
+  }
+}
+
+/**
+ * Emit a channel lifecycle event (created/updated/thread created) to the
+ * members of its guild room who can actually view the channel. A plain
+ * io.to(serverId) would announce a private channel's name and topic to every
+ * member of the guild.
+ */
+export async function emitToChannelViewers(io, channel, event, payload = channel) {
+  if (!channel?.server_id) return;
+  const sockets = await io.in(channel.server_id).fetchSockets();
+  const verdicts = new Map();
+  const channelId = channel.id;
+  for (const sock of sockets) {
+    const userId = sock.data?.userId;
+    if (!userId) continue;
+    if (!verdicts.has(userId)) {
+      verdicts.set(userId, channel.type === 'category'
+        ? true
+        : await canInChannel({ channelId, userId, permission: 'VIEW_CHANNEL' }));
+    }
+    if (verdicts.get(userId)) sock.emit(event, payload);
+  }
+}
 
 function clearTyping(io, channelId, userId) {
   const channelTyping = typing.get(channelId);
@@ -694,7 +797,11 @@ export async function sweepAfk(io) {
       for (const socketId of socketsByUser.get(state.user_id) ?? []) {
         io.to(socketId).emit('voice_moved', { from, to: afkChannel.id, reason: 'afk' });
         const sock = io.sockets.sockets.get(socketId);
-        if (sock) { sock.leave(`voice-${from}`); sock.join(`voice-${afkChannel.id}`); }
+        if (sock) {
+          sock.leave(`voice-${from}`);
+          sock.join(`voice-${afkChannel.id}`);
+          sock.data.voiceChannelId = afkChannel.id;
+        }
       }
       await broadcastVoice(io, from);
       await broadcastVoice(io, afkChannel.id);

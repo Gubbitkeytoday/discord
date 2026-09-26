@@ -42,7 +42,8 @@ export async function startServer() {
       STORAGE_ROOT,
       ADMIN_TOKEN: 'test-admin-token',
       ALLOW_DEV_IDENTITY: '1',
-      RATE_LIMIT_WRITE_PER_MIN: '10000'
+      RATE_LIMIT_WRITE_PER_MIN: '10000',
+      RATE_LIMIT_REGISTER_PER_HOUR: '10000'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });

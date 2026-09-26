@@ -11,7 +11,7 @@ import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { toBigInt, ALL_PERMISSIONS } from '../lib/permissions.js';
 import { addReference, releaseReference, findFileByPublicUrl } from '../storageService.js';
-import { assertPermission, resolvePermissions, writeAuditLog } from './guilds.js';
+import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAuditLog } from './guilds.js';
 
 // --- guild profile -----------------------------------------------------------
 
@@ -141,7 +141,7 @@ export async function transferOwnership({ serverId, actorId, newOwnerId }) {
  * role at or above their own highest role. Without both checks, MANAGE_ROLES is
  * a straight path to administrator.
  */
-async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissions }) {
+async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissions, nextPosition }) {
   const resolved = await resolvePermissions({ userId: actorId, serverId });
   if (resolved.isOwner) return resolved;
 
@@ -154,6 +154,11 @@ async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissi
 
   if (targetRole && targetRole.position >= highest) {
     throw ApiError.forbidden('You cannot manage a role at or above your highest role');
+  }
+  // Moving a role up is also a hierarchy decision: dragging a role you manage
+  // above your own would make its holders outrank you.
+  if (nextPosition !== undefined && Number(nextPosition) >= highest) {
+    throw ApiError.forbidden('You cannot move a role at or above your highest role');
   }
   if (nextPermissions !== undefined) {
     const granting = toBigInt(nextPermissions) & ~toBigInt(resolved.permissions);
@@ -193,7 +198,8 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     serverId, actorId,
     // @everyone sits at position 0 and is edited by anyone with MANAGE_ROLES.
     targetRole: role.is_everyone ? null : role,
-    nextPermissions: patch.permissions
+    nextPermissions: patch.permissions,
+    nextPosition: role.is_everyone ? undefined : patch.position
   });
 
   // `color_secondary` turns the name into a gradient; NULL keeps it flat.
@@ -426,6 +432,16 @@ export async function getGuildProfile({ serverId, userId }) {
 export async function setNickname({ serverId, userId, actorId, nickname }) {
   const permission = userId === actorId ? 'CHANGE_NICKNAME' : 'MANAGE_NICKNAMES';
   await assertPermission({ userId: actorId, serverId, permission });
+  // Discord: nicknames are 1-32 characters, and renaming someone else obeys
+  // the member hierarchy exactly like kicking them does.
+  const trimmedNick = nickname == null ? '' : String(nickname).trim();
+  if (trimmedNick.length > 32) {
+    throw new ApiError('Nickname must be 32 characters or fewer', { code: 'INVALID_NICKNAME' });
+  }
+  nickname = trimmedNick;
+  if (userId !== actorId) {
+    await assertMemberHierarchy({ serverId, actorId, targetId: userId, action: 'rename' });
+  }
   await runQuery(
     `UPDATE server_members SET nickname = ? WHERE server_id = ? AND user_id = ?`,
     [nickname || null, serverId, userId]

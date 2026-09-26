@@ -62,7 +62,11 @@ export async function createThread({
     );
 
     if (messageId) {
-      await runQuery(`UPDATE messages SET thread_id = ? WHERE id = ?`, [threadId, messageId]);
+      // Only a message of the parent channel can anchor its thread.
+      await runQuery(
+        `UPDATE messages SET thread_id = ? WHERE id = ? AND channel_id = ?`,
+        [threadId, messageId, parentChannelId]
+      );
       // A system message marks the branch point in the parent channel.
       const systemId = generateId();
       await runQuery(
@@ -147,8 +151,11 @@ export async function leaveThread({ threadId, userId }) {
 }
 
 export async function setThreadArchived({ threadId, userId, archived, locked = undefined }) {
-  const thread = await getQuery(`SELECT * FROM channels WHERE id = ?`, [threadId]);
+  const thread = await getQuery(
+    `SELECT * FROM channels WHERE id = ? AND type = 'thread' AND deleted_at IS NULL`, [threadId]
+  );
   if (!thread) throw ApiError.notFound('Thread');
+  if (userId) await assertChannelAccess({ channelId: threadId, userId });
   // The creator may archive their own thread; anyone else needs MANAGE_THREADS.
   // Locking is always a moderator action.
   if (userId && (thread.owner_id !== userId || locked !== undefined)) {
