@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, Users, Circle, AlertTriangle } from 'lucide-react';
 import { get, post } from '../api';
 import { t } from '../i18n/index.jsx';
+import { serverIconOf } from '../utils/avatar';
 
 /**
  * The screen behind /invite/:code — Discord shows the server, who invited you
@@ -54,9 +55,9 @@ export default function InviteJoinScreen({ code, onJoined, onCancel }) {
 
         {preview && !error && (
           <>
-            {preview.server.icon_url ? (
+            {serverIconOf(preview.server) ? (
               <img
-                src={preview.server.icon_url}
+                src={serverIconOf(preview.server)}
                 alt=""
                 className="w-20 h-20 rounded-2xl object-cover mx-auto mb-4"
               />

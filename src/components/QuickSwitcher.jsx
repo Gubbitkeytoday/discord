@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Volume2, AtSign, Server } from 'lucide-react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, serverIconOf } from '../utils/avatar';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
@@ -39,7 +39,7 @@ export default function QuickSwitcher({
     ...servers.map((s) => ({
       key: `s-${s.id}`, kind: 'server', id: s.id,
       label: s.name, hint: t('autocomplete.serverEmoji'),
-      avatar: s.icon_url, icon: Server
+      avatar: serverIconOf(s), icon: Server
     }))
   ], [channels, dms, servers]);
 

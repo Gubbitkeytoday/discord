@@ -62,7 +62,33 @@ let currentLocale = 'en';
 
 /** Translate outside of React, or inside it without a hook. */
 export function t(key, values) {
-  return interpolate(lookup(currentLocale, key), values);
+  return interpolate(lookup(currentLocale, pluralKey(key, values)), values);
+}
+
+/**
+ * Plurals: a string whose `{count}` (or `{n}`) is 1 in a locale with a
+ * singular form reads from `key_one` when that key exists — "1 member", not
+ * "1 members". Locales without grammatical number (Thai) never select it.
+ */
+const pluralRules = {};
+function pluralKey(key, values) {
+  const count = values?.count ?? values?.n;
+  if (typeof count !== 'number') return key;
+  const rules = pluralRules[currentLocale]
+    ?? (pluralRules[currentLocale] = new Intl.PluralRules(INTL_LOCALE[currentLocale] ?? currentLocale));
+  if (rules.select(count) !== 'one') return key;
+  const singular = `${key}_one`;
+  return DICTIONARIES[currentLocale]?.[singular] ? singular : key;
+}
+
+/** True when `key` exists in the active dictionary or the English fallback. */
+export function hasKey(key) {
+  return Boolean(DICTIONARIES[currentLocale]?.[key] ?? DICTIONARIES.en?.[key]);
+}
+
+/** The active locale code ('en', 'th', …) for code outside React. */
+export function activeLocale() {
+  return currentLocale;
 }
 
 /**
@@ -98,7 +124,7 @@ export function I18nProvider({ children }) {
       setLocale,
       availableLocales: LOCALES,
 
-      t: (key, values) => interpolate(lookup(locale, key), values),
+      t: (key, values) => interpolate(lookup(locale, pluralKey(key, values)), values),
 
       // Formatters bound to the active locale. Constructed per render of the
       // provider, not per call, because Intl objects are expensive to build.

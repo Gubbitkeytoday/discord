@@ -147,6 +147,7 @@ export default function ChatArea({
   // Touch: which row a long-press opened the action bar on.
   const [touchActionsId, setTouchActionsId] = useState(null);
   const longPressRef = useRef(null);
+  const lastPointerRef = useRef('mouse');
 
   // Text & Images and Accessibility decide what a message row actually renders.
   const { prefs } = useUserSettings();
@@ -860,9 +861,20 @@ export default function ChatArea({
       <div
         ref={scrollRef}
         onScroll={trackScroll}
+        onPointerDown={(e) => { lastPointerRef.current = e.pointerType; }}
         onClick={(e) => {
-          // A tap anywhere else puts away the long-press action bar.
-          if (touchActionsId && !e.target.closest('.message-actions')) setTouchActionsId(null);
+          if (e.target.closest('.message-actions')) return;
+          // On touch, a plain tap on a message toggles its action bar (phones
+          // have no hover); a tap anywhere else puts it away.
+          const row = lastPointerRef.current === 'touch' ? e.target.closest('.message-row[data-msg-id]') : null;
+          const interactive = e.target.closest('a, button, textarea, input, video, audio, img, [role="button"]');
+          if (row && !interactive && !window.getSelection?.()?.toString()) {
+            const id = row.getAttribute('data-msg-id');
+            const hit = messages.find((m) => String(m.id) === id);
+            setTouchActionsId((current) => (String(current) === id ? null : hit?.id ?? null));
+            return;
+          }
+          if (touchActionsId) setTouchActionsId(null);
         }}
         className="flex-1 overflow-y-auto px-4 max-sm:px-3 select-text"
         aria-busy={isLoadingMessages || isLoadingHistory}
@@ -957,6 +969,7 @@ export default function ChatArea({
 
               <div
                 id={`message-${msg.id}`}
+                data-msg-id={msg.pending || msg.failed ? undefined : msg.id}
                 data-actions-open={touchActionsId === msg.id ? 'true' : undefined}
                 onTouchStart={(e) => {
                   if (msg.pending || e.touches.length !== 1) return;

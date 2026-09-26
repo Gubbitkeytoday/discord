@@ -33,7 +33,7 @@ import NotificationsInbox from './components/NotificationsInbox';
 import { IncomingCall, CallBar } from './components/CallPanel';
 import ChannelGate from './components/ChannelGate';
 import EditHistoryModal from './components/EditHistoryModal';
-import { api, get, post, put, patch, del, upload, setApiIdentity } from './api';
+import { api, get, post, put, patch, del, upload, setApiIdentity, localizeError } from './api';
 import { maskOf } from './utils/permissionCatalog';
 import {
   useUserSettings, loadPreferences, hydratePreferences, applyCategoryFromServer,
@@ -250,11 +250,16 @@ export default function App() {
     setCurrentUserId(user.id);
     setAuthToken(token);
     setAuthState(true);
+    if (!socket.connected) socket.connect();
     socket.emit('identify', { userId: user.id, token });
   }, []);
 
   const handleSignOut = useCallback(async () => {
     try { await post('/api/auth/logout'); } catch { /* offline */ }
+    // The gateway socket was identified as this user: drop it at once so a
+    // signed-out tab stops receiving their DMs and channel traffic.
+    identifiedRef.current = false;
+    socket.disconnect();
     setApiIdentity({});
     setAuthState(false);
     setCurrentUser(null);
@@ -262,7 +267,11 @@ export default function App() {
     setAuthToken(null);
     setServers([]); setChannels([]); setMessages([]); setDmChannels([]); setFriends([]);
     setActiveServerId('home'); setActiveChannelId(null);
-    window.history.replaceState(null, '', '/');
+    // Every other piece of UI state — open modals, drafts, voice, caches in
+    // module scope — belongs to the old session too. A full reload is the only
+    // reset that cannot miss one; the login screen is what it lands on.
+    try { localStorage.removeItem(LAST_SERVER_KEY); } catch { /* private mode */ }
+    window.location.replace('/');
   }, []);
 
   // --- data loading --------------------------------------------------------------
@@ -336,7 +345,7 @@ export default function App() {
           if (ack && !ack.ok) {
             setCurrentVoiceChannel(null);
             setActiveVoiceParticipants([]);
-            pushToast(ack.error ?? t('voice.connectionFailed'), { type: 'error' });
+            pushToast(ack.error ? localizeError(ack) : t('voice.connectionFailed'), { type: 'error' });
             return;
           }
           socket.emit('voice_state_change', {
@@ -854,7 +863,7 @@ export default function App() {
       setMessages((prev) => prev.filter((m) => !gone.has(m.id)));
     };
 
-    const onActionError = ({ error }) => pushToast(error, { type: 'error' });
+    const onActionError = (payload) => pushToast(localizeError(payload), { type: 'error' });
     const onIdentifyError = () => {
       // The session is gone server-side; the only honest answer is the login screen.
       handleSignOut();
@@ -1166,7 +1175,7 @@ export default function App() {
     }, (ack) => {
       if (ack && !ack.ok) {
         setMessages((prev) => prev.map((m) =>
-          m.nonce === nonce ? { ...m, pending: false, failed: true, error: ack.error } : m
+          m.nonce === nonce ? { ...m, pending: false, failed: true, error: localizeError(ack) } : m
         ));
       }
     });
@@ -1186,7 +1195,7 @@ export default function App() {
     // toast, so a dropped socket can never leave the dialog spinning.
     const run = () => {
       socket.emit('delete_message', { messageId }, (ack) => {
-        if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+        if (ack && !ack.ok) pushToast(localizeError(ack), { type: 'error' });
       });
     };
     if (skipConfirm) { run(); return; }
@@ -1200,7 +1209,7 @@ export default function App() {
 
   const handleEditMessage = (messageId, content) => {
     socket.emit('edit_message', { messageId, content }, (ack) => {
-      if (ack && !ack.ok) pushToast(ack.error, { type: 'error' });
+      if (ack && !ack.ok) pushToast(localizeError(ack), { type: 'error' });
     });
   };
 
@@ -1394,7 +1403,7 @@ export default function App() {
   const handleJoinVoice = (voiceChan) => {
     setCurrentVoiceChannel(voiceChan);
     socket.emit('join_voice', { channelId: voiceChan.id }, (ack) => {
-      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(ack.error, { type: 'error' }); }
+      if (ack && !ack.ok) { setCurrentVoiceChannel(null); pushToast(localizeError(ack), { type: 'error' }); }
     });
   };
   const handleLeaveVoice = () => {

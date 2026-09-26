@@ -9,6 +9,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { X, Hash, Volume2, MessagesSquare, Megaphone, Check, Loader2, ShieldCheck, ArrowRight, ArrowLeft } from 'lucide-react';
 import { get, put } from '../api';
 import { useDialog } from './settings/primitives';
+import { serverIconOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
 
 const ICONS = { text: Hash, voice: Volume2, forum: MessagesSquare, announcement: Megaphone, stage: Volume2 };
@@ -94,8 +95,8 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
               <X className="w-5 h-5" />
             </button>
           )}
-          {server.icon_url
-            ? <img src={server.icon_url} alt="" className="w-16 h-16 rounded-2xl object-cover mx-auto mb-3" />
+          {serverIconOf(server)
+            ? <img src={serverIconOf(server)} alt="" className="w-16 h-16 rounded-2xl object-cover mx-auto mb-3" />
             : <div className="w-16 h-16 rounded-2xl bg-d-brand text-white font-bold text-xl flex items-center justify-center mx-auto mb-3">{server.name?.slice(0, 2)}</div>}
           <h2 id="onboarding-title" className="text-xl font-bold text-d-strong">
             {current === 'welcome' && t('onboarding.welcomeTo', { server: server.name })}

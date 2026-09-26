@@ -9,6 +9,8 @@
 //    the server ignores it whenever a real session is present.
 // ============================================================================
 
+import { t, hasKey, activeLocale } from './i18n/index.jsx';
+
 let currentUserId = null;
 let bearerToken = null;
 
@@ -38,6 +40,24 @@ export class ApiRequestError extends Error {
   }
 }
 
+const THAI = /[\u0E00-\u0E7F]/;
+
+/**
+ * Turn an error body into a message in the reader's language. The server
+ * sends a stable `code`; a known code wins, then the server's own text —
+ * unless that text is in a script the reader did not choose (the backend has
+ * historically answered in Thai), in which case a generic line naming the
+ * code is more useful than an unreadable one.
+ */
+export function localizeError(data, status) {
+  const code = data?.code;
+  if (code && hasKey(`apiError.${code}`)) return t(`apiError.${code}`);
+  if (status === 429) return t('apiError.RATE_LIMITED');
+  const message = data?.error;
+  if (message && !(activeLocale() !== 'th' && THAI.test(message))) return message;
+  return t('apiError.generic', { code: code ?? `HTTP ${status}` });
+}
+
 /**
  * api('/api/servers/1')                         GET
  * api('/api/servers', { method: 'POST', body })  JSON body
@@ -64,7 +84,7 @@ export async function api(path, { method = 'GET', body, headers = {}, signal } =
   }
 
   if (!res.ok) {
-    throw new ApiRequestError(data?.error ?? `HTTP ${res.status}`, {
+    throw new ApiRequestError(localizeError(data, res.status), {
       status: res.status, code: data?.code, details: data?.details
     });
   }

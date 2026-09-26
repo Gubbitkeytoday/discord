@@ -20,7 +20,7 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
           <span className="text-sm font-bold text-d-strong flex items-center gap-2">
             <Pin className="w-4 h-4" /> {t('chat.pinnedMessages')}
           </span>
-          <button onClick={onClose} className="text-d-text3 hover:text-d-strong transition-colors">
+          <button type="button" onClick={onClose} aria-label={t('common.close')} className="text-d-text3 hover:text-d-strong transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>

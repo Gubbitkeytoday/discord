@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronRight, Check } from 'lucide-react';
+import { useEscapeLayer } from '../hooks/useFocusTrap';
 
 const MENU_MARGIN = 8;
 
@@ -30,14 +31,18 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
   // move between items, Home/End jump, Escape closes and hands focus back.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  useEscapeLayer(() => onCloseRef.current());
   useEffect(() => {
     const returnTo = document.activeElement;
     ref.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true });
     const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onCloseRef.current(); return; }
       const menu = ref.current;
       if (!menu || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
-      const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
+      // Arrow keys walk the innermost menu that holds focus (a submenu when
+      // one is open), not every item in the tree.
+      const scope = document.activeElement?.closest?.('[role="menu"]');
+      const within = scope && menu.contains(scope) ? scope : menu;
+      const items = [...within.querySelectorAll(':scope > div > [role="menuitem"]:not(:disabled)')];
       if (items.length === 0) return;
       e.preventDefault();
       const at = items.indexOf(document.activeElement);
@@ -80,7 +85,17 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
       >
         <button
           role="menuitem"
-          onClick={run(item)}
+          onClick={item.submenu ? () => setOpenSub(isOpen ? null : `${depth}-${index}`) : run(item)}
+          onKeyDown={(e) => {
+            if (item.submenu && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+              e.preventDefault();
+              const host = e.currentTarget.parentElement;
+              setOpenSub(`${depth}-${index}`);
+              requestAnimationFrame(() => {
+                host?.querySelector('[role="menu"] [role="menuitem"]:not(:disabled)')?.focus();
+              });
+            }
+          }}
           disabled={item.disabled}
           aria-haspopup={item.submenu ? 'menu' : undefined}
           aria-expanded={item.submenu ? isOpen : undefined}
@@ -106,15 +121,9 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
         </button>
 
         {item.submenu && isOpen && (
-          <div
-            role="menu"
-            className={`absolute top-0 left-full -ml-1 ${width} max-h-80 overflow-y-auto bg-d-sunken border border-d-surface rounded-md shadow-2xl py-1.5 z-10`}
-          >
-            {item.submenu.length === 0 && (
-              <p className="px-3 py-2 text-xs text-d-text4">{item.emptyLabel ?? '—'}</p>
-            )}
+          <Submenu width={width} emptyLabel={item.emptyLabel} empty={item.submenu.length === 0}>
             {renderItems(item.submenu, depth + 1)}
-          </div>
+          </Submenu>
         )}
       </div>
     );
@@ -136,5 +145,44 @@ export default function ContextMenu({ x, y, items, onClose, width = 'w-56' }) {
         {renderItems(items)}
       </div>
     </>
+  );
+}
+
+/**
+ * A submenu opens beside its item — to the right by default, flipped to the
+ * left when that would run off the viewport, and nudged up when it would run
+ * off the bottom (the Roles submenu near the right edge used to render at
+ * x=1368 in a 1366px window).
+ */
+function Submenu({ width, empty, emptyLabel, children }) {
+  const ref = useRef(null);
+  const [placement, setPlacement] = useState({ side: 'right', shiftY: 0 });
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const rect = node.getBoundingClientRect();
+    const parent = node.parentElement.getBoundingClientRect();
+    const side = parent.right + rect.width + MENU_MARGIN > window.innerWidth
+      && parent.left - rect.width - MENU_MARGIN >= 0 ? 'left' : 'right';
+    const overflowY = rect.bottom - (window.innerHeight - MENU_MARGIN);
+    setPlacement({ side, shiftY: overflowY > 0 ? -Math.min(overflowY, rect.top - MENU_MARGIN) : 0 });
+  }, []);
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      style={{ transform: placement.shiftY ? `translateY(${placement.shiftY}px)` : undefined }}
+      className={`absolute top-0 ${placement.side === 'right' ? 'left-full -ml-1' : 'right-full -mr-1'} ${width} max-h-80 overflow-y-auto bg-d-sunken border border-d-surface rounded-md shadow-2xl py-1.5 z-10`}
+      onKeyDown={(e) => {
+        if (e.key === (placement.side === 'right' ? 'ArrowLeft' : 'ArrowRight')) {
+          e.preventDefault();
+          e.stopPropagation();
+          ref.current?.parentElement?.querySelector(':scope > [role="menuitem"]')?.focus();
+        }
+      }}
+    >
+      {empty && <p className="px-3 py-2 text-xs text-d-text4">{emptyLabel ?? '—'}</p>}
+      {children}
+    </div>
   );
 }

@@ -784,7 +784,7 @@ function RolesTab({ roles, api, reload, onToast, onDirtyChange, nudge = 0 }) {
           onClick={createRole}
           className="flex items-center gap-1 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-1.5 rounded transition-colors"
         >
-          <Plus className="w-3.5 h-3.5" /> {t('audit.ROLE_CREATE')}
+          <Plus className="w-3.5 h-3.5" /> {t('roles.create')}
         </button>
       </div>
 
