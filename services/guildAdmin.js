@@ -16,6 +16,7 @@ import { addReference, releaseReference, findFileByPublicUrl } from '../storageS
 import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAuditLog } from './guilds.js';
 import { publicStatus, currentViewerId } from '../lib/presence.js'; // safety
 import { canViewProfile } from './users.js'; // safety
+import { validateRoleStyle, assertRoleStyleComplete, isReservedVanity } from './serverAppearance.js'; // servers
 
 // --- guild profile -----------------------------------------------------------
 
@@ -37,6 +38,9 @@ async function validateVanity(slug, serverId) {
   if (!/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(clean)) {
     throw new ApiError('Vanity URL may use lowercase letters, digits and hyphens (2–32 characters)',
       { code: 'VANITY_INVALID' });
+  }
+  if (isReservedVanity(clean)) {
+    throw new ApiError('That vanity URL is reserved', { status: 409, code: 'VANITY_RESERVED' });
   }
   const taken = await getQuery(
     `SELECT id FROM servers WHERE vanity_url = ? AND id != ? AND deleted_at IS NULL`, [clean, serverId]
@@ -92,14 +96,22 @@ export async function updateGuild({ serverId, actorId, patch }) {
   await transaction(async () => {
     await runQuery(`UPDATE servers SET ${sets.join(', ')} WHERE id = ?`, params);
 
-    // Track icon/banner file references so a replaced icon becomes collectable.
-    for (const [urlField, idField] of [['icon_url', 'icon_file_id'], ['banner_url', 'banner_file_id']]) {
+    // Track icon/banner/splash file references so a replaced image becomes
+    // collectable, and remember whether the new one is animated: the client
+    // shows a still until hover, and needs to know there is anything to play.
+    for (const [urlField, idField, animatedField] of [
+      ['icon_url', 'icon_file_id', 'icon_animated'],
+      ['banner_url', 'banner_file_id', 'banner_animated'],
+      ['splash_url', 'splash_file_id', null]
+    ]) {
       if (patch[urlField] === undefined) continue;
       const file = await findFileByPublicUrl(patch[urlField]);
       if (before[idField] && before[idField] !== file?.id) await releaseReference(before[idField]);
-      if (file) {
-        await addReference(file.id);
-        await runQuery(`UPDATE servers SET ${idField} = ? WHERE id = ?`, [file.id, serverId]);
+      if (file && before[idField] !== file.id) await addReference(file.id);
+      await runQuery(`UPDATE servers SET ${idField} = ? WHERE id = ?`, [file?.id ?? null, serverId]);
+      if (animatedField) {
+        const animated = file ? Boolean(file.is_animated) : /\.gif(\?|#|$)/i.test(String(patch[urlField] ?? ''));
+        await runQuery(`UPDATE servers SET ${animatedField} = ? WHERE id = ?`, [animated ? 1 : 0, serverId]);
       }
     }
     await writeAuditLog({
@@ -210,9 +222,20 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     nextPosition: role.is_everyone ? undefined : patch.position
   });
 
-  // `color_secondary` turns the name into a gradient; NULL keeps it flat.
+  // Style: solid / gradient (two colours + angle) / holographic, plus a
+  // unicode emoji as the role icon. Validated as a group so a gradient can
+  // never be stored without its second colour.
+  const style = validateRoleStyle(patch);
+  if (style.unicode_emoji !== undefined && !role.is_everyone) {
+    // An emoji icon replaces an uploaded one, and vice versa.
+    patch = { ...patch, icon_url: style.unicode_emoji ? null : patch.icon_url };
+  }
+  if (typeof patch.icon_url === 'string' && patch.icon_url) {
+    patch = { ...patch, icon_url: proxiedImageUrl(patch.icon_url) };
+  }
   const writable = ['name', 'color', 'color_secondary', 'permissions', 'hoist',
-                    'mentionable', 'position', 'icon_url'];
+                    'mentionable', 'position', 'icon_url', 'style', 'gradient_angle', 'unicode_emoji'];
+  const next = { ...role };
   const sets = [];
   const params = [];
   const changes = [];
@@ -223,21 +246,64 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     const value = ['hoist', 'mentionable'].includes(field)
       ? (patch[field] ? 1 : 0)
       : field === 'permissions' ? String(patch[field])
-      : field === 'color' || field === 'color_secondary' ? normaliseColor(patch[field], field)
+      : field === 'color' ? normaliseColor(patch[field], field)
+      : field in style ? style[field]
+      : field === 'icon_url' ? (patch[field] || null)
       : patch[field];
+    next[field] = value;
+    if (value === role[field]) continue;
     sets.push(`${field} = ?`);
     params.push(value);
     changes.push({ key: field, old: role[field], new: value });
   }
+  // A solid role keeps no second colour, so switching back is a clean reset.
+  if (next.style === 'solid' && next.color_secondary && patch.style === 'solid') {
+    next.color_secondary = null;
+    sets.push('color_secondary = ?');
+    params.push(null);
+    changes.push({ key: 'color_secondary', old: role.color_secondary, new: null });
+  }
+  if (!role.is_everyone) assertRoleStyleComplete(next);
   if (!sets.length) return role;
 
   params.push(roleId);
-  await runQuery(`UPDATE roles SET ${sets.join(', ')} WHERE id = ?`, params);
-  await writeAuditLog({
-    serverId, userId: actorId, actionType: 'ROLE_UPDATE',
-    targetType: 'role', targetId: roleId, changes
+  await transaction(async () => {
+    await runQuery(`UPDATE roles SET ${sets.join(', ')} WHERE id = ?`, params);
+    // Keep the icon's storage reference in step with icon_url.
+    if (patch.icon_url !== undefined || style.unicode_emoji) {
+      const file = next.icon_url ? await findFileByPublicUrl(next.icon_url) : null;
+      if (role.icon_file_id && role.icon_file_id !== file?.id) await releaseReference(role.icon_file_id);
+      if (file && role.icon_file_id !== file.id) await addReference(file.id);
+      await runQuery(`UPDATE roles SET icon_file_id = ? WHERE id = ?`, [file?.id ?? null, roleId]);
+    }
+    await writeAuditLog({
+      serverId, userId: actorId, actionType: 'ROLE_UPDATE',
+      targetType: 'role', targetId: roleId, changes
+    });
   });
   return getQuery(`SELECT * FROM roles WHERE id = ?`, [roleId]);
+}
+
+/**
+ * Upload path for a role icon: `file` is a stored files row (already checked
+ * for size and type by the route). Clears any unicode emoji icon.
+ */
+export async function setRoleIcon({ serverId, roleId, actorId, file }) {
+  return updateRole({
+    serverId, roleId, actorId,
+    patch: file ? { icon_url: file.url, unicode_emoji: null } : { icon_url: null }
+  });
+}
+
+/**
+ * Banner, invite splash or icon from an uploaded file (or null to remove).
+ * MANAGE_GUILD is checked by updateGuild; the route checks it before the
+ * upload too, so a member without it cannot even spend storage.
+ */
+export async function setGuildImage({ serverId, actorId, kind, file }) {
+  const field = { banner: 'banner_url', splash: 'splash_url', icon: 'icon_url' }[kind];
+  if (!field) throw new ApiError('kind must be banner, splash or icon', { code: 'INVALID_KIND' });
+  return updateGuild({ serverId, actorId, patch: { [field]: file ? file.url : null } });
 }
 
 export async function deleteRole({ serverId, roleId, actorId }) {

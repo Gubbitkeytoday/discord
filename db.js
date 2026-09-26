@@ -21,6 +21,7 @@ import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
 import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
 import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
 import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // admin polish (v41–v42)
+import { SERVERS_MIGRATIONS } from './db/migrations/servers.js'; // servers (v46–v47)
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
 
@@ -683,6 +684,13 @@ const MIGRATIONS = [
   }
   // admin polish (v41–v42): recurring events, moderator alert channel.
   ,...ADMIN_POLISH_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // servers (v46–v47): role styles/icons, channel emoji, server profile, discovery.
+  ,...SERVERS_MIGRATIONS.map((m) => ({
     version: m.version,
     name: m.name,
     up: () => m.up({ runQuery, allQuery }),
