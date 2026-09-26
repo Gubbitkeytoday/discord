@@ -217,7 +217,12 @@ const DROPPED_ITEM_TYPES = new Set(['attachment', 'replay_event', 'replay_record
  */
 /** Split a Sentry envelope (header line, then item header + payload pairs). */
 export function parseEnvelope(input) {
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input ?? ''), 'utf8');
+  // A request body is a Buffer (raw parser) or a string; anything else — an
+  // array or object from a tampered content type — is rejected, not coerced.
+  if (!Buffer.isBuffer(input) && typeof input !== 'string') {
+    throw new ApiError('Malformed envelope', { code: 'BAD_ENVELOPE' });
+  }
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'utf8');
   let pos = 0;
   const readLine = () => {
     const nl = buf.indexOf(0x0a, pos);
