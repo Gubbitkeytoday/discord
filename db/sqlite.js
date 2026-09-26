@@ -71,6 +71,13 @@ export function createSqliteDriver({ dbPath, verbose = false, quiet = false }) {
     readerState = 'opening';
     const handle = new S.Database(dbPath, S.OPEN_READWRITE, (err) => {
       if (err) { readerState = 'disabled'; return; }
+      // One statement at a time on the reader. In parallel mode, overlapping
+      // statements keep the connection's WAL read transaction open, so a
+      // read issued *after* a commit can still see the old snapshot — under
+      // load, createMessage's re-read of the row it just inserted returned
+      // nothing (500 "reading 'duplicate'"). Serialised, every statement
+      // starts a fresh snapshot: read-your-writes holds.
+      handle.serialize();
       handle.run('PRAGMA busy_timeout = 5000');
       handle.run('PRAGMA query_only = ON', (e) => {
         if (e) { readerState = 'disabled'; return; }

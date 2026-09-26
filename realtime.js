@@ -15,8 +15,10 @@ import * as linkEmbeds from './services/linkEmbeds.js';
 import { resolveSession, SESSION_COOKIE } from './lib/auth.js';
 import { config } from './lib/config.js';
 import {
-  assertChannelAccess, canInChannel, loadGuildPermissionContext
+  assertChannelAccess, canInChannel, loadGuildPermissionContext, resolveMemberPermissions
 } from './services/access.js';
+import { messageAdmission } from './lib/admission.js';
+import { permCacheStats } from './services/permCache.js';
 import { resolveBotToken } from './services/applications.js';
 import { checkSocketLimitShared, createFloodGuard } from './lib/rateLimit.js';
 import {
@@ -163,7 +165,7 @@ export async function recoveryAllowed(session) {
     if (room.startsWith('voice-') || room.startsWith('user-') || room.startsWith('application-')) return false;
     const server = await getQuery(`SELECT id FROM servers WHERE id = ? AND deleted_at IS NULL`, [room]);
     if (server) {
-      const resolved = await resolvePermissions({ userId, serverId: room }).catch(() => null);
+      const resolved = await resolveMemberPermissions({ userId, serverId: room }).catch(() => null);
       if (!resolved?.isMember) return false;
       continue;
     }
@@ -198,15 +200,83 @@ async function onRecovered(io, socket) {
   socketsByUser.get(userId).add(socket.id);
   socket.data.voiceChannelId = null;
   const count = await presence.addConnection(userId, socket.id);
-  if (count === 1) {
-    const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
-    const wanted = current?.status === 'invisible' ? 'invisible'
-      : (['online', 'idle', 'dnd'].includes(socket.data.chosenStatus) ? socket.data.chosenStatus : 'online');
-    const user = await userService.setPresence({ userId, status: wanted });
-    await emitToRelated(io, userId, 'presence_updated',
-      { userId, status: user.status === 'invisible' ? 'offline' : user.status });
-  }
+  if (count === 1) await comeOnline(io, userId, socket.data.chosenStatus);
+  await touchLastSeen(userId);
+}
+
+// --- presence transitions ------------------------------------------------------
+//
+// A reconnect storm used to cost every user an offline write + broadcast and
+// then an online write + broadcast to everyone related (docs/PERFORMANCE.md
+// #5). Now:
+//   - going offline waits PRESENCE_OFFLINE_GRACE_MS (default 5 s); a user who
+//     reconnects inside it — here or on another instance — never went
+//     offline for anyone else;
+//   - coming online is a no-op (no write, no broadcast) when the stored
+//     status already says present;
+//   - last_seen_at is written at most once per LAST_SEEN_WRITE_MS per user.
+const PRESENCE_OFFLINE_GRACE_MS = Math.max(0, Number(process.env.PRESENCE_OFFLINE_GRACE_MS ?? 5000));
+const LAST_SEEN_WRITE_MS = 5 * 60_000;
+const offlineTimers = new Map();   // userId -> timeout
+const lastSeenWrites = new Map();  // userId -> ms
+
+async function touchLastSeen(userId, { force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - (lastSeenWrites.get(userId) ?? 0) < LAST_SEEN_WRITE_MS) return;
+  if (lastSeenWrites.size > 100_000) lastSeenWrites.clear();
+  lastSeenWrites.set(userId, now);
   await userService.touchLastSeen(userId);
+}
+
+/** First connection anywhere: announce, unless the stored status says present. */
+async function comeOnline(io, userId, preferred = null) {
+  const pending = offlineTimers.get(userId);
+  if (pending) { clearTimeout(pending); offlineTimers.delete(userId); }
+  const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
+  // Still present (a reconnect inside the grace window, or "invisible", which
+  // is kept across sessions as on Discord): nothing changed for anyone else.
+  if (current && current.status !== 'offline') return;
+  const status = ['online', 'idle', 'dnd'].includes(preferred) ? preferred : 'online';
+  const user = await userService.setPresence({ userId, status });
+  await emitToRelated(io, userId, 'presence_updated', { userId, status: user.status });
+}
+
+/** Last connection anywhere went away: go offline after the grace period. */
+function scheduleOffline(io, userId) {
+  clearTimeout(offlineTimers.get(userId));
+  const run = async () => {
+    offlineTimers.delete(userId);
+    // Back already (another tab, another instance, a resumed socket)?
+    if (await presence.connectionCount(userId) > 0) return;
+    await touchLastSeen(userId, { force: true });
+    const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
+    // Invisible users already look offline and keep "invisible" for next time.
+    if (!current || current.status === 'offline' || current.status === 'invisible') return;
+    await userService.setPresence({ userId, status: 'offline' });
+    await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
+  };
+  const fail = (err) => console.error('offline transition failed:', err.message);
+  if (PRESENCE_OFFLINE_GRACE_MS === 0) return run().catch(fail);
+  const timer = setTimeout(() => run().catch(fail), PRESENCE_OFFLINE_GRACE_MS);
+  timer.unref?.();
+  offlineTimers.set(userId, timer);
+  return undefined;
+}
+
+/** Run pending offline transitions now (shutdown must not strand them). */
+async function flushOfflineTimers(io) {
+  const users = [...offlineTimers.keys()];
+  for (const userId of users) {
+    clearTimeout(offlineTimers.get(userId));
+    offlineTimers.delete(userId);
+  }
+  for (const userId of users) {
+    if (await presence.connectionCount(userId) > 0) continue;
+    const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]).catch(() => null);
+    if (!current || current.status === 'offline' || current.status === 'invisible') continue;
+    await userService.setPresence({ userId, status: 'offline' }).catch(() => {});
+    await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' }).catch(() => {});
+  }
 }
 
 /** Periodic cluster chores; nothing to do on a single node. */
@@ -256,6 +326,7 @@ function startClusterTimers(io) {
 export async function drainRealtime(io) {
   draining = true;
   for (const t of timers.splice(0)) clearInterval(t);
+  await flushOfflineTimers(io).catch((err) => console.warn('offline flush failed:', err.message));
   io.emit('server_draining', { reconnect: true, retry_after_ms: 250 + Math.floor(Math.random() * 1750) });
   // Let the frame flush before the transports close.
   await new Promise((r) => setTimeout(r, 100));
@@ -335,14 +406,8 @@ export async function registerRealtime(io) {
 
       // First socket for this user means they just came online. A user who
       // chose "invisible" stays invisible to others, as on Discord.
-      if (connections === 1) {
-        const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
-        const status = current?.status === 'invisible' ? 'invisible' : 'online';
-        const user = await userService.setPresence({ userId, status });
-        await emitToRelated(io, userId, 'presence_updated',
-          { userId, status: user.status === 'invisible' ? 'offline' : user.status });
-      }
-      await userService.touchLastSeen(userId);
+      if (connections === 1) await comeOnline(io, userId);
+      await touchLastSeen(userId);
       socket.emit('identified', { userId, applicationId: socket.data.applicationId ?? null });
     });
 
@@ -352,10 +417,31 @@ export async function registerRealtime(io) {
     socket.on('join_server', async (serverId, ack) => {
       const userId = socket.data.userId;
       if (!serverId || !userId) return ack?.({ ok: false, error: 'Authentication required' });
-      const resolved = await resolvePermissions({ userId, serverId }).catch(() => null);
+      const resolved = await resolveMemberPermissions({ userId, serverId }).catch(() => null);
       if (!resolved?.isMember) return ack?.({ ok: false, error: 'Not a member of this server' });
       socket.join(serverId);
       ack?.({ ok: true });
+    });
+
+    // Batch form for reconnects: one round trip re-joins every room the
+    // client had, each still an access decision (served by the permission
+    // cache). Returns the rooms actually joined and those refused.
+    socket.on('join_rooms', async ({ servers = [], channels = [] } = {}, ack) => {
+      const userId = socket.data.userId;
+      if (!userId) return ack?.({ ok: false, error: 'Authentication required' });
+      const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 100) : []);
+      const joined = [];
+      const refused = [];
+      for (const serverId of list(servers)) {
+        const resolved = await resolveMemberPermissions({ userId, serverId }).catch(() => null);
+        if (resolved?.isMember) { socket.join(serverId); joined.push(serverId); } else refused.push(serverId);
+      }
+      for (const channelId of list(channels)) {
+        if (await canInChannel({ channelId, userId, permission: 'VIEW_CHANNEL' })) {
+          socket.join(channelId); joined.push(channelId);
+        } else refused.push(channelId);
+      }
+      ack?.({ ok: true, joined, refused });
     });
 
     socket.on('join_channel', async (channelId, ack) => {
@@ -398,9 +484,11 @@ export async function registerRealtime(io) {
           return;
         }
 
-        const message = await messageService.createMessage({
+        // Bounded concurrency: refuse with RETRY_LATER rather than queue
+        // without limit when the database falls behind (lib/admission.js).
+        const message = await messageAdmission.run(() => messageService.createMessage({
           channelId, userId, content, attachments, replyToId, nonce, stickerId
-        });
+        }));
 
         clearTyping(io, channelId, userId);
         ack?.({ ok: true, message });
@@ -786,15 +874,8 @@ export async function registerRealtime(io) {
 
       // Only go offline once the user's *last* tab or device disconnects -
       // on any instance, when several share Redis.
-      if (sockets && remaining === 0) {
-        await userService.touchLastSeen(userId);
-        // Keep an explicit "invisible" so it survives the next sign-in.
-        const current = await getQuery(`SELECT status FROM users WHERE id = ?`, [userId]);
-        if (current?.status !== 'invisible') {
-          await userService.setPresence({ userId, status: 'offline' });
-        }
-        await emitToRelated(io, userId, 'presence_updated', { userId, status: 'offline' });
-      }
+      // After the grace period, so a quick reconnect emits nothing at all.
+      if (sockets && remaining === 0) scheduleOffline(io, userId);
 
       for (const [channelId, users] of typing) {
         if (users.has(userId)) clearTyping(io, channelId, userId);
@@ -1187,11 +1268,15 @@ export async function resetVolatileState() {
   // In-memory maps outlive a restart in tests, where the module is not reloaded.
   typing.clear();
   typingSentAt.clear();
+  for (const t of offlineTimers.values()) clearTimeout(t);
+  offlineTimers.clear();
+  lastSeenWrites.clear();
   soundCooldown.clear();
   lastSpokeAt.clear();
 }
 
 export { holdsLease } from './lib/redis.js';
+export { messageAdmission } from './lib/admission.js';
 
 /**
  * Gateway mode for /api/health and /api/ready. Deliberately terse (no hosts,
@@ -1203,6 +1288,8 @@ export function realtimeHealth() {
     mode: redis.enabled ? 'cluster' : 'single',
     redis: redis.enabled ? (redis.connected ? 'connected' : 'disconnected') : 'disabled',
     recovery_window_ms: RECOVERY_WINDOW_MS,
+    message_admission: messageAdmission.snapshot(),
+    permission_cache: permCacheStats(),
     // A cluster member that lost Redis cannot fan out to the other
     // instances; it should leave the load-balancer pool until it is back.
     ready: !redis.enabled || redis.connected

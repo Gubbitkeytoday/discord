@@ -20,6 +20,7 @@
 
 import { getQuery, allQuery, runQuery, transaction, sql } from '../db.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { announceRevoked } from '../lib/sessionEvents.js';
 
 // A guard against a runaway export on a very old account. Anything larger than
 // this is a support request, not a download.
@@ -140,6 +141,9 @@ export async function deleteAccount({ userId }) {
       [userId]
     );
   });
+  // Cached sessions and live sockets go with the rows (lib/auth.js cache,
+  // realtime disconnect) — on every instance.
+  announceRevoked({ userId });
 
   return { deleted: true };
 }

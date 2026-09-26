@@ -291,6 +291,95 @@ describe('connection state recovery (single node)', () => {
   });
 });
 
+describe('permission cache', () => {
+  let g;
+  before(async () => { g = await makeGuild(); });
+
+  test('a revoke through the API applies to the very next check', async () => {
+    const url = `/api/channels/${g.pub}/messages?limit=1`;
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);   // warm
+    await api('PUT', `/api/channels/${g.pub}/permissions/member/${g.member}`, { deny: VIEW_CHANNEL }, as(g.owner));
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 403);
+    await api('DELETE', `/api/channels/${g.pub}/permissions/member/${g.member}`, undefined, as(g.owner));
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);
+  });
+
+  test('a change made directly in SQL (no app hook at all) is honoured too — database triggers', async () => {
+    const { runQuery } = await import('../db.js');
+    const url = `/api/channels/${g.pub}/messages?limit=1`;
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);
+    await runQuery(`UPDATE server_members SET left_at = ? WHERE server_id = ? AND user_id = ?`,
+      [new Date().toISOString(), g.serverId, g.member]);
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 403, 'left member refused at once');
+    await runQuery(`UPDATE server_members SET left_at = NULL WHERE server_id = ? AND user_id = ?`, [g.serverId, g.member]);
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);
+    // Role permission edit straight in the table.
+    const { getQuery } = await import('../db.js');
+    const { permissions } = await getQuery(`SELECT permissions FROM roles WHERE id = ?`, [g.serverId]);
+    await runQuery(`UPDATE roles SET permissions = '0' WHERE id = ?`, [g.serverId]);
+    try {
+      assert.equal((await api('GET', url, undefined, as(g.member))).status, 403, '@everyone stripped');
+    } finally {
+      await runQuery(`UPDATE roles SET permissions = ? WHERE id = ?`, [permissions, g.serverId]);
+    }
+    assert.equal((await api('GET', url, undefined, as(g.member))).status, 200);
+  });
+
+  test('timeouts apply from the cached timeout_until without invalidation', async () => {
+    const { runQuery } = await import('../db.js');
+    const until = new Date(Date.now() + 1500).toISOString();
+    await runQuery(`UPDATE server_members SET timeout_until = ? WHERE server_id = ? AND user_id = ?`, [until, g.serverId, g.member]);
+    const blocked = await api('POST', '/api/messages', { channel_id: g.pub, content: 'x' }, as(g.member));
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.code, 'TIMED_OUT');
+    await sleep(1700);
+    const ok = await api('POST', '/api/messages', { channel_id: g.pub, content: 'after timeout' }, as(g.member));
+    assert.equal(ok.status, 200);
+  });
+
+  test('batch join_rooms re-joins only what is still allowed', async () => {
+    const sock = await connect(g.member);
+    const res = await ack(sock, 'join_rooms', { servers: [g.serverId, 'no-such-guild'], channels: [g.pub, g.priv] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(res.joined.sort(), [g.pub, g.serverId].sort());
+    assert.deepEqual(res.refused.sort(), ['no-such-guild', g.priv].sort());
+    sock.disconnect();
+  });
+});
+
+describe('admission control and login limits', () => {
+  test('the limiter admits `concurrency`, queues `maxQueue`, refuses the rest with RETRY_LATER', async () => {
+    const { createAdmission } = await import('../lib/admission.js');
+    const lim = createAdmission({ name: 't', concurrency: 1, maxQueue: 1, maxWaitMs: 200 });
+    let release;
+    const first = lim.run(() => new Promise((r) => { release = r; }));
+    const second = lim.run(async () => 'second');
+    await assert.rejects(lim.run(async () => 'third'), (e) => e.code === 'RETRY_LATER' && e.status === 503);
+    release('first');
+    assert.equal(await first, 'first');
+    assert.equal(await second, 'second');
+    // Queued work that waits too long is refused rather than run late.
+    let hold;
+    const busy = lim.run(() => new Promise((r) => { hold = r; }));
+    await assert.rejects(lim.run(async () => 'late'), (e) => e.code === 'RETRY_LATER');
+    hold();
+    await busy;
+    assert.equal(lim.snapshot().active, 0);
+  });
+
+  test('login attempts are limited per IP and username, not per IP alone', async () => {
+    const target = `nobody${crypto.randomBytes(3).toString('hex')}`;
+    const statuses = [];
+    for (let i = 0; i < 11; i += 1) {
+      statuses.push((await api('POST', '/api/auth/login', { username: target, password: `wrong-${i}` }, { 'x-user-id': '' })).status);
+    }
+    assert.equal(statuses.at(-1), 429, statuses.join(','));
+    const other = await api('POST', '/api/auth/login', { username: `${target}x`, password: 'wrong' }, { 'x-user-id': '' });
+    assert.notEqual(other.status, 429, 'another account from the same address is still allowed');
+  });
+});
+
 describe('flood protection and fan-out throttles', () => {
   let g;
   before(async () => { g = await makeGuild(); });
@@ -365,7 +454,9 @@ describe('multi-instance with Redis', { skip: clusterSkip }, () => {
         RATE_LIMIT_REGISTER_PER_HOUR: '10000',
         REDIS_URL: redisUrlFromEnv || `redis://127.0.0.1:${redisPort}`,
         REDIS_KEY_PREFIX: prefix,
-        SHUTDOWN_TIMEOUT_MS: '8000'
+        SHUTDOWN_TIMEOUT_MS: '8000',
+        PRESENCE_OFFLINE_GRACE_MS: '600',
+        SESSION_CACHE_TTL_MS: '30000'
       },
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -436,13 +527,34 @@ describe('multi-instance with Redis', { skip: clusterSkip }, () => {
     const x1 = await connect(g.member, { base: bases[0] });
     const x2 = await connect(g.member, { base: bases[1] });
     await sleep(300);
-    const early = waitFor(watcher, 'presence_updated', 800, (p) => p.userId === g.member && p.status === 'offline');
+    const early = waitFor(watcher, 'presence_updated', 1200, (p) => p.userId === g.member && p.status === 'offline');
     x1.disconnect();
     assert.equal(await early, null, 'still connected on the other instance → not offline');
-    const offline = waitFor(watcher, 'presence_updated', 3000, (p) => p.userId === g.member && p.status === 'offline');
+    // A reconnect inside the grace window (here: to the *other* instance) is
+    // invisible to everyone else: no offline, no online.
+    const flap = waitFor(watcher, 'presence_updated', 1500, (p) => p.userId === g.member);
     x2.disconnect();
-    assert.ok(await offline, 'last connection anywhere → offline');
+    const x3 = await connect(g.member, { base: bases[0] });
+    assert.equal(await flap, null, 'quick reconnect emits no presence change');
+    const offline = waitFor(watcher, 'presence_updated', 4000, (p) => p.userId === g.member && p.status === 'offline');
+    x3.disconnect();
+    assert.ok(await offline, 'last connection anywhere → offline after the grace period');
     watcher.disconnect();
+  });
+
+  test('a session revoked on one instance is refused at once by the other (session cache)', async () => {
+    const username = `sc${crypto.randomBytes(4).toString('hex')}`;
+    const reg = await api('POST', '/api/auth/register', { username, password: 'correct-horse-battery' },
+      { 'x-user-id': '' }, bases[0]);
+    assert.equal(reg.status, 201, JSON.stringify(reg.body));
+    const bearer = { Authorization: `Bearer ${reg.body.token}`, 'x-user-id': '' };
+    // Warm both instances' caches.
+    assert.equal((await api('GET', '/api/auth/me', undefined, bearer, bases[0])).status, 200);
+    assert.equal((await api('GET', '/api/auth/me', undefined, bearer, bases[1])).status, 200);
+    assert.equal((await api('POST', '/api/auth/logout', {}, bearer, bases[0])).status, 200);
+    await sleep(150);   // pub/sub hop
+    assert.equal((await api('GET', '/api/auth/me', undefined, bearer, bases[1])).status, 401);
+    assert.equal((await api('GET', '/api/auth/me', undefined, bearer, bases[0])).status, 401);
   });
 
   test('rate limits are shared between instances', async () => {
