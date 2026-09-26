@@ -42,6 +42,7 @@ const ForwardMessageModal = lazyComponent(() => import('./components/ForwardMess
 const CreateGroupDmModal = lazyComponent(() => import('./components/CreateGroupDmModal'));
 const EditHistoryModal = lazyComponent(() => import('./components/EditHistoryModal'));
 const SearchResultsPanel = lazyComponent(() => import('./components/SearchResultsPanel'));
+const InviteModal = lazyComponent(() => import('./components/InviteModal'));
 const CreateChannelModal = lazyComponent(() => import('./components/CreateChannelModal'));
 const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
 const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
@@ -196,6 +197,7 @@ export default function App() {
   const [activeCall, setActiveCall] = useState(null);       // { channelId, call }
   const [showGroupDmModal, setShowGroupDmModal] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
+  const [inviteFor, setInviteFor] = useState(null);   // { server, channelId } for the invite dialog
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const { prefs } = useUserSettings();
   // A preference that failed to save has already been rolled back; say so.
@@ -1504,6 +1506,8 @@ export default function App() {
       const newServer = await post('/api/servers', { name, icon_url });
       setServers((prev) => [...prev, newServer]);
       setActiveServerId(newServer.id);
+      // A new server is empty: offer the invite straight away, as Discord does.
+      setInviteFor({ server: newServer, channelId: null });
     } catch (err) { toastError(err); }
   };
 
@@ -1527,20 +1531,11 @@ export default function App() {
     } catch (err) { toastError(err); }
   };
 
-  const handleCreateInvite = async () => {
-    try {
-      const invite = await post(`/api/servers/${activeServerId}/invites`, { channelId: activeChannelId, maxAge: 86400 });
-      const link = `${window.location.origin}/invite/${invite.code}`;
-      await navigator.clipboard?.writeText(link).catch(() => {});
-      // Streamer Mode hides the code itself — it is still on the clipboard.
-      const hide = prefs.streamerMode.enabled && prefs.streamerMode.hideInviteLinks;
-      pushToast(
-        hide ? t('server.inviteCopiedHidden') : t('server.inviteCopied', { code: invite.code }),
-        { type: 'success' }
-      );
-    } catch (err) {
-      pushToast(t('server.inviteFailed', { error: err.message }), { type: 'error' });
-    }
+  // "Invite people": show the link with its expiry and use limit (it used
+  // to be copied silently, expiring after 24 h without saying so).
+  const handleCreateInvite = () => {
+    const server = servers.find((sv) => sv.id === activeServerId);
+    if (server) setInviteFor({ server, channelId: activeChannelId });
   };
 
   const handleLeaveServer = () => {
@@ -2512,6 +2507,16 @@ export default function App() {
       {voiceRoomPortal}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      {inviteFor && (
+        <InviteModal
+          server={inviteFor.server}
+          channelId={inviteFor.channelId}
+          hideLink={prefs.streamerMode.enabled && prefs.streamerMode.hideInviteLinks}
+          onClose={() => setInviteFor(null)}
+          onToast={pushToast}
+        />
+      )}
 
       {editHistoryFor && (
         <EditHistoryModal message={editHistoryFor} onClose={() => setEditHistoryFor(null)} />

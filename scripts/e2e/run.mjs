@@ -261,7 +261,13 @@ async function main() {
       const name = a.getByPlaceholder('e.g. Chill Squad HQ');
       await name.fill(serverName);
       await a.getByRole('button', { name: /^Create$/ }).click();
-      await visible(a.getByText(serverName), 'server name in sidebar');
+      await visible(a.getByText(serverName).first(), 'server name in sidebar');
+      // A new server offers its invite dialog straight away; dismiss it here.
+      const offer = a.getByRole('dialog', { name: /Invite friends/ });
+      if (await offer.waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) {
+        await a.keyboard.press('Escape');
+        await hidden(offer, 'invite dialog closed', 3000);
+      }
     }, { critical: true });
 
     await step('alice creates a text channel', async () => {
@@ -275,13 +281,12 @@ async function main() {
     await step('alice creates an invite link', async () => {
       await a.getByText(serverName).first().click(); // server dropdown
       await a.getByRole('menuitem', { name: 'Invite people' }).or(a.getByRole('button', { name: 'Invite people' })).first().click();
-      const toast = a.getByText(/Invite link copied/);
-      await visible(toast, 'invite toast');
-      inviteUrl = await a.evaluate(() => navigator.clipboard.readText()).catch(() => null);
-      if (!inviteUrl || !inviteUrl.includes('/invite/')) {
-        const code = (await toast.first().textContent()).match(/copied:\s*(\S+)/)?.[1];
-        inviteUrl = code ? `${BASE}/invite/${code}` : null;
-      }
+      // The invite dialog shows the link itself (it used to be copied silently).
+      const field = a.getByRole('dialog', { name: /Invite friends/ }).getByLabel('Invite link');
+      await visible(field, 'invite dialog');
+      await a.waitForFunction(() => /\/invite\//.test(document.getElementById('invite-link')?.value ?? ''), null, { timeout: T });
+      inviteUrl = await field.inputValue();
+      await a.keyboard.press('Escape');
       assert(inviteUrl && /\/invite\/\w+/.test(inviteUrl), `no invite url (got ${inviteUrl})`);
     }, { critical: true });
 

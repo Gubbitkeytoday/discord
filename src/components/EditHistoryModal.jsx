@@ -30,7 +30,7 @@ export default function EditHistoryModal({ message, onClose }) {
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-[80] bg-black/60 overlay-center p-4"
+      className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center overlay-center p-4"
       role="dialog"
       aria-modal="true"
       aria-label={t('chat.editedHistory')}
