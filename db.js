@@ -18,6 +18,7 @@ import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
 import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
 import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
+import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -400,21 +401,15 @@ const MIGRATIONS = [
       await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
     }
   },
-  // realtime-scale: GET /api/sync counts edits and deletions since a cursor
-  // per channel; these partial indexes keep that off a table scan. Both
-  // baselines (schema.sql / schema.pg.sql) create them too, so a fresh
-  // database already has them and IF NOT EXISTS makes this a no-op there.
+  // realtime-scale (v34): sync indexes, and the guild permission version
+  // counter + triggers behind services/permCache.js. Self-contained DDL in
+  // db/migrations/realtimeScale.js; every statement is IF NOT EXISTS / OR
+  // REPLACE, so re-running is harmless.
   {
     version: 34,
-    name: 'sync indexes on messages.edited_at / deleted_at',
-    up: async () => {
-      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_edited ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL`);
-      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL`);
-    },
-    postgres: async () => {
-      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_edited ON messages(channel_id, edited_at) WHERE edited_at IS NOT NULL`);
-      await runQuery(`CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(channel_id, deleted_at) WHERE deleted_at IS NOT NULL`);
-    }
+    name: 'sync indexes; guild permission versions for the permission cache',
+    up: async () => { for (const ddl of REALTIME_SCALE_DDL.sqlite) await runQuery(ddl); },
+    postgres: async () => { for (const ddl of REALTIME_SCALE_DDL.postgres) await runQuery(ddl); }
   }
   // passkeys (v35) — WebAuthn credentials, single-use challenges, audit trail.
   // Self-contained DDL (not in schema.sql / schema.pg.sql) so it merges cleanly.

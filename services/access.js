@@ -14,7 +14,53 @@ import { ApiError } from '../lib/httpUtils.js';
 import {
   has, computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
 } from '../lib/permissions.js';
-import { resolvePermissions } from './guilds.js';
+import {
+  guildState, memberState, allMembers, knownChannelGuild, rememberChannelGuild
+} from './permCache.js';
+
+/**
+ * Permissions of `member` (a permCache member entry) in `state`'s guild,
+ * optionally inside channel `channelId` — the same computation, in the same
+ * order, as guilds.resolvePermissions: base from roles (+@everyone, owner →
+ * all) → overwrites → timeout/pending.
+ */
+function permissionsFromState(state, member, userId, channelId = null) {
+  const isOwner = state.ownerId === userId;
+  // Member roles that still exist, plus @everyone, which nobody can opt out of.
+  const roleIds = member.roleIds.filter((id) => state.roles.has(id));
+  if (!roleIds.includes(state.serverId) && state.roles.has(state.serverId)) roleIds.push(state.serverId);
+  const pending = Boolean(Number(member.pending)) && !isOwner;
+  const timedOut = isActiveTimeout(member.timeout_until) || pending;
+  const base = computeBasePermissions({ isOwner, rolePermissions: roleIds.map((id) => state.roles.get(id)) });
+  let permissions = base;
+  if (channelId) {
+    permissions = computeChannelPermissions({
+      base,
+      overwrites: state.overwrites.get(channelId) ?? [],
+      everyoneRoleId: state.serverId,
+      memberRoleIds: roleIds,
+      userId
+    });
+  }
+  return {
+    permissions: timedOut ? applyTimeout(permissions) : permissions,
+    isMember: true, isOwner, timedOut, pending, roleIds,
+    member: { timeout_until: member.timeout_until, pending: member.pending }
+  };
+}
+
+/**
+ * Cached equivalent of guilds.resolvePermissions({ userId, serverId,
+ * channelId }) for callers on hot paths (socket joins, access checks).
+ * A missing guild resolves to "not a member" rather than throwing.
+ */
+export async function resolveMemberPermissions({ userId, serverId, channelId = null }) {
+  const state = await guildState(serverId);
+  if (!state) return { permissions: '0', isMember: false, isOwner: false };
+  const member = await memberState(state, userId);
+  if (!member) return { permissions: '0', isMember: false, isOwner: false };
+  return permissionsFromState(state, member, userId, channelId);
+}
 
 /**
  * Resolve the channel and the caller's effective permissions inside it.
@@ -26,14 +72,23 @@ import { resolvePermissions } from './guilds.js';
 export async function assertChannelAccess({ channelId, userId, permission = null }) {
   if (!userId) throw ApiError.unauthorized();
 
-  const channel = await getQuery(
-    `SELECT id, type, server_id, parent_id FROM channels WHERE id = ? AND deleted_at IS NULL`,
-    [channelId]
-  );
-  if (!channel) throw ApiError.notFound('Channel');
+  // A guild channel never moves to another guild, so once its guild is known
+  // the per-guild cache (version-checked, see services/permCache.js) answers
+  // everything else: one point query on a warm cache instead of five.
+  let serverId = knownChannelGuild(channelId);
+  let channel = null;
+  if (!serverId) {
+    channel = await getQuery(
+      `SELECT id, type, server_id, parent_id FROM channels WHERE id = ? AND deleted_at IS NULL`,
+      [channelId]
+    );
+    if (!channel) throw ApiError.notFound('Channel');
+    serverId = channel.server_id;
+    rememberChannelGuild(channelId, serverId);
+  }
 
   // --- direct messages -------------------------------------------------------
-  if (channel.type === 'dm' || channel.type === 'group_dm') {
+  if (!serverId) {
     const recipient = await getQuery(
       `SELECT 1 FROM channel_recipients WHERE channel_id = ? AND user_id = ?`, [channelId, userId]
     );
@@ -59,15 +114,20 @@ export async function assertChannelAccess({ channelId, userId, permission = null
   }
 
   // --- guild channels ----------------------------------------------------------
+  const state = await guildState(serverId);
+  if (!state) throw ApiError.notFound('Server');
+  const cached = state.channels.get(channelId);
+  if (!cached) throw ApiError.notFound('Channel');          // deleted
+  channel = { id: cached.id, type: cached.type, server_id: cached.server_id, parent_id: cached.parent_id };
+
   // Threads take their permission set from the parent channel.
   const permissionChannelId = channel.type === 'thread' && channel.parent_id
     ? channel.parent_id
     : channel.id;
 
-  const resolved = await resolvePermissions({
-    userId, serverId: channel.server_id, channelId: permissionChannelId
-  });
-  if (!resolved.isMember) throw ApiError.forbidden('You are not a member of this server');
+  const member = await memberState(state, userId);
+  if (!member) throw ApiError.forbidden('You are not a member of this server');
+  const resolved = permissionsFromState(state, member, userId, permissionChannelId);
   if (!has(resolved.permissions, 'VIEW_CHANNEL')) {
     throw ApiError.forbidden('Missing permission: VIEW_CHANNEL');
   }
@@ -184,35 +244,22 @@ function buildEvaluator({ members, roles, everyone, owners, channels, overwrites
 }
 
 /**
- * Evaluator for everyone in one guild (or the listed `userIds`), used by the
- * gateway to decide who may receive a channel's events.
+ * Evaluator for every member of one guild, used by the gateway to decide who
+ * may receive a channel's events. Served from the permission cache.
  */
-export async function loadGuildPermissionContext(serverId, { userIds = null } = {}) {
-  const server = await getQuery(
-    `SELECT id, owner_id FROM servers WHERE id = ? AND deleted_at IS NULL`, [serverId]
-  );
-  if (!server) return null;
-  const userFilter = userIds?.length ? ` AND user_id IN (${userIds.map(() => '?').join(',')})` : '';
-  const userParams = userIds?.length ? userIds : [];
-  const [members, roles, everyone, channels, overwrites] = await Promise.all([
-    allQuery(
-      `SELECT server_id, user_id, timeout_until, pending FROM server_members
-        WHERE server_id = ? AND left_at IS NULL${userFilter}`, [serverId, ...userParams]),
-    allQuery(
-      `SELECT mr.server_id, mr.user_id, r.id, r.permissions
-         FROM member_roles mr JOIN roles r ON r.id = mr.role_id
-        WHERE mr.server_id = ?${userFilter.replace('user_id', 'mr.user_id')}`, [serverId, ...userParams]),
-    allQuery(`SELECT server_id, id, permissions FROM roles WHERE id = ? AND server_id = ?`, [serverId, serverId]),
-    allQuery(
-      `SELECT id, type, server_id, parent_id FROM channels WHERE server_id = ? AND deleted_at IS NULL`, [serverId]),
-    allQuery(
-      `SELECT o.channel_id, o.target_type, o.target_id, o.allow, o.deny
-         FROM channel_overwrites o JOIN channels c ON c.id = o.channel_id
-        WHERE c.server_id = ?`, [serverId])
-  ]);
-  return buildEvaluator({
-    members, roles, everyone, owners: new Map([[serverId, server.owner_id]]), channels, overwrites
-  });
+export async function loadGuildPermissionContext(serverId) {
+  const state = await guildState(serverId);
+  if (!state) return null;
+  const ids = await allMembers(state);
+  const can = (userId, channelId, permission = 'VIEW_CHANNEL') => {
+    const member = state.members.get(userId);
+    const channel = state.channels.get(channelId);
+    if (!member || !channel) return false;
+    const permChannel = channel.type === 'thread' && channel.parent_id ? channel.parent_id : channel.id;
+    const { permissions } = permissionsFromState(state, member, userId, permChannel);
+    return has(permissions, 'VIEW_CHANNEL') && (!permission || has(permissions, permission));
+  };
+  return { members: ids.map((id) => ({ user_id: id })), can, channels: [...state.channels.values()] };
 }
 
 /**

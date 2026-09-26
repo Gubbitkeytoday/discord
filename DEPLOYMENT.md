@@ -484,6 +484,45 @@ it only forces clients to reconnect and catch up over REST.
 Not shared between instances (by design, harmless): typing timers, the
 soundboard cooldown and AFK speaking timestamps — each lives on the instance
 that holds the user's socket.
+
+### Hot-path caches and load shedding
+
+Findings from `docs/PERFORMANCE.md`, and what now addresses them:
+
+- **Permission cache** (`services/permCache.js`). Guild roles, overwrites,
+  channels, owner and each member's roles/timeout are cached in memory. The
+  database keeps a per-guild counter (`guild_perm_versions`, maintained by
+  triggers from schema v34) that every check reads; a changed counter reloads
+  the guild. A revoke is therefore honoured on the next check on *every*
+  instance and for every code path, including manual SQL edits. A check costs
+  one indexed lookup instead of five queries. `/api/health` → `realtime.permission_cache`
+  shows hits and reloads.
+- **Session cache** (`lib/auth.js`). With `SESSION_CACHE_TTL_MS` (30 s in
+  production, off otherwise), resolved sessions are cached by token hash.
+  Logout, revoke, password change and account deletion evict immediately, and
+  with `REDIS_URL` on every instance (cluster bus). `last_seen_at` is written
+  at most every `SESSION_TOUCH_INTERVAL_MS` (5 min).
+- **Presence**. Going offline waits `PRESENCE_OFFLINE_GRACE_MS` (5 s), so a
+  reconnect storm or a deploy produces no offline/online churn. Coming online
+  when the stored status already says present writes and broadcasts nothing.
+- **Admission control** for message writes (REST and socket):
+  `MESSAGE_WRITE_CONCURRENCY` (32) in flight, `MESSAGE_WRITE_QUEUE` (256)
+  waiting for at most `MESSAGE_WRITE_MAX_WAIT_MS` (5 s). Beyond that the send is
+  refused with `503 RETRY_LATER` instead of queuing without bound.
+  `/api/health` → `realtime.message_admission` shows the queue.
+- **Thread pool**. `UV_THREADPOOL_SIZE` defaults to 16 (or 2× cores), set by
+  `lib/threadpool.js` before anything uses the pool, so scrypt during a login
+  storm no longer starves database queries. An explicit value wins.
+- **Rate limits**, all overridable: `RATE_LIMIT_READ_PER_MIN` (600, GET/HEAD
+  only), `RATE_LIMIT_MUTATE_PER_MIN` (max(600, write), other methods),
+  `RATE_LIMIT_WRITE_PER_MIN` (60), `RATE_LIMIT_UPLOAD_PER_MIN` (30),
+  `RATE_LIMIT_LOGIN_PER_5MIN` (10 per IP + username) and
+  `RATE_LIMIT_LOGIN_IP_PER_5MIN` (60 per IP). Because the login limit is keyed
+  on IP and username, an office or carrier NAT full of users is no longer
+  locked out after ten attempts.
+- **Batch re-join**. The `join_rooms {servers, channels}` socket event re-joins
+  every room in one round trip after a non-recovered reconnect. Each room is
+  still checked, and the check is served by the permission cache.
 <!-- realtime-scale: end -->
 
 ---

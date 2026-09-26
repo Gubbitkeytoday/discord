@@ -6,6 +6,8 @@
 //  realtime in realtime.js.
 // ============================================================================
 
+// Must stay the first import: sizes the libuv pool before anything uses it.
+import './lib/threadpool.js'; // realtime-scale
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -66,7 +68,7 @@ import translationRouter from './routes/translation.js'; // translation
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
   revalidateRooms, emitToChannelViewers, emitToRelated,
-  realtimeServerOptions, drainRealtime, closeRealtimeBackends, realtimeHealth, holdsLease
+  realtimeServerOptions, drainRealtime, closeRealtimeBackends, realtimeHealth, holdsLease, messageAdmission
 } from './realtime.js';
 import syncRouter from './routes/sync.js'; // realtime-scale
 import { requireUser } from './lib/httpUtils.js';
@@ -743,7 +745,8 @@ app.get('/api/messages/:channelId', requireUser, asyncRoute(async (req, res) => 
 }));
 
 app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
-  const message = await messageService.createMessage({
+  // Bounded concurrency; 503 RETRY_LATER instead of an unbounded queue.
+  const message = await messageAdmission.run(() => messageService.createMessage({
     channelId: req.body.channel_id,
     userId: req.userId,
     content: req.body.content,
@@ -757,7 +760,7 @@ app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, re
     embeds: req.botApplicationId ? req.body.embeds ?? null : null,
     components: req.botApplicationId ? req.body.components ?? null : null,
     applicationId: req.botApplicationId ?? null
-  });
+  }));
   fanOutMessage(io, message);
   res.json(message);
 }));

@@ -76,7 +76,9 @@ const sClose = (db) => new Promise((res) => db.close(() => res()));
 
 // Tables that exist only on SQLite (the FTS5 index and its shadow tables) or
 // that the target manages itself.
-const SKIP_TABLE = (name) => name.startsWith('sqlite_') || name.startsWith('messages_fts') || name === 'schema_migrations';
+// guild_perm_versions is derived: the target's own triggers rebuild it as rows are copied.
+const SKIP_TABLE = (name) => name.startsWith('sqlite_') || name.startsWith('messages_fts') || name === 'schema_migrations'
+  || name === 'guild_perm_versions';
 
 // --- value conversion ----------------------------------------------------------
 
