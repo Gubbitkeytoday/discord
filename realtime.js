@@ -683,9 +683,8 @@ export async function registerRealtime(io) {
         [speaker ? 0 : 1, targetId, channelId]
       );
       if (!changes) { ack?.({ ok: false, code: 'NOT_IN_CHANNEL' }); return; }
-      for (const sid of socketsByUser.get(targetId) ?? []) {
-        io.to(sid).emit('stage_speaker_changed', { channelId, speaker: Boolean(speaker), by: actorId });
-      }
+      // The user's own room reaches their sockets on every instance.
+      io.to(`user-${targetId}`).emit('stage_speaker_changed', { channelId, speaker: Boolean(speaker), by: actorId });
       // The SFU enforces it too: a promoted speaker may now publish, a demoted
       // one has their tracks unpublished.
       await livekit.syncParticipantGrants(channelId, targetId);
@@ -741,7 +740,7 @@ export async function registerRealtime(io) {
     socket.on('leave_voice', async ({ channelId } = {}) => {
       const userId = socket.data.userId;
       if (!userId) return;
-      if (socket.data.voiceChannelId) socket.leave(`voice-${socket.data.voiceChannelId}`);
+      for (const room of [...socket.rooms]) if (room.startsWith('voice-')) socket.leave(room);
       socket.leave(`voice-${channelId}`);
       socket.data.voiceChannelId = null;
       await runQuery(`DELETE FROM voice_states WHERE user_id = ?`, [userId]);
@@ -754,22 +753,37 @@ export async function registerRealtime(io) {
     // channel or `user-…` id broadcast signalling to a whole audience, and an
     // anonymous socket could push offers at anyone. Relay only between two
     // identified sockets that share the same voice room.
-    const relayTarget = (targetSocketId) => {
-      if (!socket.data.userId || typeof targetSocketId !== 'string') return null;
-      const target = io.sockets.sockets.get(targetSocketId);
-      const room = socket.data.voiceChannelId;
-      if (!target || !room || target.data.voiceChannelId !== room) return null;
-      return target;
+    //
+    // The target may live on another instance (REDIS_URL cluster), so its
+    // membership is checked against voice_states — the row the gateway wrote
+    // when that socket joined — and the message goes out through the adapter
+    // (io.to(socketId)). A socket on this instance is checked in memory. The
+    // verdict is cached briefly: a join trickles dozens of ICE candidates.
+    const relayVerdicts = new Map();   // `${target}|${room}` -> { ok, at }
+    const relayTarget = async (targetSocketId) => {
+      if (!socket.data.userId || typeof targetSocketId !== 'string' || !targetSocketId || targetSocketId.length > 64) return false;
+      const room = voiceRoomOf(socket);
+      if (!room) return false;
+      const local = io.sockets.sockets.get(targetSocketId);
+      if (local) return Boolean(local.data?.userId) && voiceRoomOf(local) === room;
+      const key = `${targetSocketId}|${room}`;
+      const cached = relayVerdicts.get(key);
+      if (cached && Date.now() - cached.at < 5000) return cached.ok;
+      const row = await getQuery(
+        `SELECT 1 AS ok FROM voice_states WHERE socket_id = ? AND channel_id = ?`, [targetSocketId, room]
+      ).catch(() => null);
+      if (relayVerdicts.size > 200) relayVerdicts.clear();
+      relayVerdicts.set(key, { ok: Boolean(row), at: Date.now() });
+      return Boolean(row);
     };
-    socket.on('webrtc_offer', ({ targetSocketId, offer } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_offer', { senderSocketId: socket.id, offer });
-    });
-    socket.on('webrtc_answer', ({ targetSocketId, answer } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_answer', { senderSocketId: socket.id, answer });
-    });
-    socket.on('webrtc_ice_candidate', ({ targetSocketId, candidate } = {}) => {
-      relayTarget(targetSocketId)?.emit('webrtc_ice_candidate', { senderSocketId: socket.id, candidate });
-    });
+    const relay = (event, field) => async ({ targetSocketId, [field]: body } = {}) => {
+      if (await relayTarget(targetSocketId)) {
+        io.to(targetSocketId).emit(event, { senderSocketId: socket.id, [field]: body });
+      }
+    };
+    socket.on('webrtc_offer', relay('webrtc_offer', 'offer'));
+    socket.on('webrtc_answer', relay('webrtc_answer', 'answer'));
+    socket.on('webrtc_ice_candidate', relay('webrtc_ice_candidate', 'candidate'));
 
     // --- teardown ------------------------------------------------------------
 
@@ -966,6 +980,16 @@ async function evictFromVoice(io, sock, channelId) {
   await broadcastVoice(io, channelId);
 }
 
+/**
+ * The voice channel a socket is in, read from its rooms rather than from
+ * socket.data: rooms follow a socket across instances (a moderator move on
+ * another node joins/leaves rooms through the adapter), data does not.
+ */
+function voiceRoomOf(sock) {
+  for (const room of sock?.rooms ?? []) if (room.startsWith('voice-')) return room.slice('voice-'.length);
+  return null;
+}
+
 /** How many may be in a voice channel at once; 0 = no limit. */
 function voiceCapacity(channel) {
   const own = Number(channel?.user_limit) || 0;
@@ -992,14 +1016,14 @@ export async function moveVoiceMember(io, userId, from, to, reason = 'moved') {
   if (toStage?.type === 'stage' && !(await canInChannel({ channelId: to, userId, permission: 'MUTE_MEMBERS' }))) {
     await runQuery(`UPDATE voice_states SET suppress = 1 WHERE user_id = ?`, [userId]);
   }
-  for (const socketId of socketsByUser.get(userId) ?? []) {
-    io.to(socketId).emit('voice_moved', { from, to, reason });
-    const sock = io.sockets.sockets.get(socketId);
-    if (sock && (sock.data.voiceChannelId === from || sock.rooms.has(`voice-${from}`))) {
-      sock.leave(`voice-${from}`);
-      sock.join(`voice-${to}`);
-      sock.data.voiceChannelId = to;
-    }
+  // The user's room and fetchSockets() both span every instance.
+  io.to(`user-${userId}`).emit('voice_moved', { from, to, reason });
+  const sockets = typeof io.in === 'function' ? await io.in(`user-${userId}`).fetchSockets() : [];
+  for (const sock of sockets) {
+    if (!sock.rooms.has(`voice-${from}`)) continue;
+    sock.leave(`voice-${from}`);
+    sock.join(`voice-${to}`);
+    if (sock.data) sock.data.voiceChannelId = to;
   }
   // The client reconnects to the new room with a fresh token; the old media
   // session must not linger (or keep a moved user audible in the old room).
@@ -1011,13 +1035,10 @@ export async function moveVoiceMember(io, userId, from, to, reason = 'moved') {
 /** Disconnect a user from voice entirely (moderator "Disconnect"). */
 export async function disconnectVoiceMember(io, userId, channelId) {
   let evicted = false;
-  for (const socketId of [...(socketsByUser.get(userId) ?? [])]) {
-    const sock = io.sockets.sockets.get(socketId);
-    if (!sock) continue;
-    if (sock.rooms.has(`voice-${channelId}`) || sock.data.voiceChannelId === channelId) {
-      await evictFromVoice(io, sock, channelId);
-      evicted = true;
-    }
+  for (const sock of await io.in(`user-${userId}`).fetchSockets()) {
+    if (!sock.rooms.has(`voice-${channelId}`)) continue;
+    await evictFromVoice(io, sock, channelId);
+    evicted = true;
   }
   if (!evicted) {
     // Only on the SFU (joined without a live socket): clear the row and room.
