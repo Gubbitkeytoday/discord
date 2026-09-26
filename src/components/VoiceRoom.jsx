@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Mic, MicOff, Headphones, HeadphoneOff, Monitor, MonitorOff, PhoneOff, Video,
   VideoOff, Volume2, Volume1, VolumeX, Radio, AlertTriangle, X, Settings,
-  Maximize2, Minimize2, Grid2X2, User, Music, Hand, ArrowUpFromLine, ArrowDownToLine
+  Maximize2, Minimize2, Grid2X2, User, Music, Hand, ArrowUpFromLine, ArrowDownToLine,
+  SignalHigh, SignalMedium, SignalLow, SignalZero, Lock, PictureInPicture2, RefreshCw,
+  UserX, ArrowRightLeft, AudioLines, Shield
 } from 'lucide-react';
 import {
   playJoinVoiceSound, playLeaveVoiceSound, playMuteSound, playUnmuteSound,
@@ -10,10 +13,13 @@ import {
 } from '../utils/soundEffects';
 import SoundboardPanel from './SoundboardPanel';
 import { useVoiceMedia, useStreamVideo } from '../hooks/useVoiceMedia';
-import { useVoicePeers } from '../hooks/useVoicePeers';
+import { useVoiceBackend } from '../voice/useVoiceBackend';
+import { isPipSupported, openPipWindow } from '../voice/pip';
+import { get, post, del } from '../api';
 import { useVoiceSettings } from '../hooks/useVoiceSettings';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const VOLUME_KEY = 'antigravity.userVolumes';
@@ -89,7 +95,17 @@ export default function VoiceRoom({
     return map;
   }, [participants, currentUser?.id]);
 
-  const media = useVoiceMedia({ enabled: true, isMuted: isMuted || suppressed, onSpeakingChange });
+  // A server mute/deafen (moderator) overrides the user's own toggles. The
+  // server enforces it too (and with LiveKit, the SFU does); this keeps the
+  // local capture and playback honest while it is in effect.
+  const serverMuted = Boolean(selfState?.isServerMuted);
+  const serverDeafened = Boolean(selfState?.isServerDeafened);
+  const effectiveDeafened = isDeafened || serverDeafened;
+  const canModerate = (perm) => Boolean(channel?.server_id) && (isOwner || viewerPermissions.includes(perm) || viewerPermissions.includes('ADMINISTRATOR'));
+  const [pipWindow, setPipWindow] = useState(null);
+  const [moveTargets, setMoveTargets] = useState(null);
+
+  const media = useVoiceMedia({ enabled: true, isMuted: isMuted || suppressed || serverMuted || serverDeafened, onSpeakingChange });
 
   const requestSpeak = (requesting) => socket?.emit('stage_request_speak', { channelId: channel.id, requesting }, (ack) => {
     if (!ack?.ok) onToast?.(t('stage.requestFailed'), { type: 'error' });
@@ -109,17 +125,18 @@ export default function VoiceRoom({
     return () => socket.off('stage_speaker_changed', onChanged);
   }, [socket, isStage, channel?.id, onToast]);
 
-  // The peer mesh: one RTCPeerConnection per other participant, carrying our
-  // microphone, camera and screen directly to them.
-  const mesh = useVoicePeers({
+  // The media backend: the peer mesh (one RTCPeerConnection per other
+  // participant) or, when the server runs one, the LiveKit SFU. Same inputs,
+  // same outputs — the rest of this component does not care which.
+  const mesh = useVoiceBackend({
     socket,
+    channelId: channel?.id,
     tracks: media.outgoingTracks,
     participants,
     selfUserId: currentUser?.id,
-    enabled: true,
     volumes,
     localMutes,
-    isDeafened,
+    isDeafened: effectiveDeafened,
     outputVolume: voiceSettings.outputVolume,
     outputDeviceId: voiceSettings.outputDeviceId,
     attenuation: voiceSettings.attenuation,
@@ -146,7 +163,7 @@ export default function VoiceRoom({
     const onSound = ({ channelId, userId, sound }) => {
       if (channelId !== channel?.id) return;
       setLastSound({ userId, name: sound.name, at: Date.now() });
-      if (isDeafened) return;
+      if (effectiveDeafened) return;
       playSoundboardClip(sound.url, {
         volume: sound.volume ?? 100,
         userVolume: voiceSettings.soundboardVolume ?? 100
@@ -154,7 +171,52 @@ export default function VoiceRoom({
     };
     socket.on('sound_played', onSound);
     return () => socket.off('sound_played', onSound);
-  }, [socket, channel?.id, isDeafened, voiceSettings.soundboardVolume]);
+  }, [socket, channel?.id, effectiveDeafened, voiceSettings.soundboardVolume]);
+
+  // A server mute/deafen aimed at us is announced (the roster carries the
+  // state itself). A moderator disconnect arrives as voice_disconnected, which
+  // App already handles by dropping the voice session.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onServerState = ({ serverMute, serverDeaf } = {}) => {
+      if (serverMute !== undefined) {
+        onToast?.(serverMute ? tr('voice.serverMutedYou', 'A moderator muted you in this server.') : tr('voice.serverUnmutedYou', 'A moderator unmuted you.'), { type: 'info' });
+      }
+      if (serverDeaf !== undefined) {
+        onToast?.(serverDeaf ? tr('voice.serverDeafenedYou', 'A moderator deafened you in this server.') : tr('voice.serverUndeafenedYou', 'A moderator undeafened you.'), { type: 'info' });
+      }
+    };
+    socket.on('voice_server_state', onServerState);
+    return () => socket.off('voice_server_state', onServerState);
+  }, [socket, onToast]);
+
+  // Close the pop-out with the call.
+  useEffect(() => () => { try { pipWindow?.close(); } catch { /* already closed */ } }, [pipWindow]);
+
+  const openPip = async () => {
+    const win = await openPipWindow();
+    if (!win) return;
+    win.addEventListener('pagehide', () => setPipWindow(null), { once: true });
+    setPipWindow(win);
+  };
+
+  const moderate = async (action, userId, body) => {
+    const url = `/api/voice/channels/${channel.id}/members/${userId}`;
+    try {
+      if (action === 'disconnect') await del(url);
+      else await post(`${url}/${action}`, body);
+    } catch (err) {
+      onToast?.(err?.message || t('stage.actionFailed'), { type: 'error' });
+    }
+  };
+
+  const loadMoveTargets = async () => {
+    if (moveTargets || !channel?.server_id) return;
+    try {
+      const detail = await get(`/api/servers/${channel.server_id}`);
+      setMoveTargets((detail?.channels ?? []).filter((c) => (c.type === 'voice' || c.type === 'stage') && c.id !== channel.id));
+    } catch { setMoveTargets([]); }
+  };
 
   // Clear the "X played Y" line after a moment.
   useEffect(() => {
@@ -187,6 +249,7 @@ export default function VoiceRoom({
 
   const handleMuteClick = () => {
     if (suppressed) { onToast?.(t('stage.audienceCannotUnmute'), { type: 'info' }); return; }
+    if (serverMuted && isMuted) { onToast?.(tr('voice.serverMutedHint', 'A moderator muted you; you cannot unmute yourself.'), { type: 'info' }); return; }
     if (isMuted) playUnmuteSound(); else playMuteSound();
     onToggleMute();
   };
@@ -221,7 +284,32 @@ export default function VoiceRoom({
   const nameFor = (userId) =>
     participants.find((p) => p.userId === userId)?.username ?? t('dm.unknownUser');
 
-  if (hidden) return null;
+  const toggleNoiseSuppression = () => updateVoiceSettings({ noiseSuppression: !voiceSettings.noiseSuppression });
+
+  // The pop-out survives browsing other channels: it renders even when the
+  // room itself is hidden.
+  const pipPortal = pipWindow ? createPortal(
+    <PipCallPanel
+      channel={channel}
+      participants={participants}
+      selfId={currentUser?.id}
+      localSpeaking={media.isSpeaking}
+      quality={mesh.quality}
+      connectionState={mesh.connectionState}
+      isMuted={isMuted || serverMuted}
+      isDeafened={effectiveDeafened}
+      camera={Boolean(media.cameraStream)}
+      sharing={Boolean(media.screenStream)}
+      onToggleMute={handleMuteClick}
+      onToggleDeafen={onToggleDeafen}
+      onToggleCamera={media.toggleCamera}
+      onToggleScreen={media.toggleScreenShare}
+      onLeave={handleLeaveClick}
+    />,
+    pipWindow.document.body
+  ) : null;
+
+  if (hidden) return pipPortal;
 
   const peerStateLabel = (state) => {
     if (state === 'new' || state === 'connecting') return t('voice.connecting');
@@ -242,10 +330,24 @@ export default function VoiceRoom({
           </span>
         </div>
         <div className="flex items-center gap-3 text-xs text-d-text3">
-          {mesh.peerCount > 0 && (
+          {mesh.backend === 'livekit' ? (
+            <span
+              className={`flex items-center gap-1 ${mesh.connectionState === 'connected' ? 'text-d-online' : 'text-d-idle'}`}
+              title={tr('voice.sfuStatus', 'Connected through the voice server (SFU)')}
+              data-testid="voice-backend"
+              data-backend="livekit"
+              data-state={mesh.connectionState}
+            >
+              <QualityIcon quality={mesh.connectionState === 'connected' ? (mesh.selfQuality ?? 'good') : 'lost'} />
+              SFU
+              {mesh.e2ee && <Lock className="w-3 h-3" aria-label={tr('voice.e2ee', 'End-to-end encrypted')} />}
+            </span>
+          ) : mesh.peerCount > 0 && (
             <span
               className={mesh.connectedCount === mesh.peerCount ? 'text-d-online' : 'text-d-idle'}
               title={t('voice.p2pStatus')}
+              data-testid="voice-backend"
+              data-backend="mesh"
             >
               P2P {mesh.connectedCount}/{mesh.peerCount}
             </span>
@@ -293,6 +395,34 @@ export default function VoiceRoom({
             </button>
           )}
           <button onClick={media.clearError} aria-label={t('common.close')}><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
+
+      {(mesh.connectionState === 'reconnecting' || mesh.connectionState === 'disconnected' || mesh.connectionState === 'failed') && (
+        <div
+          role="status"
+          className="mx-4 mt-3 px-3 py-2 bg-d-idle/10 border border-d-idle/40 rounded flex items-center gap-2 text-xs text-d-idle"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${mesh.connectionState === 'reconnecting' ? 'animate-spin' : ''}`} aria-hidden="true" />
+          <span className="flex-1">
+            {mesh.connectionState === 'reconnecting'
+              ? tr('voice.reconnecting', 'Reconnecting…')
+              : tr('voice.voiceServerLost', 'Lost the connection to the voice server.')}
+          </span>
+          {mesh.connectionState !== 'reconnecting' && mesh.backend === 'livekit' && (
+            <button onClick={mesh.retry} className="underline font-semibold shrink-0">
+              {tr('voice.retry', 'Retry')}
+            </button>
+          )}
+        </div>
+      )}
+
+      {(serverMuted || serverDeafened) && (
+        <div className="mx-4 mt-3 px-3 py-2 bg-d-danger/10 border border-d-danger/40 rounded flex items-center gap-2 text-xs text-d-danger">
+          <Shield className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          {serverDeafened
+            ? tr('voice.serverDeafenedBanner', 'A moderator has deafened you in this server.')
+            : tr('voice.serverMutedBanner', 'A moderator has muted you in this server.')}
         </div>
       )}
 
@@ -371,7 +501,7 @@ export default function VoiceRoom({
                 ) : (
                   <div className="relative mb-3 flex flex-col items-center">
                     <img
-                      src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
+                      src={proxiedImageUrl(p.avatar_url) || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
                       alt=""
                       className={`w-24 h-24 rounded-full object-cover transition-transform ${
                         speaking ? 'scale-105 ring-4 ring-d-online' : ''
@@ -441,7 +571,9 @@ export default function VoiceRoom({
                     {p.username}{isSelf && t('voice.you')}
                   </span>
                   {Boolean(p.isMuted) && <MicOff className="w-3.5 h-3.5 text-d-danger" />}
-                  {Boolean(p.isDeafened) && <HeadphoneOff className="w-3.5 h-3.5 text-d-danger" />}
+                  {Boolean(p.isServerMuted) && <Shield className="w-3.5 h-3.5 text-d-danger" aria-label={tr('voice.serverMuted', 'Server muted')} />}
+                  {Boolean(p.isDeafened || p.isServerDeafened) && <HeadphoneOff className="w-3.5 h-3.5 text-d-danger" />}
+                  {Boolean(mesh.quality?.[p.userId]) && <QualityIcon quality={mesh.quality[p.userId]} />}
                   {Boolean(p.isVideo) && <Video className="w-3.5 h-3.5 text-d-online" />}
                   {Boolean(p.isStreaming) && <Monitor className="w-3.5 h-3.5 text-d-brand" />}
                   {locallyMuted && <VolumeX className="w-3.5 h-3.5 text-d-idle" title={t('voice.mutedLocally')} />}
@@ -489,6 +621,53 @@ export default function VoiceRoom({
                         >
                           {locallyMuted ? t('voice.unmuteUser') : t('voice.muteUser')}
                         </button>
+                        {(canModerate('MUTE_MEMBERS') || canModerate('DEAFEN_MEMBERS') || canModerate('MOVE_MEMBERS')) && (
+                          <div className="mt-2 pt-2 border-t border-d-surface flex flex-col gap-1" role="group" aria-label={tr('voice.moderation', 'Moderation')}>
+                            {canModerate('MUTE_MEMBERS') && (
+                              <button
+                                onClick={() => moderate('mute', p.userId, { mute: !p.isServerMuted })}
+                                className="text-[11px] text-left px-2 py-1 rounded hover:bg-d-surface text-d-text2 flex items-center gap-1.5"
+                              >
+                                <MicOff className="w-3 h-3" />
+                                {p.isServerMuted ? tr('voice.serverUnmute', 'Server unmute') : tr('voice.serverMute', 'Server mute')}
+                              </button>
+                            )}
+                            {canModerate('DEAFEN_MEMBERS') && (
+                              <button
+                                onClick={() => moderate('deafen', p.userId, { deaf: !p.isServerDeafened })}
+                                className="text-[11px] text-left px-2 py-1 rounded hover:bg-d-surface text-d-text2 flex items-center gap-1.5"
+                              >
+                                <HeadphoneOff className="w-3 h-3" />
+                                {p.isServerDeafened ? tr('voice.serverUndeafen', 'Server undeafen') : tr('voice.serverDeafen', 'Server deafen')}
+                              </button>
+                            )}
+                            {canModerate('MOVE_MEMBERS') && (
+                              <>
+                                <label className="text-[10px] text-d-text3 flex items-center gap-1.5 px-2">
+                                  <ArrowRightLeft className="w-3 h-3" />
+                                  <select
+                                    className="flex-1 bg-d-surface text-d-text2 text-[11px] rounded px-1 py-0.5"
+                                    aria-label={tr('voice.moveTo', 'Move to…')}
+                                    value=""
+                                    onFocus={loadMoveTargets}
+                                    onMouseDown={loadMoveTargets}
+                                    onChange={(e) => { if (e.target.value) moderate('move', p.userId, { channelId: e.target.value }); }}
+                                  >
+                                    <option value="">{tr('voice.moveTo', 'Move to…')}</option>
+                                    {(moveTargets ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                  </select>
+                                </label>
+                                <button
+                                  onClick={() => moderate('disconnect', p.userId)}
+                                  className="text-[11px] text-left px-2 py-1 rounded hover:bg-d-danger/20 text-d-danger flex items-center gap-1.5"
+                                >
+                                  <UserX className="w-3 h-3" />
+                                  {tr('voice.disconnectMember', 'Disconnect')}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -526,7 +705,7 @@ export default function VoiceRoom({
             <ul className="flex flex-wrap gap-2">
               {[...audience].sort((a, b) => (a.requestedToSpeakAt ? 0 : 1) - (b.requestedToSpeakAt ? 0 : 1)).map((p) => (
                 <li key={p.userId} className={`flex items-center gap-2 rounded-full pl-1 pr-2 py-1 border ${p.requestedToSpeakAt ? 'border-d-brand bg-d-brand/10' : 'border-d-edge bg-d-surface'}`}>
-                  <img src={p.avatar_url || defaultAvatar(p.userId ?? p.user_id ?? p.id)} alt="" className="w-6 h-6 rounded-full object-cover" />
+                  <img src={proxiedImageUrl(p.avatar_url) || defaultAvatar(p.userId ?? p.user_id ?? p.id)} alt="" className="w-6 h-6 rounded-full object-cover" />
                   <span className="text-xs text-d-strong max-w-[8rem] truncate">{p.username}{p.userId === selfId && t('voice.you')}</span>
                   {Boolean(p.requestedToSpeakAt) && <Hand className="w-3.5 h-3.5 text-d-brand" aria-label={t('stage.wantsToSpeak')} />}
                   {canModerateStage && (
@@ -586,13 +765,13 @@ export default function VoiceRoom({
         <button
           onClick={onToggleDeafen}
           className={`p-3.5 rounded-full transition-all ${
-            isDeafened ? 'bg-d-danger text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
+            effectiveDeafened ? 'bg-d-danger text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
           }`}
-          title={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
+          title={effectiveDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
           aria-label={t('sidebar.deafen')}
-          aria-pressed={isDeafened}
+          aria-pressed={effectiveDeafened}
         >
-          {isDeafened ? <HeadphoneOff className="w-6 h-6" /> : <Headphones className="w-6 h-6" />}
+          {effectiveDeafened ? <HeadphoneOff className="w-6 h-6" /> : <Headphones className="w-6 h-6" />}
         </button>
 
         <button
@@ -664,6 +843,32 @@ export default function VoiceRoom({
           </button>
         )}
 
+        <button
+          onClick={toggleNoiseSuppression}
+          className={`p-3.5 rounded-full transition-all ${
+            voiceSettings.noiseSuppression ? 'bg-d-brand text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
+          }`}
+          title={t('voice.noiseSuppression')}
+          aria-label={t('voice.noiseSuppression')}
+          aria-pressed={Boolean(voiceSettings.noiseSuppression)}
+        >
+          <AudioLines className="w-6 h-6" />
+        </button>
+
+        {isPipSupported() && (
+          <button
+            onClick={pipWindow ? () => pipWindow.close() : openPip}
+            className={`p-3.5 rounded-full transition-all ${
+              pipWindow ? 'bg-d-brand text-white' : 'bg-d-control2 text-d-strong hover:bg-d-control'
+            }`}
+            title={tr('voice.popOut', 'Pop out call')}
+            aria-label={tr('voice.popOut', 'Pop out call')}
+            aria-pressed={Boolean(pipWindow)}
+          >
+            <PictureInPicture2 className="w-6 h-6" />
+          </button>
+        )}
+
         {onOpenVoiceSettings && (
           <button
             onClick={onOpenVoiceSettings}
@@ -682,6 +887,84 @@ export default function VoiceRoom({
           aria-label={t('sidebar.disconnect')}
         >
           <PhoneOff className="w-6 h-6" />
+        </button>
+      </div>
+      {pipPortal}
+    </div>
+  );
+}
+
+/** Four-step signal glyph for a LiveKit/mesh connection quality grade. */
+function QualityIcon({ quality }) {
+  const label = {
+    excellent: tr('voice.qualityExcellent', 'Excellent connection'),
+    good: tr('voice.qualityGood', 'Good connection'),
+    poor: tr('voice.qualityPoor', 'Poor connection'),
+    lost: tr('voice.qualityLost', 'Connection lost')
+  }[quality] ?? null;
+  if (!label) return null;
+  const Icon = quality === 'excellent' ? SignalHigh : quality === 'good' ? SignalMedium : quality === 'poor' ? SignalLow : SignalZero;
+  const color = quality === 'excellent' || quality === 'good' ? 'text-d-online' : quality === 'poor' ? 'text-d-idle' : 'text-d-danger';
+  return (
+    <span role="img" aria-label={label} title={label} data-quality={quality} className="inline-flex">
+      <Icon className={`w-3.5 h-3.5 ${color}`} aria-hidden="true" />
+    </span>
+  );
+}
+
+/**
+ * The pop-out window's content: who is here (speaking ring), and the controls
+ * people reach for without switching back to the tab.
+ */
+function PipCallPanel({
+  channel, participants, selfId, localSpeaking, quality, connectionState,
+  isMuted, isDeafened, camera, sharing,
+  onToggleMute, onToggleDeafen, onToggleCamera, onToggleScreen, onLeave
+}) {
+  const btn = (active, danger) => `p-2.5 rounded-full transition-all ${
+    active ? (danger ? 'bg-d-danger text-white' : 'bg-d-brand text-white') : 'bg-d-control2 text-d-strong hover:bg-d-control'
+  }`;
+  return (
+    <div className="h-screen w-screen bg-d-sunken text-d-text flex flex-col p-3 gap-3 select-none">
+      <div className="flex items-center gap-2 text-sm font-bold text-d-strong min-w-0">
+        <Volume2 className="w-4 h-4 text-d-online shrink-0" />
+        <span className="truncate flex-1">{channel?.name}</span>
+        {connectionState === 'reconnecting' && <span className="text-[10px] text-d-idle">{tr('voice.reconnecting', 'Reconnecting…')}</span>}
+      </div>
+      <ul className="flex-1 flex flex-wrap content-start gap-2 overflow-y-auto">
+        {participants.map((p) => {
+          const speaking = p.userId === selfId ? localSpeaking : p.isSpeaking;
+          return (
+            <li key={p.userId} className="flex flex-col items-center w-16" title={p.username}>
+              <img
+                src={proxiedImageUrl(p.avatar_url) || defaultAvatar(p.userId)}
+                alt=""
+                className={`w-11 h-11 rounded-full object-cover ${speaking ? 'ring-2 ring-d-online' : ''}`}
+              />
+              <span className="text-[10px] truncate w-full text-center flex items-center justify-center gap-0.5">
+                {Boolean(p.isMuted) && <MicOff className="w-2.5 h-2.5 text-d-danger shrink-0" />}
+                <span className="truncate">{p.username}</span>
+                {Boolean(quality?.[p.userId]) && <QualityIcon quality={quality[p.userId]} />}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="flex items-center justify-center gap-2">
+        <button onClick={onToggleMute} className={btn(isMuted, true)} aria-pressed={isMuted} aria-label={t('sidebar.mute')}>
+          {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+        </button>
+        <button onClick={onToggleDeafen} className={btn(isDeafened, true)} aria-pressed={isDeafened} aria-label={t('sidebar.deafen')}>
+          {isDeafened ? <HeadphoneOff className="w-5 h-5" /> : <Headphones className="w-5 h-5" />}
+        </button>
+        <button onClick={onToggleCamera} className={btn(camera)} aria-pressed={camera} aria-label={t('voice.toggleCamera')}>
+          {camera ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+        </button>
+        <button onClick={onToggleScreen} className={btn(sharing)} aria-pressed={sharing} aria-label={t('voice.shareScreen')}>
+          {sharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+        </button>
+        <button onClick={onLeave} className="p-2.5 rounded-full bg-d-danger text-white" aria-label={t('sidebar.disconnect')}>
+          <PhoneOff className="w-5 h-5" />
         </button>
       </div>
     </div>
