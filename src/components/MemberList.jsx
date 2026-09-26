@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { useUserSettings } from '../hooks/useUserSettings';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
@@ -52,7 +52,9 @@ function groupMembers(members) {
 }
 
 export default function MemberList({ members, onSelectMember, onMemberContextMenu }) {
-  const sections = useMemo(() => groupMembers(members ?? []), [members]);
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
+  const sections = useMemo(() => groupMembers(members ?? []), [members, locale]);
   // Accessibility › Role Colors decides whether the colour tints the name, sits
   // beside it as a dot, or is dropped entirely.
   const { prefs } = useUserSettings();

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useEscapeLayer } from '../hooks/useFocusTrap';
 import { Search, Clock, Star, X } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 import { proxiedImageUrl } from '../utils/media';
 
 const RECENT_KEY = 'antigravity.recentEmojis';
@@ -107,6 +107,8 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
     return [...custom, ...unicode];
   }, [query, customEmojis, externalGroups]);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const categories = useMemo(() => ([
     { key: 'recent', label: t('emoji.recent'), icon: '🕐', entries: recent },
     ...(customEmojis.length
@@ -124,7 +126,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
     ...emojiCategories().map((c) => ({
       key: c.key, label: c.label, icon: c.icon, entries: c.emojis.map((char) => ({ char }))
     }))
-  ]), [recent, customEmojis, externalGroups]);
+  ]), [recent, customEmojis, externalGroups, locale]);
 
   const visible = searchResults ?? categories.find((c) => c.key === activeCategory)?.entries ?? [];
 

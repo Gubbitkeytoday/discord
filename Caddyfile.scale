@@ -1,0 +1,65 @@
+# ============================================================================
+#  Reverse proxy for the `scale` compose profile: two app instances sharing
+#  Valkey (see docker-compose.yml and DEPLOYMENT.md §8 "Running several
+#  instances"). Select it with CADDYFILE=./Caddyfile.scale in .env.
+#
+#  Differences from ./Caddyfile:
+#    - two upstreams, `app` and `app-2`;
+#    - sticky sessions (lb_policy cookie): Socket.IO's HTTP long-polling
+#      transport sends each request of one session separately and they must
+#      all reach the instance holding it. WebSocket-only clients would not
+#      need it, but polling is the fallback behind strict proxies;
+#    - active health checks on /api/ready, which turns 503 the moment an
+#      instance starts draining (SIGTERM) or loses Valkey, so new traffic
+#      moves away before its sockets are closed.
+# ============================================================================
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size 520MB
+	}
+
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @websocket {
+		reverse_proxy app:3001 app-2:3001 {
+			lb_policy cookie ag_lb
+			lb_try_duration 5s
+			health_uri /api/ready
+			health_interval 5s
+			health_timeout 3s
+		}
+	}
+
+	handle /metrics {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy app:3001 app-2:3001 {
+			lb_policy cookie ag_lb
+			lb_try_duration 5s
+			health_uri /api/ready
+			health_interval 5s
+			health_timeout 3s
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

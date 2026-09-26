@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Hash, Loader2, Search, Send, Users, X } from 'lucide-react';
 import { useDialog } from './settings/primitives';
-import { t } from '../i18n/index.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 
 /**
  * Forward a message to another channel or conversation, the way Discord's
@@ -16,6 +16,8 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
 
   const serverName = (id) => servers.find((s) => s.id === id)?.name ?? '';
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
   const options = useMemo(() => {
     const entries = [
       ...channels.map((c) => ({ id: c.id, label: `#${c.name}`, sub: serverName(c.server_id), icon: Hash })),
@@ -25,7 +27,7 @@ export default function ForwardMessageModal({ message, channels = [], dms = [], 
     if (!needle) return entries;
     return entries.filter((e) => e.label.toLowerCase().includes(needle) || (e.sub ?? '').toLowerCase().includes(needle));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channels, dms, filter, servers]);
+  }, [channels, dms, filter, servers, locale]);
 
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 

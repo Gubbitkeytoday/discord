@@ -135,7 +135,8 @@ services:
       - "443:443"
       - "443:443/udp"     # HTTP/3
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # `scale` profile: CADDYFILE=./Caddyfile.scale (two sticky upstreams).
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy-data:/data           # certificates — losing this re-issues them
       - caddy-config:/config
     networks:
@@ -218,12 +219,87 @@ services:
       - edge
     logging: *logging
 
+  # --- scale profile (realtime-scale) ---------------------------------------
+  # Two app instances sharing Valkey: Socket.IO Redis Streams adapter for
+  # cross-instance fan-out and connection-state recovery, shared rate limits,
+  # presence with TTL heartbeats. Requires PostgreSQL (the default above) and
+  # in .env:
+  #   REDIS_URL=redis://valkey:6379
+  #   CADDYFILE=./Caddyfile.scale
+  # then: docker compose --profile scale up -d
+  # See DEPLOYMENT.md §8 "Running several instances".
+  valkey:
+    image: valkey/valkey:8-alpine
+    profiles: ["scale"]
+    restart: unless-stopped
+    # Ephemeral by design: sockets, presence, rate buckets and the replay
+    # stream are all rebuilt within minutes. No persistence, bounded memory.
+    command: ["valkey-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    expose:
+      - "6379"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  app-2:
+    extends:
+      service: app
+    profiles: ["scale"]
+    environment:
+      # Snowflake ids embed a worker id; every instance needs its own (the
+      # first app uses the default, 0). A third instance would use 2, etc.
+      WORKER_ID: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  # --- translation -------------------------------------------------------------
+  # Self-hosted machine translation for POST /api/translate — message text
+  # never leaves your infrastructure. Enable with the `translate` profile and
+  # set LIBRETRANSLATE_URL=http://libretranslate:5000 in .env. Only the
+  # languages in LT_LOAD_ONLY are downloaded (first start fetches the models
+  # into the volume; allow a few minutes and ~1-2 GB). See DEPLOYMENT.md,
+  # "Passkeys and message translation".
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    profiles: ["translate"]
+    restart: unless-stopped
+    environment:
+      LT_LOAD_ONLY: ${LT_LOAD_ONLY:-en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id}
+      LT_DISABLE_WEB_UI: "true"
+      LT_UPDATE_MODELS: "true"
+      # Optional: require LIBRETRANSLATE_API_KEY (set the same key in the app).
+      LT_API_KEYS: ${LT_API_KEYS:-false}
+    volumes:
+      - lt-models:/home/libretranslate/.local
+    # Internal only: the app is its sole client.
+    expose:
+      - "5000"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "./venv/bin/python scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    logging: *logging
+
 volumes:
   app-data:
   app-backups:
   pg-data:
   caddy-data:
   caddy-config:
+  lt-models:   # translation (LibreTranslate language models)
 
 networks:
   edge:

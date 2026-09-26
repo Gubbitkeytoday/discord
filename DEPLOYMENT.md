@@ -526,12 +526,93 @@ small installs because reads vastly outnumber writes.
 | Limit | Why | Fix |
 | --- | --- | --- |
 | One writer | SQLite only | switch to PostgreSQL ([§11](#11-postgresql)) |
-| No multi-instance | Socket.IO rooms, presence, typing and **rate limits** are in-process memory — even on PostgreSQL | a Socket.IO Redis adapter plus a shared rate-limit store (not implemented); until then, one instance |
+| One instance by default | Socket.IO rooms, presence and rate limits are in-process memory unless `REDIS_URL` is set | set `REDIS_URL` (Valkey/Redis) and run several instances — see "Running several instances" below |
 | Voice above `VOICE_MESH_LIMIT` (8) | WebRTC full mesh: each extra peer costs every participant another upstream | an SFU (mediasoup, LiveKit) |
 | Local uploads | tied to one host's disk | switch to `S3_*` |
 
 Before optimising anything, look at `/metrics`. p95 latency and the 5xx counter
 will tell you where the time actually goes.
+
+<!-- realtime-scale: begin -->
+### Reconnects and catch-up (every deployment)
+
+- **Connection-state recovery.** A client that drops for less than
+  `SOCKET_RECOVERY_MS` (default 2 min) reconnects with the same socket id and
+  rooms, and the server replays the room events it missed (`socket.recovered`
+  is `true` on the client). Before a resume is accepted the server re-checks
+  the session (not revoked/expired) and every room (still a member, still has
+  `VIEW_CHANNEL`); any change turns it into a fresh connection, so a replayed
+  event can never leak a channel the user just lost. Sockets that were in a
+  voice room always get a fresh connection (the voice client rejoins).
+- **Catch-up REST** for anything longer, or a refused resume:
+  `GET /api/sync?since=<cursor>` returns per-channel new/edited/deleted counts
+  for readable channels, and a `state_hash` per guild (roles + visible
+  channels + effective permissions) — refetch a guild when its hash changes,
+  page `GET /api/channels/:id/messages?after=<newest id>` for channels you
+  hold. Store the returned `cursor` each time; `reset: true` means reload
+  everything. Full algorithm: comment at the top of `routes/sync.js`.
+- **Search** filters by permission inside SQL, so pages are always full;
+  page with `?before=<X-Next-Cursor>` from the previous response.
+- **Graceful drain** (SIGTERM): `/api/ready` turns 503, clients receive
+  `server_draining` and are closed with a *recoverable* reason, idle HTTP
+  keep-alives close, in-flight requests finish, then the database closes.
+  Presence is not flipped offline for users who are only switching instance.
+- **Flood protection**: each socket has per-event budgets (typing, presence,
+  speaking, signalling…); over-budget events are dropped (acks get
+  `RATE_LIMITED`), and a socket that keeps flooding receives `rate_limited`
+  and is disconnected. Frames above `SOCKET_MAX_PAYLOAD_BYTES` (512 KiB) close
+  the connection. Typing is re-broadcast at most once per 3 s per user.
+
+### Running several instances
+
+Set `REDIS_URL` (Valkey 7/8 or Redis ≥ 6.2) and use PostgreSQL. Each instance
+then uses:
+
+| Concern | With `REDIS_URL` | Without |
+| --- | --- | --- |
+| Room fan-out | `@socket.io/redis-streams-adapter` (one stream, `ag:socket.io`) | in memory |
+| Resume after a drop | session + missed events come from Redis, so it works across instances (e.g. after a deploy) | same instance only |
+| Rate limits | token bucket in a Lua script, shared by all instances; falls back to per-instance buckets if Redis blips | per instance |
+| Presence | per-user sorted set of live connections with TTL heartbeats; a crashed instance's users go offline after `PRESENCE_TTL_MS` | per instance |
+| Once-per-cluster timers | event reminders and the presence/voice reaper take a short lease | — |
+
+Streams rather than the pub/sub Redis adapter because only the streams
+adapter supports connection-state recovery. An instance that loses Redis
+reports 503 on `/api/ready` so the proxy stops routing to it.
+
+**Sticky sessions.** Socket.IO's HTTP long-polling fallback sends each request
+of one session separately and they must reach the same instance; WebSocket-only
+clients would not care, but keep stickiness on. With Caddy use
+`lb_policy cookie` (as in `Caddyfile.scale`); with nginx use `ip_hash` (or
+`hash $cookie_… consistent`) in the `upstream` block, plus the usual
+`Upgrade`/`Connection` headers.
+
+**Compose.** The `scale` profile adds Valkey and a second app instance
+(`app-2`, its own `WORKER_ID`) and `Caddyfile.scale` load-balances both with
+sticky cookies and `/api/ready` health checks:
+
+```bash
+# .env
+REDIS_URL=redis://valkey:6379
+CADDYFILE=./Caddyfile.scale
+
+docker compose --profile scale up -d
+curl -s https://$DOMAIN/api/health | jq .realtime   # {"mode":"cluster","redis":"connected",…}
+```
+
+Rolling update: restart `app`, wait for `/api/ready`, then `app-2`. Clients on
+the restarting instance get `server_draining`, reconnect to the other one and
+resume without losing events.
+
+Every instance needs a distinct `WORKER_ID` (0–31; snowflake ids embed it).
+Valkey holds nothing durable (sockets, presence, buckets, a replay stream
+trimmed to `SOCKET_STREAM_MAXLEN`), so it runs without persistence; restarting
+it only forces clients to reconnect and catch up over REST.
+
+Not shared between instances (by design, harmless): typing timers, the
+soundboard cooldown and AFK speaking timestamps — each lives on the instance
+that holds the user's socket.
+<!-- realtime-scale: end -->
 
 ---
 
@@ -762,3 +843,64 @@ pgBackRest or WAL-G). A nightly dump alone can lose up to a day.
   only; Thai and other scripts match exactly, as substrings.
 - Rate limits, presence, typing state and Socket.IO rooms stay in process
   memory; they do not move into Postgres (see [Scaling](#8-scaling)).
+
+## 12. Passkeys and message translation
+
+Both are optional and off unless configured; `GET /api/passkeys/config` and
+`GET /api/translate/config` report what is active.
+
+### Passkeys (WebAuthn)
+
+Set `PUBLIC_URL` (or `RP_ID` + `RP_ORIGIN`) and passkeys turn on:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PASSKEYS_ENABLED` | on when `RP_ID`/`PUBLIC_URL` is set | `0` forces off |
+| `RP_ID` | host of `PUBLIC_URL` | domain passkeys are bound to. **Changing it orphans every passkey.** |
+| `RP_ORIGIN` | origin of `PUBLIC_URL` | comma-separated list of page origins allowed to run a ceremony |
+| `RP_NAME` | `Antigravity Discord` | name shown by the browser |
+
+Behaviour:
+
+- Discoverable credentials, attestation `none`, user verification
+  `preferred`. A **sign-in** is only accepted when the authenticator verified
+  the user (biometric/PIN); such a sign-in skips both the password and TOTP.
+- Challenges are single-use rows in `webauthn_challenges`, valid 5 minutes.
+- Adding or removing a passkey needs a re-authentication (password + TOTP, or
+  a passkey) from the same session within the last 5 minutes.
+- Sign-in counters, backup-eligible/backed-up flags and last-used times are
+  stored; `GET /api/passkeys/events` is the account's audit trail.
+- WebAuthn needs a secure context: HTTPS, or `http://localhost` in development.
+  With the Vite dev server set `RP_ID=localhost` and
+  `RP_ORIGIN=http://localhost:5173`.
+
+### Message translation
+
+The client first uses the browser's on-device Translator API (Chrome), which
+needs no server at all. Otherwise `POST /api/translate {messageId, targetLang}`
+translates the *stored* text of a message the caller can read — never arbitrary
+text — trying, in order, the providers that are configured:
+
+1. **LibreTranslate** (self-hosted, recommended): `docker compose --profile
+   translate up -d`, then `LIBRETRANSLATE_URL=http://libretranslate:5000` in
+   `.env`. `LT_LOAD_ONLY` picks the languages (default
+   `en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id`); models download on first start
+   into the `lt-models` volume. Set `LT_API_KEYS=true` plus
+   `LIBRETRANSLATE_API_KEY` to require a key.
+2. **DeepL**: `DEEPL_API_KEY` (free-plan keys ending `:fx` are detected).
+3. **Claude**: `ANTHROPIC_API_KEY`; model `TRANSLATION_ANTHROPIC_MODEL`
+   (default `claude-haiku-4-5-20251001`). Message text is sent to Anthropic —
+   only enable it if your privacy policy allows.
+
+`TRANSLATION_PROVIDERS` reorders or narrows the list;
+`TRANSLATION_SERVER_ENABLED=0` disables the endpoint; a server owner can turn
+server-side translation off for one guild (`PUT
+/api/servers/:id/translation {disabled:true}`, MANAGE_GUILD).
+
+Mentions, channels, emoji, timestamps, code, URLs and Markdown markers are
+replaced by placeholders before text reaches a provider and restored after.
+Results are cached in `translation_cache` per (message, content hash, target
+language) for `TRANSLATION_CACHE_TTL_HOURS` (default 168); editing a message
+changes the hash, so an old translation is never served. Provider calls are
+rate limited per user (`TRANSLATION_RATE_PER_MIN`, default 20). Message
+content is never written to logs.
