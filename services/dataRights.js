@@ -18,7 +18,7 @@
 //    removed outright.
 // ============================================================================
 
-import { getQuery, allQuery, runQuery, transaction } from '../db.js';
+import { getQuery, allQuery, runQuery, transaction, sql } from '../db.js';
 import { ApiError } from '../lib/httpUtils.js';
 
 // A guard against a runaway export on a very old account. Anything larger than
@@ -112,7 +112,7 @@ export async function deleteAccount({ userId }) {
   await transaction(async () => {
     await runQuery(
       `UPDATE users
-          SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+          SET deleted_at = ${sql.now},
               display_name = 'Deleted User',
               username = 'deleted_' || id,
               email = NULL, password_hash = NULL, mfa_secret = NULL, mfa_enabled = 0,
@@ -123,7 +123,7 @@ export async function deleteAccount({ userId }) {
     );
     // Every way back in, closed.
     await runQuery(
-      `UPDATE sessions SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE sessions SET revoked_at = ${sql.now}
         WHERE user_id = ? AND revoked_at IS NULL`, [userId]
     );
     await runQuery(`DELETE FROM account_tokens WHERE user_id = ?`, [userId]);
@@ -134,7 +134,7 @@ export async function deleteAccount({ userId }) {
     await runQuery(`DELETE FROM user_settings WHERE user_id = ?`, [userId]);
     // Leaving every server also removes the per-guild profiles.
     await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+      `UPDATE server_members SET left_at = ${sql.now},
               nickname = NULL, avatar_url = NULL, banner_url = NULL, bio = NULL, pronouns = NULL
         WHERE user_id = ? AND left_at IS NULL`,
       [userId]

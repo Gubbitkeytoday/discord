@@ -13,7 +13,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 
-import { runQuery, getQuery } from '../db.js';
+import { runQuery, getQuery, sql } from '../db.js';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
@@ -245,7 +245,7 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
 
   await runQuery(
     `INSERT INTO link_embeds (url_hash, url, data, fetched_at, expires_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?)
+     VALUES (?, ?, ?, ${sql.now}, ?)
      ON CONFLICT(url_hash) DO UPDATE SET
        data = excluded.data, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`,
     [key, rawUrl, JSON.stringify(embed), new Date(Date.now() + CACHE_TTL_MS).toISOString()]

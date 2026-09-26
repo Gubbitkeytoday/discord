@@ -2,7 +2,7 @@
 //  Reports — user-submitted reports on messages, users, servers and files.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 
@@ -130,17 +130,17 @@ export async function resolveReport({ reportId, resolverId, status, action = nul
   await runQuery(
     `UPDATE reports SET status = ?, resolved_by = ?,
        resolved_at = CASE WHEN ? = 'reviewing' THEN NULL
-                          ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END,
-       details = CASE WHEN ? IS NULL THEN details
-                      ELSE COALESCE(details, '') || char(10) || '[action] ' || ? END
+                          ELSE ${sql.now} END,
+       details = CASE WHEN ${sql.text('?')} IS NULL THEN details
+                      ELSE COALESCE(details, '') || ? END
       WHERE id = ?`,
-    [status, resolverId, status, action, action, reportId]
+    [status, resolverId, status, action, action == null ? null : `\n[action] ${action}`, reportId]
   );
 
   // Acting on a reported message deletes it, which is the common outcome.
   if (status === 'resolved' && action === 'delete_message' && report.target_type === 'message') {
     await runQuery(
-      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE messages SET deleted_at = ${sql.now} WHERE id = ?`,
       [report.target_id]
     );
   }

@@ -7,7 +7,7 @@
 
 import crypto from 'crypto';
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import {
@@ -114,7 +114,7 @@ async function consumeRecoveryCode({ userId, code }) {
   if (!row) return false;
   // Single use: burn it immediately.
   await runQuery(
-    `UPDATE account_tokens SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE account_tokens SET used_at = ${sql.now} WHERE id = ?`,
     [row.id]
   );
   return true;
@@ -171,7 +171,7 @@ export async function verifyEmail({ token }) {
   await transaction(async () => {
     await runQuery(`UPDATE users SET email_verified = 1 WHERE id = ?`, [row.user_id]);
     await runQuery(
-      `UPDATE account_tokens SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE account_tokens SET used_at = ${sql.now} WHERE id = ?`,
       [row.id]
     );
   });
@@ -226,12 +226,12 @@ export async function resetPassword({ token, newPassword }) {
   await transaction(async () => {
     await runQuery(`UPDATE users SET password_hash = ? WHERE id = ?`, [hashed, row.user_id]);
     await runQuery(
-      `UPDATE account_tokens SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE account_tokens SET used_at = ${sql.now} WHERE id = ?`,
       [row.id]
     );
     // Any other outstanding reset links for this account are now void.
     await runQuery(
-      `UPDATE account_tokens SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE account_tokens SET used_at = ${sql.now}
         WHERE user_id = ? AND kind = 'password_reset' AND used_at IS NULL`,
       [row.user_id]
     );

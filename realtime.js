@@ -7,7 +7,7 @@
 //  variable that dies with the process.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from './db.js';
+import { runQuery, getQuery, allQuery, sql } from './db.js';
 import { generateId } from './lib/snowflake.js';
 import * as messageService from './services/messages.js';
 import * as userService from './services/users.js';
@@ -327,7 +327,7 @@ export function registerRealtime(io) {
 
       await runQuery(
         `INSERT INTO voice_states (user_id, channel_id, server_id, session_id, socket_id, joined_at)
-         VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         VALUES (?, ?, ?, ?, ?, ${sql.now})
          ON CONFLICT(user_id) DO UPDATE SET
            channel_id = excluded.channel_id, server_id = excluded.server_id,
            session_id = excluded.session_id, socket_id = excluded.socket_id,
@@ -652,8 +652,8 @@ function clearTyping(io, channelId, userId) {
 
 async function broadcastVoice(io, channelId) {
   const participants = await allQuery(
-    `SELECT vs.user_id AS userId, vs.socket_id AS socketId,
-            vs.self_mute AS isMuted, vs.self_deaf AS isDeafened,
+    `SELECT vs.user_id AS "userId", vs.socket_id AS "socketId",
+            vs.self_mute AS "isMuted", vs.self_deaf AS "isDeafened",
             vs.self_video, vs.self_stream, vs.joined_at, vs.suppress, vs.request_to_speak_at,
             COALESCE(u.display_name, u.username) AS username, u.avatar_url
        FROM voice_states vs JOIN users u ON u.id = vs.user_id

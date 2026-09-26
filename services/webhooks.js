@@ -7,7 +7,7 @@
 
 import crypto from 'crypto';
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission, writeAuditLog } from './guilds.js';
@@ -83,7 +83,7 @@ export async function deleteWebhook({ webhookId, actorId }) {
     userId: actorId, serverId: webhook.server_id, permission: 'MANAGE_WEBHOOKS'
   });
   await runQuery(
-    `UPDATE webhooks SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE webhooks SET revoked_at = ${sql.now} WHERE id = ?`,
     [webhookId]
   );
   await writeAuditLog({

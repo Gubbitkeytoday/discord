@@ -2,7 +2,7 @@
 //  User service — profiles, presence, friends, blocks, per-user settings.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import {
@@ -113,7 +113,7 @@ export async function setNote({ authorId, subjectId, note }) {
   }
   await runQuery(
     `INSERT INTO user_notes (author_id, subject_id, note, updated_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, ${sql.now})
      ON CONFLICT(author_id, subject_id) DO UPDATE SET
        note = excluded.note, updated_at = excluded.updated_at`,
     [authorId, subjectId, text]
@@ -180,7 +180,7 @@ export async function updateProfile({ userId, patch }) {
   }
   if (!sets.length) return getUser(userId);
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(userId);
 
   await transaction(async () => {
@@ -203,7 +203,7 @@ export async function setPresence({ userId, status, customStatus = undefined }) 
   if (!valid.includes(status)) {
     throw new ApiError(`Invalid status '${status}'`, { code: 'INVALID_STATUS' });
   }
-  const sets = [`status = ?`, `presence_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`];
+  const sets = [`status = ?`, `presence_updated_at = ${sql.now}`];
   const params = [status];
   if (customStatus !== undefined) { sets.push('custom_status = ?'); params.push(customStatus); }
   params.push(userId);
@@ -213,7 +213,7 @@ export async function setPresence({ userId, status, customStatus = undefined }) 
 
 export async function touchLastSeen(userId) {
   await runQuery(
-    `UPDATE users SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [userId]
+    `UPDATE users SET last_seen_at = ${sql.now} WHERE id = ?`, [userId]
   );
 }
 
@@ -344,7 +344,7 @@ export async function acceptFriendRequest({ userId, requestId }) {
     throw ApiError.forbidden('Only the recipient can accept this request');
   }
   await runQuery(
-    `UPDATE friends SET status = 'accepted', accepted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE friends SET status = 'accepted', accepted_at = ${sql.now}
       WHERE id = ?`,
     [requestId]
   );
@@ -362,7 +362,7 @@ export async function removeFriend({ userId, otherId }) {
 export async function blockUser({ userId, targetId }) {
   await transaction(async () => {
     await runQuery(
-      `INSERT OR IGNORE INTO blocks (user_id, blocked_id) VALUES (?, ?)`, [userId, targetId]
+      `INSERT INTO blocks (user_id, blocked_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [userId, targetId]
     );
     await runQuery(
       `DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`,

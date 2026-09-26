@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS users (
   accent_color        TEXT COLLATE "C",
   bio                 TEXT COLLATE "C",
   pronouns            TEXT COLLATE "C",
+  -- who may see the bio (v10)
+  profile_visibility  TEXT COLLATE "C" NOT NULL DEFAULT 'everyone'
+                      CHECK (profile_visibility IN ('everyone','mutual','friends')),
   status              TEXT COLLATE "C" NOT NULL DEFAULT 'offline'
                       CHECK (status IN ('online','idle','dnd','offline','invisible')),
   custom_status       TEXT COLLATE "C",
@@ -541,6 +544,7 @@ CREATE TABLE IF NOT EXISTS friends (
                 CHECK (status IN ('pending','accepted','blocked','declined')),
   requested_by  TEXT COLLATE "C" REFERENCES users(id) ON DELETE SET NULL DEFERRABLE,
   nickname      TEXT COLLATE "C",
+  note          TEXT COLLATE "C",          -- the requester's "who I am" note (v10)
   created_at    TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
   accepted_at   TIMESTAMPTZ(3),
   UNIQUE (user_id, friend_id)

@@ -16,7 +16,7 @@ import fs from 'fs';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
 
-import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION } from './db.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION, sql, dbHealth } from './db.js';
 import {
   initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError
 } from './storageService.js';
@@ -150,12 +150,12 @@ app.get('/api/ready', asyncRoute(async (req, res) => {
     res.status(503).json({ status: 'draining' });
     return;
   }
-  try {
-    await getQuery('SELECT 1 AS ok');
-    res.json({ status: 'ready', ...metricsSnapshot() });
-  } catch (err) {
-    res.status(503).json({ status: 'not_ready', error: err.message });
+  const database = await dbHealth();
+  if (!database.reachable) {
+    res.status(503).json({ status: 'not_ready', database });
+    return;
   }
+  res.json({ status: 'ready', database, ...metricsSnapshot() });
 }));
 
 if (config.enableMetrics) {
@@ -172,11 +172,19 @@ if (config.enableMetrics) {
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
+  // Which driver is in use and whether it answers. An unreachable database
+  // is a 503 with the reason, rather than an opaque 500 from the query below.
+  const database = await dbHealth();
+  if (!database.reachable) {
+    res.status(503).json({ status: 'error', database, code_schema_version: SCHEMA_VERSION });
+    return;
+  }
   const { version } = await getQuery(
     `SELECT MAX(version) AS version FROM schema_migrations`
   );
   res.json({
     status: 'ok',
+    database,
     schema_version: version,
     // What *this process* was built against. A client that expects more than
     // this is talking to a server that was started before the code changed —
@@ -928,13 +936,13 @@ app.post('/api/notifications/read', requireUser, asyncRoute(async (req, res) => 
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
   if (ids && ids.length) {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
       [req.userId, ...ids]
     );
   } else {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL`,
       [req.userId]
     );
@@ -2127,6 +2135,8 @@ async function shutdown(signal) {
   try {
     stopGC();
     clearInterval(housekeeping);
+    clearInterval(afkSweep);
+    clearInterval(eventReminders);
     await new Promise((resolve) => io.close(resolve));
     await new Promise((resolve) => httpServer.close(resolve));
     await closeDB();

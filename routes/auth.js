@@ -4,7 +4,7 @@
 
 import express from 'express';
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError, asyncRoute } from '../lib/httpUtils.js';
 import {
@@ -175,8 +175,8 @@ router.get('/auth/sessions', asyncRoute(async (req, res) => {
   const sessions = await allQuery(
     `SELECT id, device_name, platform, ip_address, user_agent, created_at, last_seen_at, expires_at
        FROM sessions
-      WHERE user_id = ? AND revoked_at IS NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      ORDER BY last_seen_at DESC`,
+      WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ${sql.now}
+      ORDER BY last_seen_at DESC NULLS LAST, created_at DESC`,
     [req.userId]
   );
   res.json(sessions.map((s) => ({ ...s, current: s.id === req.sessionId })));
@@ -185,7 +185,7 @@ router.get('/auth/sessions', asyncRoute(async (req, res) => {
 router.delete('/auth/sessions/:sessionId', asyncRoute(async (req, res) => {
   if (!req.userId) throw ApiError.unauthorized();
   await runQuery(
-    `UPDATE sessions SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE sessions SET revoked_at = ${sql.now}
       WHERE id = ? AND user_id = ?`,
     [req.params.sessionId, req.userId]
   );

@@ -10,7 +10,7 @@
 //  a post can never exist without its body.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission } from './guilds.js';
@@ -270,8 +270,8 @@ export async function listPosts(channelId, {
   }
   const needle = String(q ?? '').trim();
   if (needle) {
-    where.push(`(c.name LIKE ? ESCAPE '\\' OR EXISTS (
-       SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.deleted_at IS NULL AND m.content LIKE ? ESCAPE '\\'))`);
+    where.push(`(c.name ${sql.like} ? ESCAPE '\\' OR EXISTS (
+       SELECT 1 FROM messages m WHERE m.channel_id = c.id AND m.deleted_at IS NULL AND m.content ${sql.like} ? ESCAPE '\\'))`);
     const like = `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
     params.push(like, like);
   }

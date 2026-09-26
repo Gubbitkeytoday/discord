@@ -8,7 +8,7 @@
 //  is honest about where the figures come from.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission, writeAuditLog } from './guilds.js';
@@ -58,13 +58,13 @@ export async function getInsights({ serverId, userId, days = 30 }) {
   // Daily series, zero-filled so a quiet day is a gap in the line rather than
   // a missing point that the chart would silently close over.
   const rows = await allQuery(
-    `SELECT substr(created_at, 1, 10) AS day, count(*) AS messages, count(DISTINCT user_id) AS authors
+    `SELECT ${sql.day('created_at')} AS day, count(*) AS messages, count(DISTINCT user_id) AS authors
        FROM messages
       WHERE server_id = ? AND deleted_at IS NULL AND created_at >= ?
       GROUP BY day ORDER BY day`, [serverId, since]
   );
   const joins = await allQuery(
-    `SELECT substr(joined_at, 1, 10) AS day, count(*) AS joins
+    `SELECT ${sql.day('joined_at')} AS day, count(*) AS joins
        FROM server_members WHERE server_id = ? AND joined_at >= ? GROUP BY day ORDER BY day`, [serverId, since]
   );
   const byDay = new Map(rows.map((r) => [r.day, r]));
@@ -158,7 +158,7 @@ export async function getWidget(serverId) {
   if (server.widget_channel_id) {
     const invite = await getQuery(
       `SELECT code FROM invites
-        WHERE channel_id = ? AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        WHERE channel_id = ? AND (expires_at IS NULL OR expires_at > ${sql.now})
         ORDER BY created_at DESC LIMIT 1`, [server.widget_channel_id]
     );
     instantInvite = invite?.code ? `/invite/${invite.code}` : null;
@@ -301,7 +301,7 @@ export async function liftLockdown({ serverId, userId }) {
   const active = await activeLockdown(serverId);
   if (!active) throw new ApiError('This server is not locked down', { code: 'NO_LOCKDOWN' });
   await runQuery(
-    `UPDATE guild_lockdowns SET lifted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), lifted_by = ? WHERE id = ?`,
+    `UPDATE guild_lockdowns SET lifted_at = ${sql.now}, lifted_by = ? WHERE id = ?`,
     [userId, active.id]
   );
   await writeAuditLog({ serverId, userId, actionType: 'LOCKDOWN_LIFT', targetType: 'server', targetId: serverId });

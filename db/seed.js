@@ -7,6 +7,7 @@
 import { generateId, snowflakeForDate } from '../lib/snowflake.js';
 import { hashPassword } from '../lib/auth.js';
 import { DEFAULT_PERMISSIONS, ALL_PERMISSIONS, fromNames } from '../lib/permissions.js';
+import { isPostgres } from './dialect.js';
 
 const now = () => new Date().toISOString();
 
@@ -218,10 +219,14 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
          VALUES (?, ?, ?, ?, ?, 'default', ?)`,
         [msg.id, msg.channel_id, msg.server_id, msg.user_id, msg.content, createdAt]
       );
-      await runQuery(
-        `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-        [msg.content, msg.id, msg.channel_id]
-      );
+      // SQLite's search index is a separate FTS5 table; Postgres indexes
+      // messages.content itself (pg_trgm), so there is nothing to add there.
+      if (!isPostgres) {
+        await runQuery(
+          `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
+          [msg.content, msg.id, msg.channel_id]
+        );
+      }
       for (const [emoji, userIds] of Object.entries(msg.reactions ?? {})) {
         for (const userId of userIds) {
           await runQuery(

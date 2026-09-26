@@ -283,7 +283,7 @@ export async function complete({ serverId, userId, acceptRules = false, answers 
       }
     }
     for (const roleId of grantRoles) {
-      await runQuery(`INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)`, [serverId, userId, roleId]);
+      await runQuery(`INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, [serverId, userId, roleId]);
     }
     await runQuery(`UPDATE server_members SET pending = 0 WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
   });

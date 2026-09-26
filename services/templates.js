@@ -8,7 +8,7 @@
 //  the new server's role ids at creation time.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import crypto from 'crypto';
@@ -86,7 +86,7 @@ export async function createTemplate({ serverId, userId, name, description = nul
   const existing = await getQuery(`SELECT code FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (existing) {
     await runQuery(
-      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = ${sql.now} WHERE code = ?`,
       [clean, desc, data, existing.code]
     );
     return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [existing.code]));
@@ -106,7 +106,7 @@ export async function syncTemplate({ serverId, userId }) {
   const row = await getQuery(`SELECT * FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (!row) throw ApiError.notFound('Template');
   await runQuery(
-    `UPDATE server_templates SET data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+    `UPDATE server_templates SET data = ?, updated_at = ${sql.now} WHERE code = ?`,
     [JSON.stringify(await snapshot(serverId)), row.code]
   );
   return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [row.code]));
@@ -212,7 +212,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       let pos = 0;
       for (const tag of (c.tags ?? []).slice(0, 20)) {
         await runQuery(
-          `INSERT OR IGNORE INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           [generateId(), id, String(tag.name).slice(0, 20), tag.emoji ?? null, tag.moderated ? 1 : 0, pos++]
         );
       }

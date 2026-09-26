@@ -6,7 +6,7 @@
 //  screen without an audit trail is how servers get quietly wrecked.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { toBigInt, ALL_PERMISSIONS } from '../lib/permissions.js';
@@ -78,7 +78,7 @@ export async function updateGuild({ serverId, actorId, patch }) {
   }
   if (!sets.length) return before;
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(serverId);
 
   await transaction(async () => {
@@ -109,7 +109,7 @@ export async function deleteGuild({ serverId, actorId }) {
   if (server.owner_id !== actorId) throw ApiError.forbidden('Only the owner can delete a server');
 
   await runQuery(
-    `UPDATE servers SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE servers SET deleted_at = ${sql.now} WHERE id = ?`,
     [serverId]
   );
   return { success: true };
@@ -325,8 +325,12 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
   const params = [serverId];
   let where = 'sm.server_id = ? AND sm.left_at IS NULL';
   if (search) {
-    where += ' AND (u.username LIKE ? OR u.display_name LIKE ? OR sm.nickname LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    // Case-insensitive on both engines (SQLite's LIKE folds ASCII already), and
+    // the user's text is matched literally rather than as a pattern.
+    const op = `${sql.like} ? ESCAPE '\\'`;
+    where += ` AND (u.username ${op} OR u.display_name ${op} OR sm.nickname ${op})`;
+    const like = `%${String(search).replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    params.push(like, like, like);
   }
   params.push(Math.min(limit, 1000));
 
@@ -495,7 +499,7 @@ export async function listInvites(serverId) {
 export async function revokeInvite({ serverId, code, actorId }) {
   await assertPermission({ userId: actorId, serverId, permission: 'MANAGE_GUILD' });
   await runQuery(
-    `UPDATE invites SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE invites SET revoked_at = ${sql.now}
       WHERE code = ? AND server_id = ?`,
     [code, serverId]
   );

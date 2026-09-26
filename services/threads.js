@@ -4,7 +4,7 @@
 //  unchanged because a thread *is* a channel.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission } from './guilds.js';
@@ -124,7 +124,7 @@ export async function joinThread({ threadId, userId }) {
   const thread = await assertIsVisibleThread(threadId, userId);
   if (thread.archived) throw ApiError.conflict('เธรดนี้ถูกเก็บถาวรแล้ว');
   await runQuery(
-    `INSERT OR IGNORE INTO channel_recipients (channel_id, user_id) VALUES (?, ?)`,
+    `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
     [threadId, userId]
   );
   await runQuery(
@@ -164,7 +164,7 @@ export async function setThreadArchived({ threadId, userId, archived, locked = u
     });
   }
 
-  const sets = [`archived = ?`, `archive_timestamp = strftime('%Y-%m-%dT%H:%M:%fZ','now')`];
+  const sets = [`archived = ?`, `archive_timestamp = ${sql.now}`];
   const params = [archived ? 1 : 0];
   if (locked !== undefined) { sets.push('locked = ?'); params.push(locked ? 1 : 0); }
   params.push(threadId);
@@ -188,7 +188,7 @@ export async function sweepStaleThreads() {
     if (idleMs > (thread.auto_archive_duration ?? 1440) * 60_000) {
       await runQuery(
         `UPDATE channels SET archived = 1,
-           archive_timestamp = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+           archive_timestamp = ${sql.now} WHERE id = ?`,
         [thread.id]
       );
       archived += 1;

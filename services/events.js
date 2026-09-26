@@ -252,7 +252,7 @@ export async function createEvent({ serverId, userId, input }) {
   );
 
   // The creator is interested by definition.
-  await runQuery(`INSERT OR IGNORE INTO event_interest (event_id, user_id) VALUES (?, ?)`, [id, userId]);
+  await runQuery(`INSERT INTO event_interest (event_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [id, userId]);
   return getEvent(id, userId);
 }
 
@@ -312,7 +312,7 @@ export async function setInterest({ eventId, userId, interested }) {
   }
 
   if (interested) {
-    await runQuery(`INSERT OR IGNORE INTO event_interest (event_id, user_id) VALUES (?, ?)`, [eventId, userId]);
+    await runQuery(`INSERT INTO event_interest (event_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [eventId, userId]);
   } else {
     await runQuery(`DELETE FROM event_interest WHERE event_id = ? AND user_id = ?`, [eventId, userId]);
   }

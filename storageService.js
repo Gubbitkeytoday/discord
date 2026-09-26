@@ -26,7 +26,7 @@ import fsp from 'fs/promises';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
-import { runQuery, getQuery, allQuery, transaction } from './db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from './db.js';
 import { generateId } from './lib/snowflake.js';
 import { sniffMime, probeImage, getFileType } from './lib/mediaProbe.js';
 import { probeDuration, extractPoster } from './lib/mediaDuration.js';
@@ -339,7 +339,7 @@ export async function storeFile({
       await writeObject(existing.storage_key, buffer);
     }
     await runQuery(
-      `UPDATE files SET last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE files SET last_accessed_at = ${sql.now} WHERE id = ?`,
       [existing.id]
     );
     return withUrls({ ...existing, deduped: true }, await loadVariants(existing.id));
@@ -366,7 +366,7 @@ export async function storeFile({
                             is_animated, uploader_id, ref_count, visibility, scan_status,
                             expires_at, last_accessed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?,
-                 strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+                 ${sql.now})`,
         [id, hash, storageKey, activeBackend(), category, safeName, sniffed.mime, ext,
          buffer.length, probe.width ?? null, probe.height ?? null, durationSecs,
          probe.animated ? 1 : 0, uploaderId, visibility,
@@ -428,8 +428,11 @@ async function buildVariants({ id, hash, category, mime, buffer, rules, uploader
       await writeObject(key, out.data);
 
       await runQuery(
-        `INSERT OR REPLACE INTO file_variants (id, file_id, kind, storage_key, mime_type, width, height, size)
-         VALUES (?, ?, ?, ?, 'image/webp', ?, ?, ?)`,
+        `INSERT INTO file_variants (id, file_id, kind, storage_key, mime_type, width, height, size)
+         VALUES (?, ?, ?, ?, 'image/webp', ?, ?, ?)
+         ON CONFLICT (file_id, kind) DO UPDATE SET
+           storage_key = excluded.storage_key, mime_type = excluded.mime_type,
+           width = excluded.width, height = excluded.height, size = excluded.size`,
         [generateId(), id, spec.kind, key, out.info.width, out.info.height, out.data.length]
       );
       if (uploaderId) {
@@ -498,8 +501,10 @@ async function storeVideoPoster({ id, hash, category, storageKey, uploaderId }) 
     const key = buildStorageKey(category, hash, sharp ? 'webp' : 'png', 'poster');
     await writeObject(key, output, sharp ? 'image/webp' : 'image/png');
     await runQuery(
-      `INSERT OR REPLACE INTO file_variants (id, file_id, kind, storage_key, mime_type, size)
-       VALUES (?, ?, 'poster', ?, ?, ?)`,
+      `INSERT INTO file_variants (id, file_id, kind, storage_key, mime_type, size)
+       VALUES (?, ?, 'poster', ?, ?, ?)
+       ON CONFLICT (file_id, kind) DO UPDATE SET
+         storage_key = excluded.storage_key, mime_type = excluded.mime_type, size = excluded.size`,
       [generateId(), id, key, sharp ? 'image/webp' : 'image/png', output.length]
     );
     if (uploaderId) {
@@ -592,7 +597,7 @@ export async function addReference(fileId, count = 1) {
   await runQuery(
     `UPDATE files
         SET ref_count = ref_count + ?,
-            last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            last_accessed_at = ${sql.now}
       WHERE id = ?`,
     [count, fileId]
   );
@@ -602,13 +607,13 @@ export async function addReference(fileId, count = 1) {
 export async function releaseReference(fileId, count = 1) {
   if (!fileId) return;
   await runQuery(
-    `UPDATE files SET ref_count = MAX(0, ref_count - ?) WHERE id = ?`, [count, fileId]
+    `UPDATE files SET ref_count = ${sql.greatest(0, 'ref_count - ?')} WHERE id = ?`, [count, fileId]
   );
 }
 
 export async function recordAccess(fileId, { userId = null, ip = null, variant = null, bytes = null } = {}) {
   await runQuery(
-    `UPDATE files SET last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE files SET last_accessed_at = ${sql.now} WHERE id = ?`,
     [fileId]
   );
   await runQuery(
@@ -631,7 +636,7 @@ export async function deleteFile(fileId, { force = false } = {}) {
     );
   }
   await runQuery(
-    `UPDATE files SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [fileId]
+    `UPDATE files SET deleted_at = ${sql.now} WHERE id = ?`, [fileId]
   );
   return true;
 }
@@ -695,7 +700,7 @@ export async function collectGarbage({
           await runQuery(`DELETE FROM files WHERE id = ?`, [file.id]);
           if (file.uploader_id) {
             await runQuery(
-              `UPDATE users SET storage_used = MAX(0, storage_used - ?) WHERE id = ?`,
+              `UPDATE users SET storage_used = ${sql.greatest(0, 'storage_used - ?')} WHERE id = ?`,
               [bytes, file.uploader_id]
             );
           }
