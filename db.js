@@ -22,6 +22,7 @@ import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realti
 import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
 import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // admin polish (v41–v42)
 import { INTEGRATION_MIGRATIONS } from './db/migrations/integration.js'; // integration (v43)
+import { PROFILES_MIGRATIONS } from './db/migrations/profiles.js'; // profiles (v44–v45)
 import { SERVERS_MIGRATIONS } from './db/migrations/servers.js'; // servers (v46–v47)
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
@@ -692,6 +693,14 @@ const MIGRATIONS = [
   }))
   // integration (v43): message forwarding snapshot. See db/migrations/integration.js.
   ,...INTEGRATION_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // profiles (v44–v45): status expiry, profile theme, name styles, cosmetics
+  // catalogue, badges, server tags. See db/migrations/profiles.js.
+  ,...PROFILES_MIGRATIONS.map((m) => ({
     version: m.version,
     name: m.name,
     up: () => m.up({ runQuery, allQuery }),

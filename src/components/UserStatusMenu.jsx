@@ -1,7 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useDismiss } from '../hooks/useFocusTrap';
-import { Settings, Smile } from 'lucide-react';
+import { Settings, Smile, X } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
+import { setCustomStatus } from '../profile/api';
+// Loaded with the app shell, so profile popouts can anchor to whatever opened them.
+import '../profile/anchor';
+import { CLEAR_AFTER, clearAfterLabel, statusExpiryPayload, expiryText, StatusEmoji } from '../profile/text.jsx';
+
+const EmojiPicker = lazy(() => import('./EmojiPicker'));
 import useRestoreFocus from './ui/useRestoreFocus.js';
 import StatusIndicator from './ui/StatusIndicator.jsx';
 import { menuItem, menuSeparator, menuSurface } from './ui/menu.js';
@@ -25,7 +31,12 @@ const STATUSES = () => [
 export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSettings, onClose }) {
   const ref = useRef(null);
   const menuRef = useRef(null);
-  const [customStatus, setCustomStatus] = useState(currentUser?.custom_status ?? '');
+  const [customText, setCustomText] = useState(currentUser?.custom_status ?? '');
+  const [emoji, setEmoji] = useState(currentUser?.custom_status_emoji ?? null);
+  const [clearAfter, setClearAfter] = useState('today');
+  const [picking, setPicking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
   const current = currentUser?.status ?? 'online';
 
   useDismiss(ref, onClose);
@@ -51,11 +62,23 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
     next.focus();
   };
 
-  const saveCustom = (e) => {
-    e.preventDefault();
-    onSetStatus(current, customStatus.trim());
-    onClose();
+  // Saved through the profiles API: emoji and "clear after" are enforced by
+  // the server (it clears the status and tells everyone when it expires).
+  const saveCustom = async (e, clear = false) => {
+    e?.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const text = clear ? '' : customText.trim();
+      await setCustomStatus({ text, emoji: clear ? null : emoji, ...statusExpiryPayload(clearAfter) });
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
   };
+  const hasStatus = Boolean(currentUser?.custom_status || currentUser?.custom_status_emoji);
 
   return (
     <div
@@ -95,22 +118,80 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
           <Smile className="h-4 w-4 shrink-0" aria-hidden="true" />
           <span>{t('status.customStatus')}</span>
         </label>
-        <input
-          id="custom-status-input"
-          value={customStatus}
-          onChange={(e) => setCustomStatus(e.target.value)}
-          maxLength={128}
-          placeholder={t('status.customPlaceholder')}
-          className="w-full rounded-[var(--radius-d-sm)] bg-d-base px-2 py-2 text-sm text-d-strong placeholder:text-d-text3
-            border border-d-divider focus:border-d-brand focus:outline-none"
-        />
-        <button
-          type="submit"
-          className="mt-2 min-h-8 w-full rounded-[var(--radius-d-sm)] bg-d-brand py-1.5 text-sm font-semibold text-white
-            transition-colors hover:bg-d-brandhover"
+        <div className="flex items-center gap-1 rounded-[var(--radius-d-sm)] border border-d-divider bg-d-base pl-1 focus-within:border-d-brand">
+          <button
+            type="button"
+            onClick={() => setPicking((v) => !v)}
+            aria-label={emoji ? t('profiles.changeEmoji') : t('profiles.pickEmoji')}
+            aria-expanded={picking}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-lg text-d-text2 hover:bg-d-hover hover:text-d-strong"
+          >
+            {emoji ? <StatusEmoji emoji={emoji} className="h-5 w-5" /> : <Smile className="h-5 w-5" aria-hidden="true" />}
+          </button>
+          <input
+            id="custom-status-input"
+            value={customText}
+            onChange={(e) => setCustomText(e.target.value)}
+            maxLength={128}
+            placeholder={t('status.customPlaceholder')}
+            className="min-w-0 flex-1 bg-transparent py-2 pr-1 text-sm text-d-strong placeholder:text-d-text3 focus:outline-none"
+          />
+          {(customText || emoji) && (
+            <button type="button" onClick={() => { setCustomText(''); setEmoji(null); }}
+              aria-label={t('profiles.clearField')}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-d-text3 hover:text-d-strong">
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        {picking && (
+          <div className="absolute bottom-full left-0 z-50 mb-2">
+            <Suspense fallback={null}>
+              <EmojiPicker
+                onClose={() => setPicking(false)}
+                onPick={(entry) => {
+                  setEmoji(entry.custom || entry.id ? `<${entry.animated ? 'a' : ''}:${entry.name}:${entry.id}>` : entry.char);
+                  setPicking(false);
+                }}
+              />
+            </Suspense>
+          </div>
+        )}
+        <label htmlFor="custom-status-expiry" className="mt-2 block text-xs font-semibold text-d-text2">
+          {t('profiles.clearAfter')}
+        </label>
+        <select
+          id="custom-status-expiry"
+          value={clearAfter}
+          onChange={(e) => setClearAfter(e.target.value)}
+          className="mt-1 min-h-8 w-full rounded-[var(--radius-d-sm)] border border-d-divider bg-d-base px-2 text-sm text-d-strong focus:border-d-brand focus:outline-none"
         >
-          {t('common.save')}
-        </button>
+          {CLEAR_AFTER.map((value) => <option key={value} value={value}>{clearAfterLabel(value)}</option>)}
+        </select>
+        {hasStatus && currentUser?.custom_status_expires_at && (
+          <p className="mt-1 text-xs text-d-text3">{expiryText(currentUser.custom_status_expires_at)}</p>
+        )}
+        {error && <p role="alert" className="mt-1 text-xs text-d-danger">{error}</p>}
+        <div className="mt-2 flex gap-2">
+          {hasStatus && (
+            <button
+              type="button"
+              onClick={(e) => saveCustom(e, true)}
+              disabled={saving}
+              className="min-h-8 flex-1 rounded-[var(--radius-d-sm)] bg-d-surface py-1.5 text-sm font-semibold text-d-strong hover:bg-d-hover disabled:opacity-50"
+            >
+              {t('profiles.clearStatus')}
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={saving}
+            className="min-h-8 flex-1 rounded-[var(--radius-d-sm)] bg-d-brand py-1.5 text-sm font-semibold text-white
+              transition-colors hover:bg-d-brandhover disabled:opacity-50"
+          >
+            {t('common.save')}
+          </button>
+        </div>
       </form>
 
       <div className={menuSeparator} />

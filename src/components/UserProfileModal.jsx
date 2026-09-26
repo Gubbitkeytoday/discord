@@ -1,227 +1,223 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { api, post } from '../api';
 import {
-  X, MessageSquare, UserPlus, UserMinus, ShieldAlert, ShieldOff, Pencil, Check, MoreHorizontal, Flag
+  MessageSquare, UserPlus, UserMinus, ShieldAlert, ShieldOff, Pencil, Check, MoreHorizontal, Flag, Eraser
 } from 'lucide-react';
-import { useDialog, useEscapeLayer } from './settings/primitives';
+import { useEscapeLayer } from './settings/primitives';
 import ReportDialog from './admin/ReportDialog';
+import ConfirmModal from './ConfirmModal';
 import { useStreamerMask } from './admin/safety';
-import { localeTag, t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
-import { proxiedImageUrl, cssImageUrl } from '../utils/media';
+import { t } from '../i18n/index.jsx';
+import ProfilePopout from './profile/ProfilePopout';
+import ProfileFullModal from './profile/ProfileFullModal';
+import { useIdentity, primeIdentity } from '../profile/store';
+import { fetchProfile, resetMemberProfile } from '../profile/api';
+import { recentAnchorRect } from '../profile/anchor';
 
-const FALLBACK_AVATAR = DEFAULT_AVATAR;
-
-const STATUS_COLORS = {
-  online: 'bg-d-online', idle: 'bg-d-idle', dnd: 'bg-d-danger',
-  offline: 'bg-d-text4', invisible: 'bg-d-text4'
-};
-
+/**
+ * A person's profile: a compact popout beside whatever opened it, or the full
+ * profile (tabs: About, Mutual servers, Mutual friends, Note).
+ *
+ * Props (unchanged from the single-modal version, plus):
+ *   variant      'popout' (default) | 'full'
+ *   anchorRect   where the popout points; defaults to the element just clicked
+ *   onOpenServer(serverId)   optional: navigate from the Mutual servers tab
+ */
 export default function UserProfileModal({
-  user, currentUser, member, roles = [], friend, isBlocked, serverId = null,
-  onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile, onToast
+  user: initialUser, currentUser, member, roles = [], friend, isBlocked, serverId = null,
+  onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile, onToast,
+  variant: initialVariant = 'popout', anchorRect = null, onOpenServer
 }) {
+  const [variant, setVariant] = useState(initialVariant);
+  const [anchor] = useState(() => anchorRect ?? recentAnchorRect());
+  // Mutual friends can be opened in place; `viewing` is whose profile is shown.
+  const [viewing, setViewing] = useState(null);
+  const user = viewing?.user ?? initialUser;
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [replay, setReplay] = useState(0);
   const [reporting, setReporting] = useState(false);
-  const dialogRef = useDialog(onClose);
+  const [resetting, setResetting] = useState(false);
   const mask = useStreamerMask();
+  const sid = serverId && serverId !== 'home' ? serverId : null;
+  const cachedIdentity = useIdentity(user?.id, sid);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    fetchProfile(user.id, sid)
+      .then((res) => {
+        if (cancelled) return;
+        setData(res);
+        if (res?.identity) primeIdentity(user.id, sid, res.identity);
+      })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [user?.id, sid]);
+
+  const openUser = useCallback((id) => {
+    const local = data?.mutual_friends?.find((f) => f.id === id);
+    setViewing({ user: { id, ...(local ?? {}) } });
+    setVariant('full');
+  }, [data]);
+
   if (!user) return null;
 
+  const shownUser = { ...user, ...(data?.user ?? {}) };
+  const identity = data?.identity ?? cachedIdentity;
   const isSelf = user.id === currentUser?.id;
-  // Roles come from the member record; @everyone is never shown, as on Discord.
-  const memberRoles = (member?.roles ?? []).filter((r) => !r.name.startsWith('@'));
-  const joined = member?.joined_at ?? null;
+  const viewingOther = Boolean(viewing);
+  const shownMember = viewingOther ? (data?.member ?? null) : { ...(member ?? {}), ...(data?.member ?? {}) };
+  const shownRoles = viewingOther ? [] : (member?.roles ?? []);
+  const topRole = shownRoles.find((r) => r.color && !r.name?.startsWith('@'));
+  const usernameText = mask.usernames && !isSelf
+    ? t('safety.streamerHidden')
+    : `@${shownUser.username ?? ''}${shownUser.discriminator && !mask.personal ? `#${shownUser.discriminator}` : ''}`;
+  const friendRow = viewingOther ? null : friend;
+  const note = isSelf || mask.personal ? null : (
+    <PrivateNote key={user.id} userId={user.id} initial={data?.my_note ?? user.my_note ?? ''} />
+  );
+
+  const actions = isSelf ? (
+    <button
+      type="button"
+      onClick={onEditProfile}
+      className="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded bg-d-brand px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-d-brandhover"
+    >
+      <Pencil className="h-4 w-4" aria-hidden="true" /> {t('profile.editProfile')}
+    </button>
+  ) : (
+    <>
+      <button
+        type="button"
+        onClick={() => onSendDM(shownUser)}
+        className="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded bg-d-brand px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-d-brandhover"
+      >
+        <MessageSquare className="h-4 w-4" aria-hidden="true" /> {t('dm.message')}
+      </button>
+      {!isBlocked && !friendRow && !viewingOther && (
+        <button
+          type="button"
+          onClick={() => onAddFriend(shownUser)}
+          aria-label={variant === 'full' ? undefined : t('dm.addFriend')}
+          title={t('dm.addFriend')}
+          className="flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded bg-d-success px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-d-successhover"
+        >
+          <UserPlus className="h-4 w-4" aria-hidden="true" />{variant === 'full' && <span>{t('dm.addFriend')}</span>}
+        </button>
+      )}
+      {friendRow?.friend_status === 'pending' && friendRow.direction === 'incoming' && (
+        <button
+          type="button"
+          onClick={() => onAcceptFriend(shownUser)}
+          className="flex min-h-9 items-center justify-center gap-1.5 rounded bg-d-success px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-d-successhover"
+        >
+          <Check className="h-4 w-4" aria-hidden="true" /> {t('dm.accept')}
+        </button>
+      )}
+      {friendRow?.friend_status === 'accepted' && (
+        <button
+          type="button"
+          aria-label={t('dm.removeFriend')}
+          onClick={() => onRemoveFriend(shownUser)}
+          className="flex min-h-9 min-w-9 items-center justify-center rounded bg-d-surface px-3 py-2 text-d-text2 transition-colors hover:bg-d-hover"
+          title={t('dm.removeFriend')}
+        >
+          <UserMinus className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
+      {!viewingOther && (
+        <SafetyMenu
+          isBlocked={isBlocked}
+          onBlock={() => onBlock(shownUser)}
+          onUnblock={() => onUnblock(shownUser)}
+          onReport={() => setReporting(true)}
+          onResetProfile={data?.viewer?.can_moderate && sid ? () => setResetting(true) : null}
+        />
+      )}
+    </>
+  );
+
+  const guildEditor = isSelf && sid ? <GuildProfileEditor serverId={sid} onToast={onToast} /> : null;
+  const shared = {
+    user: shownUser,
+    identity,
+    member: shownMember,
+    roles: shownRoles,
+    roleColor: topRole?.color ?? null,
+    usernameText,
+    actions,
+    replay,
+    onReplay: () => setReplay((n) => n + 1)
+  };
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[60] flex items-center justify-center overlay-center p-4">
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={user.display_name || user.username}
-        className="bg-d-panel w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl border border-d-canvas relative"
-      >
-        <div
-          className="h-28 bg-cover bg-center relative"
-          style={{
-            backgroundImage: user.banner_url ? cssImageUrl(user.banner_url) : undefined,
-            backgroundColor: user.accent_color || 'var(--color-d-brand)'
-          }}
-        >
-          <button
-            onClick={onClose}
-            className="absolute top-3 right-3 bg-black/40 hover:bg-black/70 p-1.5 rounded-full text-white transition-colors"
-            aria-label={t('common.close')}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-4 pt-0 relative">
-          <div className="relative -top-10 mb-[-2rem] flex justify-between items-end">
-            <div className="relative">
-              <img
-                src={proxiedImageUrl(user.avatar_url || defaultAvatar(user.id))}
-                alt=""
-                className="w-20 h-20 rounded-full border-4 border-d-panel object-cover"
-              />
-              <span
-                className={`absolute bottom-1 right-1 w-4 h-4 rounded-full border-2 border-d-panel ${
-                  STATUS_COLORS[user.status] ?? STATUS_COLORS.offline
-                }`}
-                title={t(`status.${user.status ?? 'offline'}`)}
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 bg-d-sunken p-4 rounded-xl border border-d-surface space-y-3">
-            <div>
-              <h3 className="text-xl font-bold text-d-strong leading-tight">
-                {member?.nickname || user.display_name || user.username}
-              </h3>
-              <p className="text-xs text-d-text3">
-                {/* Streamer mode: the tag (and, if chosen, the handle) is what
-                    lets a viewer add or find someone, so it is hidden. */}
-                {mask.usernames && !isSelf
-                  ? t('safety.streamerHidden')
-                  : <>@{user.username}{user.discriminator && !mask.personal ? `#${user.discriminator}` : ''}</>}
-              </p>
-              {Boolean(user.pronouns) && <p className="text-[11px] text-d-text3 mt-0.5">{user.pronouns}</p>}
-              {Boolean(user.custom_status) && <p className="text-xs text-d-text mt-1">{user.custom_status}</p>}
-            </div>
-
-            <div className="w-full h-[1px] bg-d-surface" />
-
-            <div>
-              <h4 className="text-xs font-bold text-d-text2 uppercase tracking-wider mb-1">{t('profile.aboutMe')}</h4>
-              {user.profile_hidden ? (
-                <p className="text-xs italic text-d-text3">{t('profile.hidden')}</p>
-              ) : (
-                <p className="text-xs text-d-text leading-relaxed whitespace-pre-wrap">
-                  {user.bio || t('profile.noBio')}
-                </p>
-              )}
-            </div>
-
-            {isSelf && serverId && serverId !== 'home' && (
-              <GuildProfileEditor serverId={serverId} onToast={onToast} />
-            )}
-
-            {!isSelf && !mask.personal && <PrivateNote userId={user.id} initial={user.my_note} />}
-
-            {memberRoles.length > 0 && (
-              <div>
-                <h4 className="text-xs font-bold text-d-text2 uppercase tracking-wider mb-1">
-                  {t('profile.roles', { count: memberRoles.length })}
-                </h4>
-                <div className="flex flex-wrap gap-1">
-                  {memberRoles.map((role) => (
-                    <span
-                      key={role.id}
-                      className="flex items-center gap-1 bg-d-surface text-d-text border border-d-divider text-[11px] font-semibold px-2 py-0.5 rounded"
-                    >
-                      <span
-                        className="w-2 h-2 rounded-full"
-                        style={{ backgroundColor: role.color || 'var(--color-d-text4)' }}
-                        aria-hidden="true"
-                      />
-                      {role.name}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-2 text-[11px] text-d-text3">
-              {joined && (
-                <div>
-                  <span className="block font-bold text-d-text2 uppercase">{t('profile.memberSince')}</span>
-                  {new Date(joined).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}
-                </div>
-              )}
-              {Boolean(user.created_at) && (
-                <div>
-                  <span className="block font-bold text-d-text2 uppercase">{t('profile.discordSince')}</span>
-                  {new Date(user.created_at).toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' })}
-                </div>
-              )}
-            </div>
-
-            <div className="w-full h-[1px] bg-d-surface" />
-
-            <div className="flex flex-wrap gap-2">
-              {isSelf ? (
-                <button
-                  onClick={onEditProfile}
-                  className="flex-1 flex items-center justify-center gap-1.5 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-2 rounded transition-colors"
-                >
-                  <Pencil className="w-3.5 h-3.5" /> {t('profile.editProfile')}
-                </button>
-              ) : (
-                <>
-                  <button
-                    onClick={() => onSendDM(user)}
-                    className="flex-1 flex items-center justify-center gap-1.5 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-3 py-2 rounded transition-colors"
-                  >
-                    <MessageSquare className="w-3.5 h-3.5" /> {t('dm.message')}
-                  </button>
-
-                  {!isBlocked && !friend && (
-                    <button
-                      onClick={() => onAddFriend(user)}
-                      className="flex items-center justify-center gap-1.5 bg-d-success hover:bg-d-successhover text-white text-xs font-semibold px-3 py-2 rounded transition-colors"
-                    >
-                      <UserPlus className="w-3.5 h-3.5" /> {t('dm.addFriend')}
-                    </button>
-                  )}
-                  {friend?.friend_status === 'pending' && friend.direction === 'incoming' && (
-                    <button
-                      onClick={() => onAcceptFriend(user)}
-                      className="flex items-center justify-center gap-1.5 bg-d-success hover:bg-d-successhover text-white text-xs font-semibold px-3 py-2 rounded transition-colors"
-                    >
-                      <Check className="w-3.5 h-3.5" /> {t('dm.accept')}
-                    </button>
-                  )}
-                  {friend?.friend_status === 'accepted' && (
-                    <button aria-label={t('dm.removeFriend')}
-                      onClick={() => onRemoveFriend(user)}
-                      className="flex items-center justify-center gap-1.5 bg-d-surface hover:bg-d-hover text-d-text2 text-xs font-semibold px-3 py-2 rounded transition-colors"
-                      title={t('dm.removeFriend')}
-                    >
-                      <UserMinus className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-
-                  <SafetyMenu
-                    isBlocked={isBlocked}
-                    onBlock={() => onBlock(user)}
-                    onUnblock={() => onUnblock(user)}
-                    onReport={() => setReporting(true)}
-                  />
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
+    <>
+      {variant === 'full' ? (
+        <ProfileFullModal
+          {...shared}
+          mutualServers={data?.mutual_servers ?? shownUser.mutual_servers ?? []}
+          mutualFriends={data?.mutual_friends ?? []}
+          note={note}
+          extra={guildEditor}
+          loading={loading}
+          onClose={onClose}
+          onOpenUser={openUser}
+          onOpenServer={onOpenServer ? (id) => { onClose(); onOpenServer(id); } : undefined}
+        />
+      ) : (
+        <ProfilePopout
+          {...shared}
+          anchorRect={anchor}
+          onClose={onClose}
+          onViewFull={() => setVariant('full')}
+          footer={(
+            <>
+              {guildEditor && <div className="mt-3">{guildEditor}</div>}
+              {note && <div className="mt-3">{note}</div>}
+            </>
+          )}
+        />
+      )}
       {reporting && (
         <ReportDialog
-          target={{ type: 'user', id: user.id }}
-          user={isBlocked ? null : user}
+          target={{ type: 'user', id: shownUser.id }}
+          user={isBlocked ? null : shownUser}
           where="user"
           onClose={() => setReporting(false)}
           onToast={onToast}
+          // What the reporter saw goes with the report: profiles change.
+          onDone={(report) => {
+            if (report?.id) post(`/api/reports/${report.id}/profile-snapshot`, { server_id: sid }).catch(() => {});
+          }}
         />
       )}
-    </div>
+      {resetting && (
+        <ConfirmModal
+          title={t('profiles.resetTitle', { name: shownMember?.nickname || shownUser.display_name || shownUser.username })}
+          body={t('profiles.resetBody')}
+          confirmLabel={t('profiles.resetConfirm')}
+          withReason
+          reasonLabel={t('profiles.resetReason')}
+          onClose={() => setResetting(false)}
+          onConfirm={async (reason) => {
+            await resetMemberProfile(sid, shownUser.id, { reason });
+            onToast?.(t('profiles.resetDone'), { type: 'success', ttl: 3000 });
+          }}
+        />
+      )}
+    </>
   );
 }
 
 /**
  * "⋯" beside the profile actions: Block and Report, labelled, the way every
- * other messenger puts them. (It used to be a lone shield icon with only a
- * tooltip, next to a large green Accept button.)
+ * other messenger puts them — and, for moderators in a server, "Reset server
+ * profile".
  */
-function SafetyMenu({ isBlocked, onBlock, onUnblock, onReport }) {
+function SafetyMenu({ isBlocked, onBlock, onUnblock, onReport, onResetProfile = null }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef(null);
   const menuRef = useRef(null);
@@ -278,6 +274,12 @@ function SafetyMenu({ isBlocked, onBlock, onUnblock, onReport }) {
             className={`${item} text-d-danger hover:bg-d-danger hover:text-white focus:bg-d-danger focus:text-white`}>
             <Flag className="h-4 w-4" /> {t('safety.reportUser')}
           </button>
+          {onResetProfile && (
+            <button type="button" role="menuitem" onClick={pick(onResetProfile)}
+              className={`${item} text-d-text hover:bg-d-hover focus:bg-d-hover`}>
+              <Eraser className="h-4 w-4" /> {t('profiles.resetMenu')}
+            </button>
+          )}
         </div>
       )}
     </div>

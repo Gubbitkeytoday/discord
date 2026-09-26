@@ -76,6 +76,7 @@ import { isLivekitEnabled } from './services/livekit.js'; // livekit (health)
 import passkeysRouter from './routes/passkeys.js'; // passkeys
 import translationRouter from './routes/translation.js'; // translation
 import createServerAppearanceRouter from './routes/serverAppearance.js'; // servers (round 4)
+import createProfilesRouter from './routes/profiles.js'; // profiles
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
   revalidateRooms, emitToChannelViewers, emitToRelated,
@@ -221,6 +222,7 @@ app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
 app.use('/api', passkeysRouter); // passkeys
 app.use('/api', translationRouter); // translation
 app.use('/api', createServerAppearanceRouter({ io })); // servers (round 4): appearance, profile, discovery
+app.use('/api', createProfilesRouter({ io })); // profiles: cosmetics, tags, badges, status expiry
 app.use(mediaRouter); // media pipeline: /api/media/*, S3 fallback for /uploads/*
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)

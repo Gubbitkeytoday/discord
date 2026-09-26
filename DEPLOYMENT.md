@@ -1737,6 +1737,13 @@ an example, not a default).
 | `ADMIN_EMAILS` |  | Comma-separated e-mails that are instance admins once verified (the first account on a fresh instance is admin automatically). |
 | `REQUIRE_BIRTHDATE` | `0` | Require a date of birth at sign-up (year + month only are stored; under-13 is refused, under-18 gets teen-safe defaults). |
 
+**profiles & cosmetics**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `PROFILE_EARLY_MEMBERS` | `100` | The first N accounts on the instance get the "early member" badge. |
+| `STATUS_SWEEP_MS` | `30000` | How often expired custom statuses are cleared, in ms (minimum 5000). |
+
 **passkeys (WebAuthn)**
 
 | Variable | Example / default | Notes |
