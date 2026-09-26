@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X, Camera, Loader2, ArrowLeft, LayoutTemplate, Hash, Volume2, MessagesSquare } from 'lucide-react';
 import { upload, get } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 /**
@@ -18,7 +18,7 @@ export default function CreateServerModal({ onClose, onCreateServer, onJoinWithI
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const fileRef = useRef(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const pickIcon = async (event) => {
     const file = event.target.files?.[0];

@@ -12,7 +12,8 @@ import {
   Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check
 } from 'lucide-react';
 import { api, get } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import ConfirmModal from './ConfirmModal';
+import { useDialog } from './settings/primitives';
 import { t, localeTag } from '../i18n/index.jsx';
 
 const fmtDate = (iso) => new Date(iso).toLocaleString(localeTag(), {
@@ -36,7 +37,8 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
   const [events, setEvents] = useState(null);
   const [showPast, setShowPast] = useState(false);
   const [editing, setEditing] = useState(null);   // null | 'new' | event
-  const dialogRef = useFocusTrap(true, onClose);
+  const [confirmCancel, setConfirmCancel] = useState(null);
+  const dialogRef = useDialog(onClose);
 
   const load = () => {
     if (!server?.id) return;
@@ -87,13 +89,10 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
     }
   };
 
+  // Throws on failure so the confirm dialog stays open and shows the error.
   const cancel = async (event) => {
-    try {
-      const fresh = await api(`/api/events/${event.id}`, { method: 'DELETE' });
-      setEvents((current) => current.map((e) => (e.id === event.id ? fresh : e)));
-    } catch (err) {
-      onToast?.(err.message, { type: 'error' });
-    }
+    const fresh = await api(`/api/events/${event.id}`, { method: 'DELETE' });
+    setEvents((current) => current.map((e) => (e.id === event.id ? fresh : e)));
   };
 
   const sorted = useMemo(() => {
@@ -166,7 +165,7 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
               canManage={canManage}
               onInterest={() => toggleInterest(event)}
               onEdit={() => setEditing(event)}
-              onCancel={() => cancel(event)}
+              onCancel={() => setConfirmCancel(event)}
               onJoin={event.channel_id && onJoinVoice ? () => onJoinVoice(event.channel_id) : null}
             />
           ))}
@@ -179,24 +178,41 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
             {t('events.showPast')}
           </label>
         </footer>
-      </div>
 
-      {editing && (
-        <EventForm
-          server={server}
-          event={editing === 'new' ? null : editing}
-          voiceChannels={voiceChannels}
-          onClose={() => setEditing(null)}
-          onSaved={(saved) => {
-            setEvents((current) => {
-              const exists = current?.some((e) => e.id === saved.id);
-              return exists ? current.map((e) => (e.id === saved.id ? saved : e)) : [...(current ?? []), saved];
-            });
-            setEditing(null);
-          }}
-          onToast={onToast}
-        />
-      )}
+        {/* Rendered inside the panel's dialog element on purpose: a second
+            focus trap outside it made the two fight over focus (each pulling
+            it back on every focusin) until the stack overflowed, so the form
+            could never be typed into. */}
+        {editing && (
+          <EventForm
+            server={server}
+            event={editing === 'new' ? null : editing}
+            voiceChannels={voiceChannels}
+            onClose={() => setEditing(null)}
+            onSaved={(saved) => {
+              setEvents((current) => {
+                const exists = current?.some((e) => e.id === saved.id);
+                return exists ? current.map((e) => (e.id === saved.id ? saved : e)) : [...(current ?? []), saved];
+              });
+              setEditing(null);
+            }}
+            onToast={onToast}
+          />
+        )}
+
+        {confirmCancel && (
+          <ConfirmModal
+            title={confirmCancel.status === 'active'
+              ? t('events.endTitle', { name: confirmCancel.name })
+              : t('events.cancelTitle', { name: confirmCancel.name })}
+            body={confirmCancel.status === 'active' ? t('events.endBody') : t('events.cancelBody')}
+            confirmLabel={confirmCancel.status === 'active' ? t('events.end') : t('events.cancel')}
+            cancelLabel={t('common.back')}
+            onConfirm={() => cancel(confirmCancel)}
+            onClose={() => setConfirmCancel(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -322,7 +338,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
     ends_at: toLocalInput(event?.ends_at)
   });
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
   const set = (patch) => setForm((c) => ({ ...c, ...patch }));
 
   const valid = form.name.trim() && form.starts_at

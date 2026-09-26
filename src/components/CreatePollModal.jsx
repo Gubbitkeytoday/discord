@@ -15,7 +15,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { X, Plus, Trash2, Loader2, BarChart3 } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 const LIMITS = { question: 300, answer: 55, maxAnswers: 10, minAnswers: 2 };
@@ -37,7 +37,7 @@ export default function CreatePollModal({ onClose, onCreate, onToast }) {
   const [durationHours, setDurationHours] = useState(24);
   const [allowMultiple, setAllowMultiple] = useState(false);
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
   const answerRefs = useRef([]);
 
   const filled = answers.map((a) => a.trim()).filter(Boolean);

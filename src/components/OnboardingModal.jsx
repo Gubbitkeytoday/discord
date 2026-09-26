@@ -8,7 +8,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Hash, Volume2, MessagesSquare, Megaphone, Check, Loader2, ShieldCheck, ArrowRight, ArrowLeft } from 'lucide-react';
 import { get, put } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 const ICONS = { text: Hash, voice: Volume2, forum: MessagesSquare, announcement: Megaphone, stage: Volume2 };
@@ -22,7 +22,7 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
   const [error, setError] = useState(null);
 
   const mustStay = Boolean(bundle?.me?.pending);
-  const dialogRef = useFocusTrap(true, mustStay ? () => {} : onClose);
+  const dialogRef = useDialog(mustStay ? () => {} : onClose);
 
   useEffect(() => {
     if (!server?.id) return;

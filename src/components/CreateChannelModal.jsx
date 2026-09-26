@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, Hash, Volume2, Megaphone, Lock, MessagesSquare, Image as ImageIcon, Radio } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 const channelTypes = () => [
@@ -18,7 +18,7 @@ export default function CreateChannelModal({ defaultType = 'text', categories = 
   const [isPrivate, setIsPrivate] = useState(false);
   const [category, setCategory] = useState(categories[0] ?? '');
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

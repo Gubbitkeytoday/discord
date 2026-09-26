@@ -7,7 +7,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Megaphone, Loader2, Hash, Check } from 'lucide-react';
 import { get, post } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { t } from '../i18n/index.jsx';
 
 export default function FollowChannelModal({ source, servers = [], onClose, onFollowed, onToast }) {
@@ -16,7 +16,7 @@ export default function FollowChannelModal({ source, servers = [], onClose, onFo
   const [channelId, setChannelId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   useEffect(() => {
     if (!serverId) return;

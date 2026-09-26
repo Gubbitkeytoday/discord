@@ -3,7 +3,7 @@ import { api } from '../api';
 import {
   X, MessageSquare, UserPlus, UserMinus, ShieldAlert, ShieldOff, Pencil, Check
 } from 'lucide-react';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { localeTag, t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR } from '../utils/avatar';
 
@@ -18,7 +18,7 @@ export default function UserProfileModal({
   user, currentUser, member, roles = [], friend, isBlocked, serverId = null,
   onClose, onSendDM, onAddFriend, onAcceptFriend, onRemoveFriend, onBlock, onUnblock, onEditProfile, onToast
 }) {
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
   if (!user) return null;
 
   const isSelf = user.id === currentUser?.id;
