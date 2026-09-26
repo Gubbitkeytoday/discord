@@ -149,6 +149,15 @@ export default function VoiceSettings({ onToast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.videoDeviceId, settings.videoResolution, settings.videoFrameRate]);
 
+  // Likewise the mic test: picking another microphone should test that one,
+  // not keep metering the device that was open when the test started.
+  useEffect(() => {
+    if (!testing) return;
+    stopTest();
+    startTest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.inputDeviceId, settings.echoCancellation, settings.noiseSuppression, settings.autoGainControl]);
+
   // The blur preview mirrors exactly what peers would receive.
   useEffect(() => {
     if (!cameraOn || !settings.blurCamera) return undefined;
