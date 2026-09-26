@@ -45,11 +45,11 @@ docker compose run --rm app node scripts/backup.mjs restore /backups/<file> --fo
 `backup.mjs create --files` mirrors `/data/uploads` into `/backups/uploads`
 (incrementally — objects are content-addressed and never rewritten). Copy the
 missing objects back without overwriting anything, with the image user's
-ownership (uid 65532):
+ownership (uid 1000):
 
 ```bash
 docker run --rm -v <project>_app-backups:/backups -v <project>_app-data:/data busybox \
-  sh -c 'mkdir -p /data/uploads && cp -a -n /backups/uploads/. /data/uploads/ && chown -R 65532:65532 /data/uploads'
+  sh -c 'mkdir -p /data/uploads && cp -a -n /backups/uploads/. /data/uploads/ && chown -R 1000:1000 /data/uploads'
 ```
 
 With object storage (S3/R2) the files were never on the host: restore the

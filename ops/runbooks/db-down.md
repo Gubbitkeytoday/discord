@@ -49,7 +49,7 @@ itself is down (crash loop) — check `docker compose ps app` and
    copy of `discord.db*` (including `-wal` and `-shm`), then
    [restore-from-backup.md](restore-from-backup.md). Run
    `sqlite3 discord.db 'pragma integrity_check'` on the *copy* for the report.
-4. `SQLITE_CANTOPEN` → the volume is not mounted or not writable by uid 65532
+4. `SQLITE_CANTOPEN` → the volume is not mounted or not writable by uid 1000
    (the image user): `docker compose exec app ls -ln /data`.
 
 ## After recovery

@@ -8,7 +8,9 @@
 #            prunes to production dependencies. Has a compiler, used only if a
 #            native module (sqlite3, sharp) has no prebuilt binary that loads.
 #   runtime  gcr.io/distroless/nodejs24-debian13:nonroot — Node 24 LTS and
-#            glibc/libstdc++ only: no shell, no package manager, uid 65532.
+#            glibc/libstdc++ only: no shell, no package manager, runs as uid
+#            1000 — the same uid as the previous image's `node` user, so
+#            existing volumes stay writable across the upgrade.
 #
 #  Native modules are compiled/verified in the build stage and copied over;
 #  both stages share the Debian release, so the libc ABI matches. sqlite3 6.x
@@ -107,11 +109,12 @@ COPY --from=build /app/services ./services
 COPY --from=build /app/scripts ./scripts
 
 # Named volumes inherit this ownership on first mount, so the unprivileged
-# user can write to them.
-COPY --from=build --chown=65532:65532 /rootfs/data /data
-COPY --from=build --chown=65532:65532 /rootfs/backups /backups
+# user can write to them. uid 1000 (not distroless' 65532) keeps volumes
+# created by earlier images, which ran as node = 1000, writable.
+COPY --from=build --chown=1000:1000 /rootfs/data /data
+COPY --from=build --chown=1000:1000 /rootfs/backups /backups
 
-USER 65532:65532
+USER 1000:1000
 VOLUME ["/data", "/backups"]
 EXPOSE 3001
 
