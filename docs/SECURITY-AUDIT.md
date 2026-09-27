@@ -144,7 +144,8 @@ themselves (IP, User-Agent, timing). Discord solves this with an image proxy for
 exactly this reason.
 
 **Fix.** Route remote images through a same-origin caching proxy (reuse the
-guarded fetch in `services/linkEmbeds.js` — `assertPublicUrl` + `guardedLookup`)
+guarded fetch in `services/linkEmbeds.js` — `assertPublicUrl` + a request
+pinned to the vetted address)
 and rewrite `embed.image`, `avatar_url` etc. to the proxied URL before they
 reach the client; then tighten CSP `img-src` to `'self' data: blob:`. If a full
 proxy is out of scope, document the deanonymisation risk prominently.
@@ -197,9 +198,10 @@ and step-up re-auth for e-mail change and MFA disable.
 ## Checked and found solid (no action)
 
 - **SSRF / link unfurl** — `services/linkEmbeds.js`: per-hop `assertPublicUrl`,
-  private-range denylist incl. IPv4-mapped IPv6 and cloud metadata, and
-  `guardedLookup` that re-checks the resolved address at connect time (closes
-  DNS rebinding). Redirects are followed by hand and re-validated.
+  private-range denylist incl. IPv4-mapped IPv6 and cloud metadata, and the
+  request is pinned to the vetted IP (`pinnedRequestOptions`; Host/SNI keep
+  the name), so there is no second DNS answer to rebind. Redirects are
+  followed by hand and re-validated.
 - **Upload safety** — magic-byte sniffing (`lib/mediaProbe.js`), category MIME
   allowlists, `X-Content-Type-Options: nosniff` + `Content-Security-Policy:
   default-src 'none'; sandbox` on both the static mount and `/api/files`
@@ -227,7 +229,8 @@ and step-up re-auth for e-mail change and MFA disable.
 ## CodeQL triage
 
 Local run of the CodeQL bundle (`javascript-security-extended.qls`, build-mode
-none, same `paths-ignore` as `.github/workflows/codeql.yml`). Fixed in code:
+none, same `paths-ignore` as `.github/workflows/codeql.yml`). Fixed in code
+(earlier rounds first, then the hardening round):
 
 | Rule | Location | Fix |
 |------|----------|-----|
@@ -246,49 +249,44 @@ none, same `paths-ignore` as `.github/workflows/codeql.yml`). Fixed in code:
 | `js/missing-origin-check` | `public/sw.js` message handler | Messages whose `event.origin` is not the worker's own origin are ignored. |
 | `js/file-system-race` | `vite.config.js` SW build step | `readFileSync` in try/catch (ENOENT = skip) replaces `existsSync` + read. |
 | (config) | `.github/workflows/codeql.yml` | `scripts/ux/**` (persona/UX harnesses) added to `paths-ignore`. |
+| `js/insufficient-password-hash` | `lib/totp.js` `hashRecoveryCode` | Recovery codes are stored as `rc2$` + scrypt (N=2^14, r=8) keyed with `MFA_RECOVERY_PEPPER` as a fixed salt, so the value is still the lookup key of the atomic burn-once `UPDATE`. Codes are 10 Crockford base32 characters (50 bits, was 40). Rows written by older releases (bare SHA-256) are wrapped in place to `rc1w$` + scrypt(digest) the next time their owner meets an MFA check or opens the status, with no plaintext needed; those codes keep working once. Input that cannot be a recovery code (a mistyped TOTP code) costs no scrypt (tests in `test-part3.mjs`). |
+| `js/regex-injection` | `services/automod.js` `safeRegex` | Regex rules run on RE2JS (`re2js`, MIT, no dependencies, maintained): linear-time matching, the RE2 semantics Discord's AutoMod uses. No pattern can backtrack, so ReDoS is gone rather than guessed at; lookaround and backreferences are refused on save. Compiled patterns are cached (tests in `test-part2.mjs`: a `(\w+\s?)+$` rule that slips past the old nested-quantifier heuristic and hangs V8 now evaluates a 1,500-character message at once). |
+| `js/cors-permissive-configuration` | `server.js` CORS | Explicit allow-list (`CORS_ORIGIN=a,b`): an origin callback accepts only exact matches and echoes that origin with credentials. The development wildcard is `{ origin: '*', credentials: false }`: browsers never sent cookies to `*` anyway, now no response pairs them. Unset (production default) is still same-origin only; Socket.IO uses the same options (tests in `test-hardening-57.mjs`). |
+| `js/request-forgery` | `services/linkEmbeds.js` `safeGet` (link previews, media proxy) | Each hop is resolved once by `assertPublicUrl` (every address must be public) and the request is then pinned to that vetted IP (`pinnedRequestOptions`: the name stays in `Host` and, for https, in SNI and the certificate check). Nothing is resolved again at connect time, so the DNS-rebinding window is closed outright instead of re-checked; redirects go through the same path (tests in `test-hardening-57.mjs`). |
+| `js/log-injection` | `lib/mailer.js` console transport | Recipient and subject are logged `JSON.stringify`-quoted (every control character escaped) and each body line has C0/C1 control characters stripped. |
+| `js/file-access-to-http`, `js/http-to-file-access` (S3 path) | `services/mediaPipeline.js` `ingestDirectUpload` | A browser direct upload only ever lives in the bucket, so ingest reads it with `s3.getObject` and writes the processed object with `s3.putObject`. The generic `readObject`/`writeObject` could route bucket bytes to local disk and local bytes to the bucket; that mixing is gone. |
+| `js/type-confusion-through-parameter-tampering` ×3 | `services/observability.js` `parseEnvelope` | The Sentry tunnel parses a Buffer it built itself (`Buffer.from` of a string, or a view of the raw-parser Buffer); anything else is refused before any `.length`/`indexOf` (test in `test-observability.mjs`). |
 
-The remaining alerts are false positives; dismiss them in the GitHub UI with
-the reason given.
+Local CodeQL CLI 2.27.1 (query pack `codeql/javascript-queries` 2.4.6), same
+suite and `paths-ignore` as the workflow: **11 alerts before** (4 critical:
+`js/request-forgery` linkEmbeds and `js/type-confusion-through-parameter-tampering`
+×3 in observability; 2 high: `js/insufficient-password-hash`,
+`js/regex-injection`; 5 medium: `js/cors-permissive-configuration`,
+`js/http-to-file-access` ×2, `js/log-injection`, `js/file-access-to-http`),
+**2 after**. Both remaining are the feature itself; dismiss them in the
+GitHub UI as below. Do not work around them by excluding paths or queries.
 
-- **`js/request-forgery` — `services/linkEmbeds.js` `safeGet`** (critical).
-  Won't fix / false positive. Fetching a user-supplied URL is the feature (link
-  previews). Every hop, including each redirect, goes through
-  `assertPublicUrl` (http(s) only, every resolved address checked against
-  private, loopback, link-local/metadata, CGNAT, multicast and IPv4-mapped
-  ranges), and the socket connects through `guardedLookup`, which re-checks
-  the address actually dialled (DNS rebinding). CodeQL does not model either
-  function as a sanitizer. Do not weaken them to silence this.
-- **`js/insufficient-password-hash` — `lib/totp.js` `hashRecoveryCode`.**
-  False positive: the input is a server-generated random recovery code, not a
-  user-chosen password, so a salted slow hash is not required (same as the
-  SHA-256 session/reset tokens). The digest is also the lookup key for an
-  atomic "burn once" `UPDATE`, which a salted hash would prevent. A recovery
-  code is only a second factor; the password (scrypt) is still needed. Optional
-  future hardening: more code entropy than the current 40 bits.
-- **`js/regex-injection` — `services/automod.js` `safeRegex`.** By design:
-  `regex` automod rules are server-admin-authored patterns (MANAGE_GUILD). They
-  are length-capped (200), rejected when they contain lookbehind or nested
-  quantifiers, compiled with the `u` flag, and invalid patterns are refused.
-- **`js/cors-permissive-configuration` — `server.js` CORS setup.** False
-  positive: the origin comes from the operator's `CORS_ORIGIN`. Production
-  defaults to same-origin, and `lib/config.js` warns about `CORS_ORIGIN=*` in
-  production. With `*`, browsers refuse credentialed responses.
-- **`js/http-to-file-access` — `storageService.js` `writeLocalObject`** (the
-  purpose of an upload). The object key is the SHA-256 of the content (content-addressed), and the bytes are
-  magic-byte sniffed first. **`lib/mailer.js` file transport**: the operator
-  opts in with `MAIL_TRANSPORT=file` for CI, the path comes from `MAIL_FILE`,
-  and the line is `JSON.stringify`-encoded.
-- **`js/log-injection` — `lib/mailer.js` console transport.** False positive:
-  `sendMail` now refuses any recipient containing a control character before
-  logging, and registration already rejects whitespace in addresses. CodeQL
-  does not model a reject-guard as a sanitizer.
-- **`js/file-access-to-http` — `lib/s3Client.js` `request`.** False
-  positive: sending stored upload bytes to the operator's configured S3/R2
-  bucket (SigV4-signed, endpoint from `S3_ENDPOINT`) is the storage backend's
-  purpose. No user input chooses the destination.
+**How to dismiss** (repository Security tab → Code scanning → filter
+`is:open rule:<rule>` → open the alert → **Dismiss alert** → pick the reason →
+paste the comment → **Dismiss alert**). Needs the "Dismiss code scanning
+alerts" permission (write or security manager).
 
-After these changes the local run reports eight alerts, all listed above as
-false positives: `js/request-forgery` (linkEmbeds), `js/insufficient-password-hash`
-(totp), `js/regex-injection` (automod), `js/cors-permissive-configuration`
-(server.js), `js/http-to-file-access` ×2 (storageService, mailer),
-`js/log-injection` (mailer) and `js/file-access-to-http` (s3Client).
+- **`js/http-to-file-access` — `storageService.js` `writeLocalObject`
+  (`fsp.writeFile(tmp, buffer)`).** Reason: **Won't fix**. Comment:
+  "Storing an uploaded file on the local disk backend is the purpose of an
+  upload. The path is not user-controlled: the key is the SHA-256 of the
+  content under STORAGE_ROOT (absolutePath refuses anything that escapes it),
+  the bytes are size-limited and magic-byte sniffed first, and the file is
+  written to a random temp name then renamed. Files are served with nosniff
+  and a sandboxing CSP."
+- **`js/http-to-file-access` — `lib/mailer.js` `sendMail` file transport
+  (`fs.appendFile(target, …)`).** Reason: **Used in tests**. Comment: "The
+  file transport exists for CI/e2e only; the operator opts in with
+  MAIL_TRANSPORT=file and chooses the path with MAIL_FILE. The recipient is
+  refused if it contains any control character, and each message is one
+  JSON.stringify-encoded line, so a request cannot choose the file or add
+  lines to it."
+
+If an alert that the table above lists as fixed is still open after the next
+CodeQL run on the default branch, it is closed automatically once the fix is
+merged there (alerts are tracked per branch); nothing needs dismissing.

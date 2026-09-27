@@ -453,7 +453,7 @@ Sources: [AutoMod FAQ](https://support.discord.com/hc/en-us/articles/44212692965
 | Feature | Discord behaviour | Status | Our files | Gap / next step |
 |---|---|---|---|---|
 | Custom keyword rule (≤6 rules, 1000 keywords, wildcards `*`) | Keyword filter | 🟡 | `services/automod.js` `matches` (`keyword`) | Plain substring. No `*word*` wildcard semantics and no per-guild rule limits |
-| Regex patterns (≤10 per rule, Rust regex) | In keyword rules | ✅ | `automod.js` `safeRegex` | One pattern per rule; Discord allows 10 |
+| Regex patterns (≤10 per rule, Rust regex) | In keyword rules | ✅ | `automod.js` `safeRegex` (RE2JS: linear time, RE2 syntax like Discord) | One pattern per rule; Discord allows 10 |
 | Allow list (exempt words) | Per rule | ❌ | `trigger_metadata` | Add `allow_list` |
 | Keyword presets: profanity, sexual content, slurs | Commonly Flagged Words | ❌ | — | Ship curated TH+EN lists in `db/automod-presets/` |
 | Spam content detection | ML spam | 🟡 | `automod.js` `spam` (rate + duplicate heuristic) | Heuristic, not ML; fine |
