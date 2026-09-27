@@ -1744,6 +1744,28 @@ an example, not a default).
 | `PROFILE_EARLY_MEMBERS` | `100` | The first N accounts on the instance get the "early member" badge. |
 | `STATUS_SWEEP_MS` | `30000` | How often expired custom statuses are cleared, in ms (minimum 5000). |
 
+**payments (donations + Supporter badge; optional)**
+
+| Variable | Example / default | Notes |
+| --- | --- | --- |
+| `PROMPTPAY_ID` | `0812345678` | Nothing in the app is paywalled. Payments only support the instance, and the one perk is a cosmetic "Supporter" badge. Everything below is off unless PROMPTPAY_ID is set (or both Stripe keys are); the UI then hides the feature. See docs/PAYMENTS.md for setup, fees, tax and refund-policy notes. Your PromptPay id: a Thai mobile number (0812345678), a 13-digit national / tax id, or a 15-digit e-wallet id. Dynamic QR codes (with the amount) are generated for it; PromptPay transfers cost 0 %. |
+| `PROMPTPAY_NAME` | `Somchai J.` | The receiver name payers should see in their banking app before confirming. |
+| `PROMPTPAY_ACCOUNT` | `1234567890` | Bank account number(s) the PromptPay id pays into, comma-separated. Many slips show the receiving account instead of the PromptPay id; the masked comparison accepts either. |
+| `SLIP_VERIFY_PROVIDER` | `manual` | How a slip is checked: manual (an instance admin approves it in the admin console) \| slipok \| easyslip. A provider without its keys falls back to manual, as does a provider that is down or out of quota. |
+| `SLIPOK_API_KEY` |  | SlipOK (slipok.com): API key and branch id from the SlipOK LINE dashboard. |
+| `SLIPOK_BRANCH_ID` |  | ↑ same group as above |
+| `EASYSLIP_API_KEY` |  | EasySlip (easyslip.com): API access token. |
+| `NODE_ENV` | `production).` | Point the slip provider at a local mock (tests / staging only; ignored when |
+| `PAYMENTS_PROVIDER_BASE_URL` |  | ↑ same group as above |
+| `STRIPE_SECRET_KEY` |  | Stripe (optional; card + PromptPay via Checkout). Both keys are required. The webhook endpoint is https://<PUBLIC_URL>/api/payments/stripe/webhook — subscribe it to checkout.session.completed, checkout.session.async_payment_* checkout.session.expired and charge.refunded. |
+| `STRIPE_WEBHOOK_SECRET` |  | ↑ same group as above |
+| `PAYMENTS_MIN_THB` | `20` | Amount limits in whole baht, and the preset buttons. |
+| `PAYMENTS_MAX_THB` | `50000` | ↑ same group as above |
+| `PAYMENTS_PRESETS_THB` | `50,100,300,500` | ↑ same group as above |
+| `PAYMENTS_ORDER_TTL_MIN` | `30` | Minutes an unpaid PromptPay order stays open before it expires. |
+| `PAYMENTS_SLIP_MAX_BYTES` | `5242880` | Largest slip image accepted, in bytes (JPEG, PNG or WebP). |
+| `PAYMENTS_SWEEP_MS` | `60000` | How often expired orders are swept, in ms (minimum 1000). |
+
 **passkeys (WebAuthn)**
 
 | Variable | Example / default | Notes |

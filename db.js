@@ -24,6 +24,7 @@ import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // adm
 import { INTEGRATION_MIGRATIONS } from './db/migrations/integration.js'; // integration (v43)
 import { PROFILES_MIGRATIONS } from './db/migrations/profiles.js'; // profiles (v44–v45)
 import { SERVERS_MIGRATIONS } from './db/migrations/servers.js'; // servers (v46–v47)
+import { PAYMENTS_MIGRATIONS } from './db/migrations/payments.js'; // payments (v48)
 import { getLogger } from './lib/logger.js';
 import { traceDb } from './lib/telemetry.js';
 
@@ -708,6 +709,14 @@ const MIGRATIONS = [
   }))
   // servers (v46–v47): role styles/icons, channel emoji, server profile, discovery.
   ,...SERVERS_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // payments (v48): donation orders, webhook idempotency, supporter badge.
+  // See db/migrations/payments.js.
+  ,...PAYMENTS_MIGRATIONS.map((m) => ({
     version: m.version,
     name: m.name,
     up: () => m.up({ runQuery, allQuery }),

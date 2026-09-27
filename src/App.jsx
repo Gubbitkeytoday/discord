@@ -167,7 +167,7 @@ function rememberRecent(entry) {
 
 // Bumped with every db.js migration. The client compares it to the running
 // server's own number (GET /api/health) so a stale backend is loud, not silent.
-const EXPECTED_SCHEMA_VERSION = 47;
+const EXPECTED_SCHEMA_VERSION = 48;
 
 /** Parse a Discord-style path: /channels/@me/:dm, /channels/:server/:channel, /invite/:code */
 function parseLocation() {
