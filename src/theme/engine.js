@@ -10,7 +10,8 @@
 //  load so the first frame already has the right look.
 // ============================================================================
 
-import { buildGradientTheme } from './gradient.js';
+import { buildGradientTheme, layerBackgrounds, LAYERS } from './gradient.js';
+import { toHex } from './color.js';
 import { findPreset } from './presets.js';
 import { safeCustomThemes, isGradientChoice } from './schema.js';
 import { THEME_FRAME } from './palettes.js';
@@ -56,6 +57,35 @@ export function gradientFor(theme) {
     gradientCache.set(key, buildGradientTheme(theme));
   }
   return gradientCache.get(key);
+}
+
+// --- what text sits on (for role colours) ----------------------------------------
+
+let activeGradient = null;   // { theme, key } while a gradient theme is painted
+const backgroundCache = new Map();
+
+/**
+ * Every colour text can sit on for one layer of the active gradient theme —
+ * sampled along the whole gradient line, plus the hover/selected overlays —
+ * or null when no gradient is painted. This is the set the contrast guard
+ * checks the text tokens against; role colours are checked against it too,
+ * so a name is readable at the gradient's worst point, not just its average.
+ * The array is cached and carries a `key` for callers' own caches.
+ */
+export function gradientTextBackgrounds(layer = 'chat') {
+  if (!activeGradient) return null;
+  const name = Object.prototype.hasOwnProperty.call(LAYERS, layer) ? layer : 'chat';
+  const cacheKey = `${activeGradient.key}|${name}`;
+  if (!backgroundCache.has(cacheKey)) {
+    if (backgroundCache.size > 40) backgroundCache.clear();
+    const { amount } = gradientFor(activeGradient.theme);
+    const seen = new Set();
+    for (const { rgb } of layerBackgrounds(activeGradient.theme, amount, name, 24)) seen.add(toHex(rgb));
+    const list = [...seen];
+    list.key = cacheKey;
+    backgroundCache.set(cacheKey, list);
+  }
+  return backgroundCache.get(cacheKey);
 }
 
 // --- fonts --------------------------------------------------------------------
@@ -113,6 +143,7 @@ export function applyThemeLayer(root, prefs, baseTheme) {
   const gradient = a11y.highContrast ? null : selectedGradient(appearance);
   if (gradient) {
     const built = gradientFor(gradient);
+    activeGradient = { theme: gradient, key: `${gradient.base}|${gradient.angle}|${gradient.intensity}|${gradient.stops.join(',')}` };
     theme = built.base;
     for (const [name, value] of Object.entries(built.vars)) root.style.setProperty(name, value);
     for (const name of lastTintVars) if (!(name in built.vars)) root.style.removeProperty(name);
@@ -120,6 +151,7 @@ export function applyThemeLayer(root, prefs, baseTheme) {
     setData(root, 'tint', 'gradient');
     accent = { stops: gradient.stops, angle: gradient.angle };
   } else {
+    activeGradient = null;
     for (const name of lastTintVars) root.style.removeProperty(name);
     lastTintVars = [];
     setData(root, 'tint', null);

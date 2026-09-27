@@ -15,9 +15,21 @@
 .pf-nameplate {
   position: relative;
   isolation: isolate;
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: right center;
+}
+/* The art, masked: invisible under the avatar and the start of the name
+   (0–22%), a faint 18% by the middle, full strength from 88%. The row's own
+   background (surface, gradient theme, hover/selected wash) is what text sits
+   on, so the theme's contrast guarantees hold. */
+.pf-nameplate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--pf-nameplate-art) right center / cover no-repeat;
+  -webkit-mask-image: linear-gradient(90deg, transparent 22%, rgb(0 0 0 / 0.18) 50%, #000 88%);
+  mask-image: linear-gradient(90deg, transparent 22%, rgb(0 0 0 / 0.18) 50%, #000 88%);
 }
 .pf-nameplate::after {
   content: '';
@@ -78,5 +90,6 @@
 }
 @media (forced-colors: active) {
   .pf-nameplate, .pf-frame { background-image: none !important; border-image: none !important; }
+  .pf-nameplate::before { display: none; }
   .pf-gradient-name { color: CanvasText !important; background: none !important; }
 }

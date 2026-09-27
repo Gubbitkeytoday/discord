@@ -14,6 +14,13 @@
   -webkit-text-fill-color: transparent;
 }
 
+/* Emoji in a gradient name sit outside the clipped runs (RoleName,
+   DisplayName) and keep their own colours. */
+.role-name-emoji {
+  -webkit-text-fill-color: currentColor;
+  background: none;
+}
+
 .role-name-holo {
   background-size: 250% 100%;
   animation: role-holo-shift 6s ease-in-out infinite alternate;

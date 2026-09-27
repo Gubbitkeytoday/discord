@@ -245,7 +245,6 @@ export default function HomeDirectMessages({
                   as="button"
                   type="button"
                   item={identity?.nameplate}
-                  scrim={isActive ? 'var(--color-d-active)' : 'var(--color-d-surface)'}
                   onMouseEnter={() => setHoveredDm(dm.id)}
                   onMouseLeave={() => setHoveredDm((cur) => (cur === dm.id ? null : cur))}
                   onClick={() => onSelectDm?.(dm.id)}

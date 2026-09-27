@@ -180,6 +180,51 @@ test('every surface class the gradient paints has a layer, and high contrast / f
   assert.match(css, /@media \(forced-colors: active\) \{\s*:root\[data-tint="gradient"\] \* \{ background-image: none !important; \}/);
 });
 
+test('hover / selected rows on a gradient are translucent washes — exactly the overlays the guard checks', () => {
+  const start = css.indexOf(':root[data-tint="gradient"] {');
+  const body = css.slice(start, css.indexOf('\n}', start));
+  for (const [state, token] of [['rowhover', 'rowhover'], ['hover', 'hover'], ['selected', 'selected']]) {
+    const m = new RegExp(`--color-bg-${token}: color-mix\\(in srgb, var\\(--tint-overlay\\) (\\d+)%, transparent\\);`).exec(body);
+    assert.ok(m, `--color-bg-${token} is a translucent wash`);
+    assert.equal(Number(m[1]) / 100, OVERLAY_ALPHA[state], `${token} wash = OVERLAY_ALPHA.${state}`);
+  }
+  // Nameplate rows do not paint a flat scrim over the gradient: the art is a
+  // masked pseudo-element and the row's own background shows through.
+  const profileCss = fs.readFileSync(path.join(ROOT, 'src/profile/profile.css'), 'utf8');
+  assert.match(profileCss, /\.pf-nameplate::before \{[^}]*mask-image: linear-gradient\(90deg, transparent 22%/);
+  const nameplate = fs.readFileSync(path.join(ROOT, 'src/components/profile/Nameplate.jsx'), 'utf8');
+  assert.doesNotMatch(nameplate, /scrim/, 'no flat row-colour scrim');
+});
+
+test('role colours on gradient themes are readable at the worst point of every preset, not just the average', async () => {
+  const { readableColorOnAll, readableColor, contrastRatio } = await import('../src/utils/color.js');
+  const { layerBackgrounds } = await import('../src/theme/gradient.js');
+  const { toHex } = await import('../src/theme/color.js');
+  // Discord's 20 role colour presets plus the seed's gradient stops.
+  const ROLE_COLOURS = ['#1abc9c', '#2ecc71', '#3498db', '#9b59b6', '#e91e63', '#f1c40f', '#e67e22', '#e74c3c',
+    '#95a5a6', '#607d8b', '#11806a', '#1f8b4c', '#206694', '#71368a', '#ad1457', '#c27c0e', '#a84300', '#992d22',
+    '#979c9f', '#546e7a', '#f04747', '#faa61a', '#43b581', '#5865f2'];
+  let averageOnlyMisses = 0;
+  const failures = [];
+  for (const theme of GRADIENT_PRESETS) {
+    const built = buildGradientTheme(theme);
+    for (const layer of ['chat', 'sidebar', 'floating']) {
+      const backgrounds = [...new Set(layerBackgrounds(theme, built.amount, layer, 96).map((b) => toHex(b.rgb)))];
+      const flat = built.vars[`--tint-bg-${layer}`];
+      for (const colour of ROLE_COLOURS) {
+        const guarded = readableColorOnAll(colour, backgrounds, 4.5, GRADIENT_TEXT[theme.base]['text-strong']);
+        const worst = Math.min(...backgrounds.map((bg) => contrastRatio(guarded, bg)));
+        if (worst < 4.5) failures.push(`${theme.id}/${layer} ${colour} → ${guarded} ${worst.toFixed(2)}`);
+        const oldWay = readableColor(colour, flat, 4.5);
+        if (Math.min(...backgrounds.map((bg) => contrastRatio(oldWay, bg))) < 4.5) averageOnlyMisses += 1;
+      }
+    }
+  }
+  assert.deepEqual(failures, []);
+  // Informational: how often checking only the average would have failed.
+  console.log(`# role colours that only the worst-point check keeps at 4.5:1: ${averageOnlyMisses}`);
+});
+
 // --- 3. seasons ----------------------------------------------------------------------
 
 test('season accents: in CSS, and white labels stay ≥ 4.5:1 (hover too)', () => {

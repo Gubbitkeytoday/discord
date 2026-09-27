@@ -3,17 +3,20 @@ import { useViewerPrefs } from '../../profile/motion';
 import '../../profile/profile.css';
 
 /**
- * A nameplate: the art strip behind a member-list / DM-list row. One
- * background image, no extra DOM per row (the list is virtualised), with a
- * scrim from the row colour on the left so the name keeps its contrast.
+ * A nameplate: the art strip behind a member-list / DM-list row. The art is
+ * a masked pseudo-element (no extra DOM per row; the list is virtualised):
+ * it is fully transparent behind the avatar and most of the name and fades
+ * in towards the right, where Discord's nameplates carry theirs. The row's
+ * own surface — including a gradient theme and the translucent hover /
+ * selected washes the contrast guard checks — shows through untouched, so
+ * role colours, tags and badges keep their contrast on every theme.
  *
  * Stable API:
  *   item       identity.nameplate (catalogue item) or null → renders children plainly
- *   scrim      CSS colour of the row behind the text (default: the sidebar surface)
  *   as         element type (default 'div'); other props are passed through
  */
 export default function Nameplate({
-  item, scrim = 'var(--color-d-panel)', as = 'div', className = '', style, children, ...rest
+  item, as = 'div', className = '', style, children, ...rest
 }) {
   const Tag = as;
   const viewer = useViewerPrefs();
@@ -24,13 +27,7 @@ export default function Nameplate({
     <Tag
       className={`pf-nameplate ${className}`}
       data-nameplate={item.slug}
-      style={{
-        ...style,
-        // The scrim holds solid behind the avatar and most of the name, so
-        // role colours, tags and badges keep their contrast; the art shows
-        // through on the right, where Discord's nameplates carry theirs.
-        backgroundImage: `linear-gradient(90deg, ${scrim} 0%, ${scrim} 22%, color-mix(in srgb, ${scrim} 82%, transparent) 50%, transparent 88%), url("${item.asset_url}")`
-      }}
+      style={{ ...style, '--pf-nameplate-art': `url("${item.asset_url}")` }}
       {...rest}
     >
       {children}

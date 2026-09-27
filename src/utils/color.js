@@ -12,6 +12,8 @@
 //  owner picked it), and `readableRoleColor()` wherever it colours text.
 // ============================================================================
 
+import { gradientTextBackgrounds } from '../theme/engine.js';
+
 const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i;
 
 /** '#abc' / 'abc' / '#aabbcc' → [r, g, b] (0-255), or null. */
@@ -178,14 +180,65 @@ export function themeBackground(token = '--color-bg-chat') {
 }
 
 /**
+ * `colour`, readable (≥ minRatio) on every one of `backgrounds`: nudged
+ * toward the worst one until none fails. Backgrounds on one gradient theme
+ * share a base (all dark or all light), so this converges in a step or two;
+ * if it ever cannot, `fallback` (a text token the guard already proved) wins.
+ */
+export function readableColorOnAll(colour, backgrounds, minRatio = 4.5, fallback = null) {
+  let current = colour;
+  for (let i = 0; i < 6; i += 1) {
+    let worst = null;
+    let worstRatio = Infinity;
+    for (const bg of backgrounds) {
+      const ratio = contrastRatio(current, bg);
+      if (ratio < worstRatio) { worstRatio = ratio; worst = bg; }
+    }
+    if (worst === null || worstRatio >= minRatio) return current;
+    current = readableColor(current, worst, minRatio);
+  }
+  return fallback ?? current;
+}
+
+// Surface token → the gradient-theme layer it is painted with (index.css).
+const TOKEN_LAYER = {
+  '--color-bg-chat': 'chat', '--color-d-canvas': 'chat',
+  '--color-bg-sidebar': 'sidebar', '--color-d-surface': 'sidebar',
+  '--color-bg-floating': 'floating', '--color-d-sunken': 'floating',
+  '--color-bg-surface': 'surface', '--color-bg-raised': 'raised',
+  '--color-bg-panel': 'panel', '--color-d-panel': 'panel',
+  '--color-bg-app': 'app', '--color-d-base': 'app'
+};
+
+/**
+ * What text on `token` sits on: on a gradient theme, every sampled point of
+ * that layer (plus hover/selected washes); otherwise the one flat colour.
+ * Arrays from the theme engine carry a `key` for caches.
+ */
+export function themeBackgrounds(token = '--color-bg-chat') {
+  if (typeof document !== 'undefined' && document.documentElement.dataset.tint === 'gradient') {
+    const list = gradientTextBackgrounds(TOKEN_LAYER[token] ?? 'chat');
+    if (list?.length) return list;
+  }
+  return themeBackground(token);
+}
+
+/**
  * A role colour made readable as text on the active theme. `background`
  * defaults to the chat canvas; pass the surface token for the member list
- * (`themeBackground('--color-d-surface')`). A role without a colour (null,
+ * (`themeBackgrounds('--color-d-surface')`). A list of backgrounds (gradient
+ * themes) is checked point by point. A role without a colour (null,
  * '#000000' — Discord's "default") returns null so callers fall back to the
  * normal text colour.
  */
-export function readableRoleColor(colour, background = themeBackground()) {
+export function readableRoleColor(colour, background = themeBackgrounds()) {
   if (!colour || /^#?0{6}$/.test(String(colour))) return null;
+  if (Array.isArray(background)) {
+    // Gradient theme: readable at the worst point, not just the average.
+    const fallback = typeof document !== 'undefined'
+      ? resolveCssColor('var(--color-text-strong)', null) : null;
+    return readableColorOnAll(colour, background, 4.5, fallback);
+  }
   return readableColor(colour, background, 4.5);
 }
 

@@ -134,7 +134,6 @@ const MemberRow = memo(function MemberRow({ member, identity, rolesById, dim, pr
       as="button"
       type="button"
       item={identity?.nameplate}
-      scrim="var(--color-d-surface)"
       data-user-id={member.id}
       onClick={(e) => press.select(member, e)}
       onContextMenu={(e) => {

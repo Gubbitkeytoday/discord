@@ -10,7 +10,7 @@
 //  forced-colours mode are handled by server.css on top of the classes here.
 // ============================================================================
 
-import { parseHex, toHex, readableRoleColor, themeBackground, contrastRatio } from '../../utils/color';
+import { parseHex, toHex, readableRoleColor, themeBackgrounds, contrastRatio } from '../../utils/color';
 
 export const ROLE_STYLES = ['solid', 'gradient', 'holographic'];
 export const DEFAULT_ROLE_COLOR = '#99aab5';
@@ -80,11 +80,13 @@ export function roleStops(role) {
 const styleCache = new WeakMap();
 
 export function roleNameStyle(role, { surface = 'chat', background } = {}) {
-  const bg = background ?? (role ? themeBackground(SURFACES[surface] ?? surface) : null);
+  // On a gradient theme this is every sampled point of the surface's layer,
+  // so each stop is readable at the gradient's worst point.
+  const bg = background ?? (role ? themeBackgrounds(SURFACES[surface] ?? surface) : null);
   if (!role || typeof role !== 'object') return computeRoleNameStyle(role, bg);
   let byKey = styleCache.get(role);
   if (!byKey) { byKey = new Map(); styleCache.set(role, byKey); }
-  const key = `${surface}|${bg}`;
+  const key = `${surface}|${Array.isArray(bg) ? (bg.key ?? bg.join(',')) : bg}`;
   if (!byKey.has(key)) byKey.set(key, computeRoleNameStyle(role, bg));
   return byKey.get(key);
 }
