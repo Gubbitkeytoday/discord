@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import SupportHeartButton from './SupportHeartButton.jsx';
 import {
   Hash, Volume2, Plus, ChevronDown, ChevronRight, Mic, MicOff, Headphones,
   Settings, PhoneOff, Megaphone, X, MessagesSquare, Bell, BellOff, Check,
@@ -884,6 +883,7 @@ export default function ChannelSidebar({
             currentUser={currentUser}
             onSetStatus={onSetStatus}
             onOpenSettings={onOpenUserSettingsModal}
+            onOpenSupport={onOpenSupport}
             onClose={() => setShowStatusMenu(false)}
           />
         )}
@@ -906,7 +906,6 @@ export default function ChannelSidebar({
           >
             <Headphones className="w-5 h-5" />
           </button>
-          <SupportHeartButton onOpen={onOpenSupport} />
           <button aria-label={t('sidebar.userSettings')}
             onClick={onOpenUserSettingsModal}
             className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"

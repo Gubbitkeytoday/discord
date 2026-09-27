@@ -1,5 +1,4 @@
 import React, { useMemo, useState } from 'react';
-import SupportHeartButton from './SupportHeartButton.jsx';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import {
@@ -364,6 +363,7 @@ export default function HomeDirectMessages({
               currentUser={currentUser}
               onSetStatus={onSetStatus}
               onOpenSettings={onOpenUserSettingsModal}
+              onOpenSupport={onOpenSupport}
               onClose={() => setShowStatusMenu(false)}
             />
           )}
@@ -385,7 +385,6 @@ export default function HomeDirectMessages({
             >
               <Headphones className="w-5 h-5" />
             </button>
-            <SupportHeartButton onOpen={onOpenSupport} />
             <button aria-label={t('sidebar.userSettings')}
               onClick={onOpenUserSettingsModal}
               className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"

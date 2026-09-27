@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useDismiss } from '../hooks/useFocusTrap';
-import { Settings, Smile, X } from 'lucide-react';
+import { Heart, Settings, Smile, X } from 'lucide-react';
+import { usePaymentsConfig } from '../payments/usePaymentsConfig.js';
 import { t } from '../i18n/index.jsx';
 import { setCustomStatus } from '../profile/api';
 // Loaded with the app shell, so profile popouts can anchor to whatever opened them.
@@ -28,7 +29,8 @@ const STATUSES = () => [
  * and the Settings shortcut sit beside it in the same dialog, since a form is
  * not allowed inside role="menu".
  */
-export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSettings, onClose }) {
+export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSettings, onOpenSupport, onClose }) {
+  const payments = usePaymentsConfig();
   const ref = useRef(null);
   const menuRef = useRef(null);
   const [customText, setCustomText] = useState(currentUser?.custom_status ?? '');
@@ -203,6 +205,15 @@ export default function UserStatusMenu({ currentUser, onSetStatus, onOpenSetting
       >
         <Settings className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /> {t('sidebar.userSettings')}
       </button>
+      {payments?.enabled && onOpenSupport && (
+        <button
+          type="button"
+          onClick={() => { onOpenSupport(); onClose(); }}
+          className={menuItem}
+        >
+          <Heart className="h-[18px] w-[18px] shrink-0 text-[#db2777]" aria-hidden="true" /> {t('payments.heart')}
+        </button>
+      )}
     </div>
   );
 }
