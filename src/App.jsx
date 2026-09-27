@@ -39,6 +39,7 @@ import {
 import { useBackClose, setCanonicalPath } from './chat/useBackClose';
 import { mentionsUser } from './utils/mentions';
 import { handleIdentityEvent } from './profile/store';
+import { PAYMENT_EVENT } from './payments/usePaymentsConfig.js';
 import { recentAnchorRect } from './profile/anchor';
 import { resetMemberProfile } from './profile/api';
 import { recordRecentDestination } from './components/server/recentDestinations';
@@ -513,6 +514,21 @@ export default function App() {
     socket.emit('identify', { userId: currentUserId, token: authToken });
     loadReadStates(currentUserId);
   }, [currentUserId, authToken, loadInitialData, loadReadStates]);
+
+  // Back from Stripe Checkout (?payment=<order>&result=success|cancel): show
+  // Settings › Support, where the order's status updates live, and tidy the URL.
+  useEffect(() => {
+    if (!currentUserId) return;
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('result');
+    if (!params.get('payment') || !result) return;
+    params.delete('payment'); params.delete('result');
+    const qs = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`);
+    setShowUserSettingsModal('support');
+    pushToast(t(result === 'success' ? 'payments.stripeReturned' : 'payments.stripeCancelled'),
+      { type: result === 'success' ? 'success' : 'info', ttl: 6000 });
+  }, [currentUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The gateway confirms identity before it will accept a room join.
   useEffect(() => {
@@ -1318,6 +1334,14 @@ export default function App() {
       pushToast(t('voice.disconnectedByServer'), { type: 'info', ttl: 5000 });
     };
 
+    const onPaymentUpdated = (payload = {}) => {
+      const order = payload.order;
+      if (!order) return;
+      window.dispatchEvent(new CustomEvent(PAYMENT_EVENT, { detail: payload }));
+      if (payload.paid) pushToast(t('payments.toastPaid'), { type: 'success', ttl: 6000 });
+      else if (order.status === 'rejected') pushToast(t('payments.toastRejected', { reason: order.reason || t('payments.status.rejected') }), { type: 'error', ttl: 8000 });
+    };
+
     const handlers = {
       new_message: onNewMessage,
       channel_activity: later(onChannelActivity),
@@ -1342,6 +1366,9 @@ export default function App() {
       // so every list and open profile refetches it (batched).
       identity_updated: handleIdentityEvent,
       server_identity_updated: handleIdentityEvent,
+      // Donations: a toast when an order is paid or rejected, and the order
+      // itself for Settings › Support (payments/usePaymentsConfig.js).
+      payment_updated: onPaymentUpdated,
       channel_created: onChannelCreated,
       channel_updated: onChannelUpdated,
       channel_deleted: onChannelDeleted,
@@ -2854,6 +2881,7 @@ export default function App() {
           onUserContextMenu={(user, x, y) => openMemberMenu(user, x, y)}
           onCreateGroupDm={() => setShowGroupDmModal(true)}
           onOpenUserSettingsModal={() => setShowUserSettingsModal(true)}
+          onOpenSupport={() => setShowUserSettingsModal('support')}
           onSetStatus={handleSetStatus}
           isMuted={isMuted}
           onToggleMute={handleToggleMute}
@@ -2924,6 +2952,7 @@ export default function App() {
               onToast={pushToast}
               currentUser={currentUser}
               onOpenUserSettingsModal={() => setShowUserSettingsModal(true)}
+              onOpenSupport={() => setShowUserSettingsModal('support')}
               onSetStatus={handleSetStatus}
               currentVoiceChannel={currentVoiceChannel}
               activeVoiceParticipants={activeVoiceParticipants}

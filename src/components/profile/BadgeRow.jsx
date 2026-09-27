@@ -7,7 +7,8 @@ const SYSTEM_COLORS = {
   staff: 'var(--color-d-brand)',
   bot: 'var(--color-d-brand)',
   early: '#d97706',
-  verified: 'var(--color-d-success)'
+  verified: 'var(--color-d-success)',
+  supporter: '#db2777'
 };
 
 export function badgeLabel(badge) {
