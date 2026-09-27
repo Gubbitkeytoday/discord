@@ -263,22 +263,9 @@ export async function submitSlip({ orderId, userId, image = null, payload = null
     throw new ApiError('Attach the slip image so an admin can check it', { code: 'SLIP_MISSING' });
   }
 
-  // Replay checks that need no provider: the same image or the same slip
-  // reference already paid another order.
+  // Keep the slip (a private file) whatever happens next: an admin reviewing
+  // the order should see what was sent, duplicates included.
   const sha = image ? crypto.createHash('sha256').update(image).digest('hex') : null;
-  const qrRef = cleanPayload ? parseSlipQr(cleanPayload)?.transRef ?? null : null;
-  if (sha || qrRef) {
-    const dup = await getQuery(
-      `SELECT id FROM payment_orders WHERE id <> ? AND status = 'paid' AND (${sha ? 'slip_sha256 = ?' : '0 = 1'} OR ${qrRef ? 'trans_ref = ?' : '0 = 1'})`,
-      [orderId, ...(sha ? [sha] : []), ...(qrRef ? [qrRef] : [])]
-    );
-    if (dup) {
-      await runQuery(`UPDATE payment_orders SET slip_attempts = slip_attempts + 1 WHERE id = ?`, [orderId]);
-      const updated = await recordCheck(orderId, 'SLIP_DUPLICATE', cfg);
-      return { order: updated, result: 'failed', check_code: 'SLIP_DUPLICATE' };
-    }
-  }
-
   let file = null;
   if (image) {
     file = await storeFile({
@@ -292,10 +279,26 @@ export async function submitSlip({ orderId, userId, image = null, payload = null
     `UPDATE payment_orders
         SET slip_file_id = COALESCE(?, slip_file_id), slip_sha256 = COALESCE(?, slip_sha256),
             slip_payload = COALESCE(?, slip_payload), slip_submitted_at = ${sql.now},
-            slip_attempts = slip_attempts + 1, check_code = NULL, updated_at = ${sql.now}
+            slip_attempts = slip_attempts + 1, check_code = NULL, updated_at = ${sql.now},
+            -- a slip for an expired order reopens it for review
+            status = CASE WHEN status = 'expired' THEN 'pending' ELSE status END
       WHERE id = ?`,
     [file?.id ?? null, sha, cleanPayload, orderId]
   );
+
+  // Replay checks that need no provider: the same image or the same slip
+  // reference already paid another order.
+  const qrRef = cleanPayload ? parseSlipQr(cleanPayload)?.transRef ?? null : null;
+  if (sha || qrRef) {
+    const dup = await getQuery(
+      `SELECT id FROM payment_orders WHERE id <> ? AND status = 'paid' AND (${sha ? 'slip_sha256 = ?' : '0 = 1'} OR ${qrRef ? 'trans_ref = ?' : '0 = 1'})`,
+      [orderId, ...(sha ? [sha] : []), ...(qrRef ? [qrRef] : [])]
+    );
+    if (dup) {
+      const updated = await recordCheck(orderId, 'SLIP_DUPLICATE', cfg);
+      return { order: updated, result: 'failed', check_code: 'SLIP_DUPLICATE' };
+    }
+  }
 
   const verdict = await verifySlip({
     cfg, image: image ? { buffer: image, mime: sniffed.mime } : null, payload: cleanPayload, fetchImpl

@@ -472,6 +472,12 @@ describe('orders over HTTP', () => {
     const sameImage = Buffer.concat([PNG, Buffer.from(`SCENARIO:ok:${ref}`)]);
     const third = await uploadSlip(a, oc.id, { bytes: sameImage });
     assert.equal(third.body.check_code, 'SLIP_DUPLICATE');
+    assert.equal(third.body.order.display_status, 'verifying', 'kept for an admin to see');
+    {
+      const { getQuery } = await db();
+      const kept = await getQuery(`SELECT slip_file_id FROM payment_orders WHERE id = ?`, [oc.id]);
+      assert.ok(kept.slip_file_id, 'the duplicate slip is stored as evidence');
+    }
 
     // Concurrent: five users, five orders, one reference, at once.
     const ref2 = `RACE${crypto.randomBytes(5).toString('hex')}`;
