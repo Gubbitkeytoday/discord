@@ -64,7 +64,9 @@ export function listUsers(viewerId) {
         )
       ORDER BY u.display_name`,
     [viewerId, viewerId, viewerId, viewerId, viewerId]
-  );
+  // An expired custom status is hidden on read, not only once the sweeper
+  // has cleared it (it runs every 30 s).
+  ).then((rows) => rows.map(maskExpiredStatus));
 }
 
 export async function getUser(userId, viewerId = null) {

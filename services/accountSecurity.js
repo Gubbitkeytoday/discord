@@ -12,7 +12,8 @@ import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import {
   generateSecret, verifyCode, matchCodeStep, buildOtpAuthUri,
-  generateRecoveryCodes, hashRecoveryCode
+  generateRecoveryCodes, hashRecoveryCode, legacyRecoveryHash, wrapLegacyRecoveryHash,
+  RECOVERY_HASH_PREFIX, LEGACY_WRAPPED_PREFIX
 } from '../lib/totp.js';
 import { hashPassword, verifyPassword, revokeAllSessions } from '../lib/auth.js';
 import { currentTransport } from '../lib/mailer.js';
@@ -89,17 +90,19 @@ export async function confirmMfaEnrolment({ userId, code }) {
   }
 
   const recoveryCodes = generateRecoveryCodes();
+  // Derived before the transaction: scrypt is slow on purpose.
+  const recoveryHashes = await Promise.all(recoveryCodes.map((c) => hashRecoveryCode(c)));
 
   await transaction(async () => {
     await runQuery(`UPDATE users SET mfa_enabled = 1 WHERE id = ?`, [userId]);
     // Used-step bookkeeping belongs to the previous secret, if any.
     await runQuery(`DELETE FROM user_settings WHERE user_id = ? AND category = ?`, [userId, MFA_STATE]);
     // Recovery codes are stored hashed and single-use, exactly like tokens.
-    for (const recoveryCode of recoveryCodes) {
+    for (const recoveryHash of recoveryHashes) {
       await runQuery(
         `INSERT INTO account_tokens (id, user_id, kind, token_hash, expires_at)
          VALUES (?, ?, 'recovery', ?, NULL)`,
-        [generateId(), userId, hashRecoveryCode(recoveryCode)]
+        [generateId(), userId, recoveryHash]
       );
     }
   });
@@ -147,6 +150,7 @@ export async function verifyMfaChallenge({ userId, code }) {
   if (!user?.mfa_enabled) return true;                 // nothing to check
   const step = matchCodeStep(user.mfa_secret, code);
   if (step !== null) return claimTotpStep(userId, step);
+  await upgradeLegacyRecoveryHashes(userId);
   return consumeRecoveryCode({ userId, code });
 }
 
@@ -180,7 +184,15 @@ async function claimTotpStep(userId, step) {
 }
 
 async function consumeRecoveryCode({ userId, code }) {
-  const hash = hashRecoveryCode(code ?? '');
+  const hash = await hashRecoveryCode(code);
+  if (!hash) return false;                 // not shaped like a recovery code
+  if (await burnRecoveryCode(userId, hash)) return true;
+  // A code issued before rc2 (hex, stored as a wrapped SHA-256 digest).
+  const legacy = await legacyRecoveryHash(code);
+  return legacy ? burnRecoveryCode(userId, legacy) : false;
+}
+
+async function burnRecoveryCode(userId, hash) {
   // One conditional UPDATE: burning the code and checking it was unused are
   // the same statement, so it cannot be spent twice concurrently.
   const row = await getQuery(
@@ -196,8 +208,32 @@ async function consumeRecoveryCode({ userId, code }) {
   return burned.changes === 1;
 }
 
+/**
+ * Re-hash this user's unused recovery rows that still hold a bare SHA-256
+ * digest (older releases) into the scrypt-wrapped form. Needs no plaintext:
+ * the digest itself is wrapped. Idempotent; a no-op once done.
+ */
+export async function upgradeLegacyRecoveryHashes(userId) {
+  const rows = await allQuery(
+    `SELECT id, token_hash FROM account_tokens
+      WHERE user_id = ? AND kind = 'recovery' AND used_at IS NULL
+        AND token_hash NOT LIKE ? AND token_hash NOT LIKE ?`,
+    [userId, `${RECOVERY_HASH_PREFIX}%`, `${LEGACY_WRAPPED_PREFIX}%`]
+  );
+  for (const row of rows) {
+    if (!/^[0-9a-f]{64}$/.test(row.token_hash)) continue;
+    const wrapped = await wrapLegacyRecoveryHash(row.token_hash);
+    await runQuery(
+      `UPDATE account_tokens SET token_hash = ? WHERE id = ? AND token_hash = ?`,
+      [wrapped, row.id, row.token_hash]
+    );
+  }
+  return rows.length;
+}
+
 export async function countRecoveryCodes(userId) {
-  const { remaining } = await getQuery(
+  await upgradeLegacyRecoveryHashes(userId);
+  const { remaining }= await getQuery(
     `SELECT count(*) AS remaining FROM account_tokens
       WHERE user_id = ? AND kind = 'recovery' AND used_at IS NULL`,
     [userId]

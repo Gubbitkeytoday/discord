@@ -263,6 +263,16 @@ describe('browser error tunnel', () => {
     assert.equal(items[0][1].toString(), bin);
   });
 
+  test('accepts a Buffer (the raw parser) and refuses tampered body types', () => {
+    const raw = Buffer.from(`xx${envelope(DSN, [JSON.stringify({ type: 'event' }), '{}'])}`, 'utf8').subarray(2);
+    const { header, items } = parseEnvelope(raw);
+    assert.equal(header.dsn, DSN);
+    assert.equal(items.length, 1);
+    for (const tampered of [[envelope(DSN, [])], { length: 3 }, 42, null, undefined]) {
+      assert.throws(() => parseEnvelope(tampered), (e) => e.code === 'BAD_ENVELOPE');
+    }
+  });
+
   test('refuses envelopes for another project and malformed input', async () => {
     const env = { SENTRY_BROWSER_DSN: DSN };
     await assert.rejects(forwardEnvelope(envelope('https://other@glitchtip.example/7', []), { env }), (e) => e.status === 403);

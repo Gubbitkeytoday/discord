@@ -219,10 +219,12 @@ const DROPPED_ITEM_TYPES = new Set(['attachment', 'replay_event', 'replay_record
 export function parseEnvelope(input) {
   // A request body is a Buffer (raw parser) or a string; anything else — an
   // array or object from a tampered content type — is rejected, not coerced.
-  if (!Buffer.isBuffer(input) && typeof input !== 'string') {
-    throw new ApiError('Malformed envelope', { code: 'BAD_ENVELOPE' });
-  }
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'utf8');
+  // The parser below works on a Buffer built here, never on the request value
+  // itself, so no string/array method can be reached on a tampered type.
+  let buf;
+  if (typeof input === 'string') buf = Buffer.from(input, 'utf8');
+  else if (Buffer.isBuffer(input)) buf = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  else throw new ApiError('Malformed envelope', { code: 'BAD_ENVELOPE' });
   let pos = 0;
   const readLine = () => {
     const nl = buf.indexOf(0x0a, pos);

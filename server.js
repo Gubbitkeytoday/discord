@@ -112,11 +112,24 @@ process.stderr?.on('error', (err) => { if (err?.code === 'EPIPE') return; });
 
 
 const PORT = config.port;
-// An empty allow-list means same-origin only, which is what you want once this
-// process also serves the SPA.
-const CORS_ORIGIN = config.corsOrigins.includes('*')
-  ? '*'
-  : (config.corsOrigins.length > 0 ? config.corsOrigins : false);
+// CORS (CORS_ORIGIN, lib/config.js):
+//   unset        same-origin only (production default; this process serves
+//                the SPA, so no CORS header is ever needed).
+//   a,b,c        exact origins allowed, with credentials (cookies).
+//   *            development default: any origin, WITHOUT credentials. Browsers
+//                never honour cookies for a wildcard anyway; saying so here
+//                means no response ever pairs "*" with Allow-Credentials.
+// Listed origins are matched exactly (scheme + host + port), never by prefix
+// or pattern, and the Origin header is only echoed back when it matched.
+const CORS_ALLOWED = new Set(config.corsOrigins.filter((origin) => origin !== '*'));
+const CORS_ANY_ORIGIN = config.corsOrigins.includes('*');
+function corsOrigin(origin, callback) {
+  if (typeof origin === 'string' && CORS_ALLOWED.has(origin)) return callback(null, origin);
+  return callback(null, false);
+}
+const corsOptions = CORS_ANY_ORIGIN
+  ? { origin: '*', credentials: false }
+  : { origin: corsOrigin, credentials: true };
 
 // --- boot --------------------------------------------------------------------
 
@@ -133,7 +146,8 @@ await resetVolatileState();
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+  // Same policy as the HTTP API (the client connects withCredentials).
+  cors: { ...corsOptions, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
   // Payload cap (file bytes go over HTTP, not the socket) and connection
   // state recovery — see realtime.js.
   ...realtimeServerOptions()
@@ -164,7 +178,7 @@ app.use(securityHeaders({
 app.use(httpLogger());
 app.use(metricsMiddleware());
 app.use(telemetry.httpMetrics());
-app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Real sessions first; the x-user-id shortcut only when explicitly enabled.

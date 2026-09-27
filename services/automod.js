@@ -6,6 +6,8 @@
 //  never exists. Rules are per-guild rows in automod_rules.
 // ============================================================================
 
+import { RE2JS } from 're2js';
+
 import { runQuery, getQuery, allQuery } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
@@ -32,14 +34,25 @@ function rememberSend(channelId, userId, content) {
   return list;
 }
 
+// Regex rules run on RE2JS, a linear-time engine (the RE2 semantics Discord's
+// own AutoMod uses via Rust's regex crate): no backtracking, so no pattern —
+// however it is written — can stall the message path (ReDoS). The flip side
+// is RE2 syntax: no lookaround and no backreferences; such a pattern is
+// refused as invalid when the rule is saved.
+const regexCache = new Map();   // source -> compiled | null
+
 function safeRegex(source) {
-  // A user-supplied pattern must not be able to hang the server. Length is
-  // capped and the pattern is rejected if it contains nested quantifiers, the
-  // classic catastrophic-backtracking shape.
-  if (!source || source.length > 200) return null;
-  if (/(\(\?<)|(\(\?\<)/.test(source)) return null;             // no lookbehind
-  if (/(\([^)]*[+*]\)[+*])|(\[[^\]]*\][+*][+*])/.test(source)) return null;
-  try { return new RegExp(source, 'iu'); } catch { return null; }
+  if (typeof source !== 'string' || !source || source.length > 200) return null;
+  if (regexCache.has(source)) return regexCache.get(source);
+  let compiled = null;
+  // Nested quantifiers are refused anyway: harmless under RE2, but almost
+  // always a mistake, and the clear error helps the author.
+  if (!/(\([^)]*[+*]\)[+*])|(\[[^\]]*\][+*][+*])/.test(source)) {
+    try { compiled = RE2JS.compile(source, RE2JS.CASE_INSENSITIVE); } catch { compiled = null; }
+  }
+  if (regexCache.size >= 500) regexCache.delete(regexCache.keys().next().value);
+  regexCache.set(source, compiled);
+  return compiled;
 }
 
 export async function listRules(serverId) {
@@ -314,7 +327,7 @@ function matches(rule, { content, lowered, history }) {
     }
     case 'regex': {
       const pattern = safeRegex(meta.pattern);
-      return pattern?.test(content) ? 'Matches a blocked pattern' : null;
+      return pattern?.matcher(String(content ?? '')).find() ? 'Matches a blocked pattern' : null;
     }
     case 'link': {
       const links = content.match(LINK) ?? [];

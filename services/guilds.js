@@ -21,6 +21,7 @@ import {
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
 } from '../lib/permissions.js';
 import { defaultChannelNames } from './admin/defaults.js';
+import { maskExpiredStatus } from './profiles.js';
 
 /**
  * Raid protection is on for every new server, as Discord's is: a flood of
@@ -170,7 +171,7 @@ export async function getInitialData(userId) {
   // Friends, from either direction of the relation.
   const friends = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
-            u.status, u.custom_status, u.bio,
+            u.status, u.custom_status, u.custom_status_expires_at, u.bio,
             f.status AS friend_status, f.requested_by, f.id AS request_id, f.nickname AS friend_nickname,
             CASE WHEN f.requested_by = ? THEN 'outgoing' ELSE 'incoming' END AS direction
        FROM friends f
@@ -179,7 +180,7 @@ export async function getInitialData(userId) {
         AND u.deleted_at IS NULL
         AND f.status != 'declined'`,
     [userId, userId, userId, userId]
-  ).then((rows) => rows.map((row) => maskStatus(row, userId)));
+  ).then((rows) => rows.map((row) => maskStatus(maskExpiredStatus(row), userId)));
 
   const dms = await listDirectMessageChannels(userId);
   const unread = await allQuery(
@@ -300,13 +301,13 @@ export async function getServerDetail(serverId, viewerId = null) {
   // offline to everyone but its owner.
   const memberRows = (await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
-            u.status, u.custom_status, u.is_bot,
+            u.status, u.custom_status, u.custom_status_expires_at, u.is_bot,
             sm.nickname, sm.avatar_url AS member_avatar_url, sm.joined_at, sm.timeout_until
        FROM server_members sm
        JOIN users u ON u.id = sm.user_id
       WHERE sm.server_id = ? AND sm.left_at IS NULL AND u.deleted_at IS NULL`,
     [serverId]
-  )).map((m) => ({ ...m, status: publicStatus(m.status, viewerId, m.id) }));
+  )).map((m) => ({ ...maskExpiredStatus(m), status: publicStatus(m.status, viewerId, m.id) }));
 
   const roleRows = await allQuery(
     `SELECT mr.user_id, r.id, r.name, r.color, r.color_secondary, r.position, r.permissions, r.hoist, r.managed, r.icon_url,
@@ -937,11 +938,12 @@ export async function getDirectMessageChannel(channelId, viewerId) {
   );
   if (!channel) throw ApiError.notFound('Channel');
   const recipients = await allQuery(
-    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.status, u.custom_status
+    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.status, u.custom_status,
+            u.custom_status_expires_at
        FROM channel_recipients cr JOIN users u ON u.id = cr.user_id
       WHERE cr.channel_id = ? AND u.id != ?`,
     [channelId, viewerId]
-  ).then((rows) => rows.map((row) => maskStatus(row, viewerId)));
+  ).then((rows) => rows.map((row) => maskStatus(maskExpiredStatus(row), viewerId)));
   return {
     ...channel,
     recipients,

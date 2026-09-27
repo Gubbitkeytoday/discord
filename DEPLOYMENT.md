@@ -1560,6 +1560,7 @@ an example, not a default).
 | `SECURE_COOKIES` | `0` | Adds the Secure flag to session cookies. Default: on in production. Browsers DROP Secure cookies on plain http:// (except localhost), so with this on, opening the server as http://192.168.x.x signs everyone straight back out (the server prints a red CONFIGURATION PROBLEM box at boot when PUBLIC_URL is http:// and not localhost). Testing on a LAN without TLS: SECURE_COOKIES=0 and PUBLIC_URL=http://<lan-ip>:3001. Never run it that way on the internet. |
 | `SESSION_TTL_DAYS` | `30` | Session lifetime (absolute, from sign-in) and idle limit, in days. |
 | `SESSION_IDLE_DAYS` | `14` | ↑ same group as above |
+| `MFA_RECOVERY_PEPPER` |  | Pepper for MFA recovery codes (stored as scrypt(code) salted with this value). Keep it out of the database and backups, e.g. openssl rand -base64 32. Set it once: changing it invalidates every unused recovery code (users regenerate them in Settings › My Account). Optional; empty still uses scrypt. |
 
 **mail (password reset, e-mail verification)**
 

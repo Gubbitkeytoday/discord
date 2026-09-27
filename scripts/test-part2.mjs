@@ -216,6 +216,34 @@ describe('automod', () => {
     assert.equal(body.code, 'INVALID_REGEX');
   });
 
+  test('regex rules run in linear time (RE2) and still match', async () => {
+    // Lookaround and backreferences are not RE2 syntax: refused on save.
+    for (const pattern of ['(?<=a)b', '(?=x)y', '(a)\\1']) {
+      const res = await api('POST', '/api/servers/server-1/automod', {
+        name: 'no-lookaround', trigger_type: 'regex', trigger_metadata: { pattern }, actions: ['block']
+      });
+      assert.equal(res.status, 400, pattern);
+    }
+    // `(\w+\s?)+$` slips past the nested-quantifier heuristic and backtracks
+    // exponentially in V8; under RE2 the check is linear.
+    const rule = await api('POST', '/api/servers/server-1/automod', {
+      name: 'redos-shape', trigger_type: 'regex',
+      trigger_metadata: { pattern: '(\\w+\\s?)+$|ห้าม\\s*สแปม' }, actions: ['block']
+    });
+    assert.equal(rule.status, 200, JSON.stringify(rule.body));
+    const started = Date.now();
+    const slow = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', user_id: 'user-3', content: `${'a'.repeat(1500)}!`
+    }, { 'x-user-id': 'user-3' });
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+    assert.equal(slow.status, 200, 'no match: the string ends in "!"');
+    const thai = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', user_id: 'user-3', content: 'อย่า ห้าม สแปม นะ!'
+    }, { 'x-user-id': 'user-3' });
+    assert.equal(thai.status, 403, 'unicode pattern matched case-insensitively');
+    await api('DELETE', `/api/servers/server-1/automod/${rule.body.id}`);
+  });
+
   test('mention spam rule counts mentions', async () => {
     const rule = await api('POST', '/api/servers/server-1/automod', {
       name: 'mention-spam', trigger_type: 'mention_spam',

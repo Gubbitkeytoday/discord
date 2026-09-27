@@ -19,6 +19,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const now = () => new Date().toISOString();
+const daysAgo = (days) => new Date(Date.now() - days * 86400e3).toISOString();
 
 /** Dev-only password for every seeded account. */
 export const SEED_PASSWORD = 'antigravity123';
@@ -55,18 +56,26 @@ const SEED_ROLES = {
   ]
 };
 
+// `days`: how long ago the member joined. A real community is not all brand
+// new: everyone joined months ago except CodeMaster, who joined HQ yesterday
+// and so wears the 🌱 new-member mark there (servers default to 7 days).
+// Within a server, earlier rows joined earlier, so join order is unchanged.
 const SEED_MEMBERS = [
-  { server_id: 'server-1', user_id: 'user-me', roles: ['role-1-admin', 'role-1-dev'] },
-  { server_id: 'server-1', user_id: 'user-2',  roles: ['role-1-admin'] },
-  { server_id: 'server-1', user_id: 'user-3',  roles: ['role-1-bot'] },
-  { server_id: 'server-1', user_id: 'user-4',  roles: ['role-1-mod'] },
-  { server_id: 'server-1', user_id: 'user-5',  roles: ['role-1-dev'] },
-  { server_id: 'server-2', user_id: 'user-2',  roles: ['role-2-admin'] },
-  { server_id: 'server-2', user_id: 'user-me', roles: ['role-2-vip'] },
-  { server_id: 'server-2', user_id: 'user-4',  roles: ['role-2-admin'] },
-  { server_id: 'server-3', user_id: 'user-me', roles: ['role-3-admin'] },
-  { server_id: 'server-3', user_id: 'user-5',  roles: ['role-3-admin'] }
+  { server_id: 'server-1', user_id: 'user-me', roles: ['role-1-admin', 'role-1-dev'], days: 400 },
+  { server_id: 'server-1', user_id: 'user-2',  roles: ['role-1-admin'], days: 365 },
+  { server_id: 'server-1', user_id: 'user-3',  roles: ['role-1-bot'], days: 300 },
+  { server_id: 'server-1', user_id: 'user-4',  roles: ['role-1-mod'], days: 120 },
+  { server_id: 'server-1', user_id: 'user-5',  roles: ['role-1-dev'], days: 1 },
+  { server_id: 'server-2', user_id: 'user-2',  roles: ['role-2-admin'], days: 380 },
+  { server_id: 'server-2', user_id: 'user-me', roles: ['role-2-vip'], days: 200 },
+  { server_id: 'server-2', user_id: 'user-4',  roles: ['role-2-admin'], days: 90 },
+  { server_id: 'server-3', user_id: 'user-me', roles: ['role-3-admin'], days: 350 },
+  { server_id: 'server-3', user_id: 'user-5',  roles: ['role-3-admin'], days: 30 }
 ];
+
+// Each account predates its earliest server join by a month.
+const accountCreatedAt = (userId) => daysAgo(30 + Math.max(0,
+  ...SEED_MEMBERS.filter((m) => m.user_id === userId).map((m) => m.days ?? 0)));
 
 const SEED_CHANNELS = [
   // Server 1
@@ -151,7 +160,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         [u.id, u.username, String(1000 + SEED_USERS.indexOf(u)), u.display_name,
          proxiedImageUrl(u.avatar_url), proxiedImageUrl(u.banner_url), u.bio, u.status, u.is_bot,
-         `${u.username.toLowerCase()}@example.dev`, devPasswordHash, now(), now()]
+         `${u.username.toLowerCase()}@example.dev`, devPasswordHash, accountCreatedAt(u.id), now()]
       );
     }
 
@@ -184,7 +193,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
     for (const m of SEED_MEMBERS) {
       await runQuery(
         `INSERT INTO server_members (server_id, user_id, joined_at) VALUES (?, ?, ?)`,
-        [m.server_id, m.user_id, now()]
+        [m.server_id, m.user_id, daysAgo(m.days ?? 0)]
       );
       // @everyone is implicit (role id === server id) but stored explicitly so
       // permission joins need no special case.

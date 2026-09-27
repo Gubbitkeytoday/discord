@@ -8,7 +8,6 @@
 
 import crypto from 'crypto';
 import dns from 'dns/promises';
-import { lookup as dnsLookup } from 'dns';
 import http from 'http';
 import https from 'https';
 import net from 'net';
@@ -23,7 +22,12 @@ const MAX_REDIRECTS = 3;
 
 const hashUrl = (url) => crypto.createHash('sha256').update(url).digest('hex').slice(0, 32);
 
-/** Reject anything that is not a public http(s) host. */
+/**
+ * Reject anything that is not a public http(s) host. Resolves to the parsed
+ * URL and the vetted address the request will be pinned to: every address the
+ * name resolves to must be public, and the connection then goes to the first
+ * of them — by IP, so no second DNS answer (rebinding) is ever used.
+ */
 async function assertPublicUrl(rawUrl) {
   const fail = (message, code) => Object.assign(new Error(message), { code });
   let url;
@@ -40,16 +44,18 @@ async function assertPublicUrl(rawUrl) {
   let addresses;
   try {
     addresses = net.isIP(host)
-      ? [{ address: host }]
+      ? [{ address: host, family: net.isIP(host) }]
       : await dns.lookup(host, { all: true });
   } catch {
     throw fail('Host does not resolve', 'ENOTFOUND');
   }
 
+  if (!addresses.length) throw fail('Host does not resolve', 'ENOTFOUND');
   for (const { address } of addresses) {
     if (isPrivateAddress(address)) throw fail('Refusing a private network address', 'EPRIVATE');
   }
-  return url;
+  const [first] = addresses;
+  return { url, address: first.address, family: first.family ?? net.isIP(first.address) };
 }
 
 export function isPrivateAddress(ip) {
@@ -87,21 +93,24 @@ export function isPrivateAddress(ip) {
 }
 
 /**
- * DNS lookup for outbound unfurls that refuses private answers *at connect
- * time*. Validating a name once and then letting fetch() resolve it again is
- * a DNS-rebinding hole: the second answer can be 127.0.0.1.
+ * Request options for `url` pinned to an already-vetted `address`. The socket
+ * dials that IP; the name still goes in the Host header and, for https, in
+ * SNI and the certificate check (`servername`), so virtual hosting and TLS
+ * verification work exactly as with a name. Nothing is resolved again at
+ * connect time, which closes the DNS-rebinding window completely.
  */
-function guardedLookup(hostname, options, callback) {
-  dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
-    if (err) return callback(err);
-    const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: options?.family }];
-    const bad = list.find(({ address }) => isPrivateAddress(address));
-    if (bad || list.length === 0) {
-      return callback(Object.assign(new Error('Refusing a private network address'), { code: 'EPRIVATE' }));
-    }
-    if (options?.all) return callback(null, list);
-    return callback(null, list[0].address, list[0].family ?? (net.isIPv6(list[0].address) ? 6 : 4));
-  });
+export function pinnedRequestOptions(url, { address, family }) {
+  const secure = url.protocol === 'https:';
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  return {
+    protocol: secure ? 'https:' : 'http:',
+    host: address,
+    family: family === 6 ? 6 : 4,
+    port: url.port ? Number(url.port) : (secure ? 443 : 80),
+    path: `${url.pathname || '/'}${url.search}`,
+    ...(secure && !net.isIP(hostname) ? { servername: hostname } : {}),
+    headers: { Host: url.host }
+  };
 }
 
 /**
@@ -111,14 +120,17 @@ function guardedLookup(hostname, options, callback) {
  * cloud metadata service.
  */
 export async function safeGet(startUrl, { signal, accept = 'text/html,application/xhtml+xml' }) {
-  let current = await assertPublicUrl(startUrl);
+  let target = await assertPublicUrl(startUrl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const current = target.url;
     const response = await new Promise((resolve, reject) => {
-      const client = current.protocol === 'https:' ? https : http;
-      const req = client.get(current, {
-        lookup: guardedLookup,
+      const options = pinnedRequestOptions(current, target);
+      const client = options.protocol === 'https:' ? https : http;
+      const req = client.get({
+        ...options,
         signal,
         headers: {
+          ...options.headers,
           // Many sites only emit OpenGraph tags for a bot-looking agent.
           'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
           Accept: accept
@@ -130,7 +142,7 @@ export async function safeGet(startUrl, { signal, accept = 'text/html,applicatio
     if (status >= 300 && status < 400 && response.headers.location) {
       response.resume();
       if (hop === MAX_REDIRECTS) throw new Error('too many redirects');
-      current = await assertPublicUrl(new URL(response.headers.location, current).href);
+      target = await assertPublicUrl(new URL(response.headers.location, current).href);
       continue;
     }
     if (status < 200 || status >= 300) {

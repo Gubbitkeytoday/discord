@@ -13,7 +13,7 @@ import {
 
 import {
   generateCode, verifyCode, base32Encode, base32Decode, generateSecret,
-  buildOtpAuthUri, generateRecoveryCodes
+  buildOtpAuthUri, generateRecoveryCodes, hashRecoveryCode, normaliseRecoveryCode
 } from '../lib/totp.js';
 import { signRequest, uriEncode, S3Client } from '../lib/s3Client.js';
 import { probeDuration } from '../lib/mediaDuration.js';
@@ -81,7 +81,26 @@ describe('TOTP (RFC 6238 vectors)', () => {
     const codes = generateRecoveryCodes(10);
     assert.equal(codes.length, 10);
     assert.equal(new Set(codes).size, 10);
-    for (const code of codes) assert.match(code, /^[0-9A-F]{5}-[0-9A-F]{5}$/);
+    // Crockford base32, 50 bits: no I, L, O or U to misread.
+    for (const code of codes) assert.match(code, /^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$/);
+  });
+
+  test('recovery codes are stored as a keyed scrypt derivation, not a fast hash', async () => {
+    const [code] = generateRecoveryCodes(1);
+    const stored = await hashRecoveryCode(code);
+    assert.match(stored, /^rc2\$[0-9a-f]{64}$/);
+    assert.notEqual(stored.slice(4), crypto.createHash('sha256').update(code.replace('-', '')).digest('hex'));
+    // Deterministic (it is the lookup key), and forgiving about how it is typed.
+    assert.equal(await hashRecoveryCode(code.toLowerCase().replace('-', ' ')), stored);
+    assert.equal(normaliseRecoveryCode('abcde-fghij'), 'ABCDEFGH1J');
+    assert.equal(normaliseRecoveryCode('0O1Il-22222'), '0011122222');
+    // Something that cannot be a recovery code (a TOTP code) costs no scrypt.
+    assert.equal(await hashRecoveryCode('123456'), null);
+    // The pepper keys it: a different server secret gives a different value.
+    const saved = process.env.MFA_RECOVERY_PEPPER;
+    process.env.MFA_RECOVERY_PEPPER = 'another-deployment';
+    try { assert.notEqual(await hashRecoveryCode(code), stored); }
+    finally { if (saved === undefined) delete process.env.MFA_RECOVERY_PEPPER; else process.env.MFA_RECOVERY_PEPPER = saved; }
   });
 });
 
@@ -147,6 +166,29 @@ describe('MFA enrolment', () => {
     await asSession(token, 'POST', '/api/auth/mfa/disable', {
       code: generateCode(begun.body.secret), password: 'antigravity123'
     });
+  });
+
+  test('codes stored by older releases (bare SHA-256) are re-hashed in place and still work once', async () => {
+    const { runQuery, getQuery } = await import('../db.js');
+    const begun = await asSession(token, 'POST', '/api/auth/mfa/begin');
+    await asSession(token, 'POST', '/api/auth/mfa/confirm', { code: generateCode(begun.body.secret) });
+    const legacyCode = 'A1B2C-3D4E5';
+    const digest = crypto.createHash('sha256').update('A1B2C3D4E5').digest('hex');
+    const rowId = `legacy-${Date.now()}`;
+    await runQuery(
+      `INSERT INTO account_tokens (id, user_id, kind, token_hash, expires_at) VALUES (?, 'user-me', 'recovery', ?, NULL)`,
+      [rowId, digest]
+    );
+    // Opening the security settings (MFA status) upgrades the row; no plaintext needed.
+    const status = await asSession(token, 'GET', '/api/auth/mfa/status');
+    assert.equal(status.body.recovery_codes_remaining, 11);
+    const upgraded = await getQuery(`SELECT token_hash FROM account_tokens WHERE id = ?`, [rowId]);
+    assert.match(upgraded.token_hash, /^rc1w\$[0-9a-f]{64}$/, 'no bare SHA-256 digest left in the table');
+
+    const used = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: legacyCode.toLowerCase(), password: 'antigravity123' });
+    assert.equal(used.status, 200, JSON.stringify(used.body));
+    const burned = await getQuery(`SELECT used_at FROM account_tokens WHERE id = ?`, [rowId]);
+    assert.ok(!burned || burned.used_at, 'burned (or cleared with MFA off)');
   });
 
   test('disabling MFA requires a code', async () => {

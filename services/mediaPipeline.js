@@ -243,7 +243,10 @@ async function ingestDirectUpload(file) {
     if (job) await HANDLERS[job](file);
     return;
   }
-  const raw = await readObject(file.storage_key, file.backend);
+  // A direct upload only ever lives in the bucket (createDirectUpload needs
+  // S3), so it is read from and written back to the bucket, never local disk.
+  if (file.backend !== 's3' && file.backend !== 'r2') throw permanent('direct upload is not in a bucket');
+  const raw = await s3.getObject(file.storage_key);
   if (!raw) throw permanent('uploaded object is missing from the bucket');
 
   let prepared;
@@ -270,7 +273,7 @@ async function ingestDirectUpload(file) {
   const key = buildStorageKey(file.category, sha, ext, duplicate ? `u${file.id}` : '');
   const incoming = file.storage_key;
 
-  await writeObject(key, buffer, sniffed.mime, file.backend);
+  await s3.putObject(key, buffer, sniffed.mime);
   await runQuery(
     `UPDATE files SET hash = ?, storage_key = ?, mime_type = ?, extension = ?, size = ?,
             width = ?, height = ?, duration_secs = ?, is_animated = ?, blurhash = ?,
