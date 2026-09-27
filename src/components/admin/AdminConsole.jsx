@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, Flag, Users, Server, DoorOpen, ScrollText, Sparkles, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2, Gem
+  X, Flag, Users, Server, DoorOpen, ScrollText, Sparkles, Loader2, RefreshCw, Trash2, Ban, CheckCircle2, Undo2, Gem,
+  HandHeart
 } from 'lucide-react';
 import { get, patch, post, put, del } from '../../api';
 import { localeTag, t } from '../../i18n/index.jsx';
@@ -9,6 +10,7 @@ import { useDialog } from '../settings/primitives';
 import { reasonLabel, useStreamerMask, maskEmail } from './safety';
 import SeasonalAdminPanel from '../theme/SeasonalAdminPanel.jsx';
 import CosmeticPackManager from './cosmetics/CosmeticPackManager.jsx';
+import PaymentsPanel from './PaymentsPanel.jsx';
 
 /**
  * Instance administration: the people who run this deployment. Reached from
@@ -23,6 +25,7 @@ const TABS = [
   { key: 'registration', icon: DoorOpen },
   { key: 'seasonal', icon: Sparkles },
   { key: 'cosmetics', icon: Gem },
+  { key: 'payments', icon: HandHeart },
   { key: 'audit', icon: ScrollText }
 ];
 
@@ -117,6 +120,7 @@ export default function AdminConsole({ currentUser, onClose, onToast }) {
           {tab === 'registration' && <RegistrationPanel onChanged={loadOverview} onError={toastError} onToast={onToast} />}
           {tab === 'seasonal' && <SeasonalAdminPanel onError={toastError} onToast={onToast} />}
           {tab === 'cosmetics' && <CosmeticPackManager onToast={onToast} />}
+          {tab === 'payments' && <PaymentsPanel onError={toastError} onToast={onToast} />}
           {tab === 'audit' && <AuditPanel onError={toastError} />}
         </div>
       </div>
@@ -440,7 +444,7 @@ function AuditPanel({ onError }) {
     <ol className="divide-y divide-d-divider rounded-lg border border-d-divider">
       {rows.map((a) => (
         <li key={a.id} className="px-3 py-2 text-sm">
-          <span className="font-medium text-d-strong">{a.actor_display || a.actor_username || '?'}</span>{' '}
+          <span className="font-medium text-d-strong">{a.actor_display || a.actor_username || (a.actor_id ? '?' : t('admin.systemActor'))}</span>{' '}
           <span className="text-d-text">{t(`admin.action.${a.action}`)}</span>
           {a.details?.username && <span className="text-d-text2"> · @{a.details.username}</span>}
           {a.details?.to && <span className="text-d-text2"> · {a.details.from} → {a.details.to}</span>}

@@ -44,11 +44,13 @@ import ChatTab from './settings/ChatTab';
 import StreamerModeTab from './settings/StreamerModeTab';
 import ActivityTab from './settings/ActivityTab';
 import ProfileTab from './settings/ProfileTab';
+import SupportTab from './settings/SupportTab';
+import { usePaymentsConfig } from '../payments/usePaymentsConfig.js';
 import { useDialog, PageHeader, Section } from './settings/primitives';
 import ConfirmModal from './ConfirmModal';
 import {
   X, ArrowLeft, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
-  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot, Languages
+  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot, Languages, HandHeart
 } from 'lucide-react';
 import { LanguageList } from '../i18n/LanguagePicker.jsx';
 import { t, useLocaleCode } from '../i18n/index.jsx';
@@ -59,14 +61,16 @@ const APP_VERSION = import.meta.env?.VITE_APP_VERSION ?? '1.0.0';
  * Two groups, the way Discord splits User Settings from App Settings.
  * `keywords` feeds the search box — people look for "microphone", not "voice".
  */
-const tabGroups = () => [
+const tabGroups = ({ support = false } = {}) => [
   {
     title: t('settings.groupUser'),
     tabs: [
       { key: 'profile',  icon: User,        label: t('settings.profileTab'),  keywords: t('settings.kwProfile') },
       { key: 'account',  icon: ShieldCheck, label: t('settings.accountTab'),  keywords: t('settings.kwAccount') },
       { key: 'privacy',  icon: Lock,        label: t('settings.privacyTab'),  keywords: t('settings.kwPrivacy') },
-      { key: 'activity', icon: Activity,    label: t('settings.activityTab'), keywords: t('settings.kwActivity') }
+      { key: 'activity', icon: Activity,    label: t('settings.activityTab'), keywords: t('settings.kwActivity') },
+      // Only when the instance takes donations (PROMPTPAY_ID / Stripe keys).
+      ...(support ? [{ key: 'support', icon: HandHeart, label: t('settings.supportTab'), keywords: t('settings.kwSupport') }] : [])
     ]
   },
   {
@@ -143,11 +147,13 @@ export default function UserSettingsModal({
 
   // Translated labels are memoised; recompute when the language changes.
   const locale = useLocaleCode();
+  const payments = usePaymentsConfig();
+  const support = Boolean(payments?.enabled);
   const groups = useMemo(() => {
-    return tabGroups()
+    return tabGroups({ support })
       .map((group) => ({ ...group, tabs: group.tabs.filter((tab) => matches(tab, query)) }))
       .filter((group) => group.tabs.length > 0);
-  }, [query, locale]);
+  }, [query, locale, support]);
 
   const visible = groups.flatMap((group) => group.tabs);
 
@@ -295,6 +301,7 @@ export default function UserSettingsModal({
           {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} onToast={onToast} />}
           {activeTab === 'developer' && <ApplicationsTab servers={servers} onToast={onToast} />}
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
+          {activeTab === 'support' && support && <SupportTab onToast={onToast} />}
           {activeTab === 'appearance' && <AppearanceTab onToast={onToast} />}
           {activeTab === 'accessibility' && <AccessibilityTab onToast={onToast} />}
           {activeTab === 'language' && <LanguageTab />}

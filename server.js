@@ -77,6 +77,7 @@ import passkeysRouter from './routes/passkeys.js'; // passkeys
 import translationRouter from './routes/translation.js'; // translation
 import createServerAppearanceRouter from './routes/serverAppearance.js'; // servers (round 4)
 import createProfilesRouter from './routes/profiles.js'; // profiles
+import createPaymentsRouter from './routes/payments.js'; // payments: donations, supporter badge
 import {
   registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
   revalidateRooms, emitToChannelViewers, emitToRelated,
@@ -179,6 +180,9 @@ app.use(httpLogger());
 app.use(metricsMiddleware());
 app.use(telemetry.httpMetrics());
 app.use(cors(corsOptions));
+// Stripe signs the exact bytes it sent: the webhook must see the RAW body, so
+// it is read here, before express.json (which then skips an already-read body).
+app.use('/api/payments/stripe/webhook', express.raw({ type: () => true, limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Real sessions first; the x-user-id shortcut only when explicitly enabled.
@@ -237,6 +241,7 @@ app.use('/api', passkeysRouter); // passkeys
 app.use('/api', translationRouter); // translation
 app.use('/api', createServerAppearanceRouter({ io })); // servers (round 4): appearance, profile, discovery
 app.use('/api', createProfilesRouter({ io })); // profiles: cosmetics, tags, badges, status expiry
+app.use('/api', createPaymentsRouter({ io })); // payments: PromptPay / Stripe donations (off unless configured)
 app.use(mediaRouter); // media pipeline: /api/media/*, S3 fallback for /uploads/*
 
 // Same-origin image proxy: every remote image (avatars, icons, link previews)

@@ -444,6 +444,11 @@ function systemBadges(user, cutoff, { isAdmin }) {
   if (Number(user.is_bot)) out.push({ id: 'system:bot', kind: 'system', slug: 'bot', icon: 'bot' });
   if (isEarly(user, cutoff)) out.push({ id: 'system:early', kind: 'system', slug: 'early', icon: 'sparkles' });
   if (Number(user.email_verified)) out.push({ id: 'system:verified', kind: 'system', slug: 'verified', icon: 'mail' });
+  // Donated to the instance (services/payments). Cosmetic only — the one and
+  // only thing a payment gets — and the supporter may choose to hide it.
+  if (user.supporter_since && !Number(user.supporter_badge_hidden)) {
+    out.push({ id: 'system:supporter', kind: 'system', slug: 'supporter', icon: 'supporter', granted_at: user.supporter_since });
+  }
   return out;
 }
 
@@ -539,7 +544,7 @@ export async function grantBadge({ badge, userId, actorId, note = null, revoke =
 
 const IDENTITY_USER_COLUMNS = `id, is_bot, is_system, created_at, email, email_verified, instance_admin, disabled_at,
   deleted_at, theme_colors, name_style, avatar_decoration_id, profile_effect_id, nameplate_id, profile_frame_id,
-  primary_server_tag_id`;
+  primary_server_tag_id, supporter_since, supporter_badge_hidden`;
 
 /**
  * Identity for up to 200 users, keyed by id. With `serverId`: that server's

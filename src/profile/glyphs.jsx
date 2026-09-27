@@ -5,7 +5,7 @@ import React from 'react';
 import {
   Leaf, Star, Heart, Zap, Flame, Moon, Sun, Gem, Music, Gamepad2, Sword, Flower2, PawPrint, Coffee,
   Rocket, Cloud, Snowflake, Anchor, Code, BookOpen, Trophy, Medal, Palette, Camera, Mic, Handshake,
-  ShieldCheck, Bot, Sparkles, MailCheck, Sprout
+  ShieldCheck, Bot, Sparkles, MailCheck, Sprout, HandHeart
 } from 'lucide-react';
 
 function Lotus({ className = '', ...rest }) {
@@ -41,7 +41,7 @@ export const GLYPHS = Object.freeze({
   code: Code, book: BookOpen, trophy: Trophy, medal: Medal, palette: Palette, camera: Camera, mic: Mic,
   handshake: Handshake,
   // System badges only — never offered to servers.
-  shield: ShieldCheck, bot: Bot, sparkles: Sparkles, mail: MailCheck, sprout: Sprout
+  shield: ShieldCheck, bot: Bot, sparkles: Sparkles, mail: MailCheck, sprout: Sprout, supporter: HandHeart
 });
 
 export const TAG_ICONS = [
