@@ -26,8 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -52,15 +52,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
       - run: npm run build
       - name: Upload dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -79,8 +79,8 @@ jobs:
     env:
       TEST_PORT_BASE: '5200'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -115,7 +115,7 @@ jobs:
       TEST_DATABASE_URL: postgres://app:app@localhost:5432/app_test
       PGPASSWORD: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Until the PostgreSQL backend lands there is no `test:pg` script; skip
       # the remaining steps (job stays green) and say so in the run summary.
       - name: Detect test:pg script
@@ -127,7 +127,7 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=PostgreSQL tests skipped::package.json has no \"test:pg\" script yet; this job will run it once it is added."
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.detect.outputs.present == 'true'
         with:
           node-version: ${{ matrix.node }}
@@ -151,8 +151,8 @@ jobs:
       E2E_PORT: '4550'
       E2E_SHOTS: ${{ github.workspace }}/e2e-shots
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -164,7 +164,7 @@ jobs:
         run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
         id: pw-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium
@@ -185,7 +185,7 @@ jobs:
           echo "CHROMIUM_PATH=$CHROMIUM_PATH" >> "$GITHUB_ENV"
       # With dist/index.html present the harness skips its own vite build.
       - name: Download dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
@@ -211,7 +211,7 @@ jobs:
         run: npm run e2e:pwa
       - name: Upload screenshots
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-screenshots
           path: e2e-shots/
@@ -233,8 +233,8 @@ jobs:
       REGISTRY_IMAGE: ${{ vars.REGISTRY_IMAGE }}
       PUBLISH: ${{ vars.REGISTRY_IMAGE != '' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build metadata
         id: meta
         run: |
@@ -242,7 +242,7 @@ jobs:
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Build (load locally)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -287,7 +287,7 @@ jobs:
           artifact-name: sbom-${{ steps.meta.outputs.sha }}.spdx.json
       - name: Vulnerability scan (grype)
         id: scan
-        uses: anchore/scan-action@v6
+        uses: anchore/scan-action@v7
         with:
           image: antigravity-discord:ci
           # Fail on critical vulnerabilities that have a fix available: those
@@ -302,7 +302,7 @@ jobs:
       - name: Vulnerability table (grype)
         if: always()
         id: grype-bin
-        uses: anchore/scan-action/download-grype@v6
+        uses: anchore/scan-action/download-grype@v7
       - name: Print grype findings
         if: always() && steps.grype-bin.outputs.cmd != ''
         env:
@@ -328,7 +328,7 @@ jobs:
       # --- publish + sign (main only, and only with a registry configured) ------
       - name: Log in to the registry
         if: env.PUBLISH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ startsWith(vars.REGISTRY_IMAGE, 'ghcr.io/') && 'ghcr.io' || vars.REGISTRY_HOST }}
           username: ${{ startsWith(vars.REGISTRY_IMAGE, 'ghcr.io/') && github.actor || secrets.REGISTRY_USERNAME }}
@@ -336,7 +336,7 @@ jobs:
       - name: Push
         id: push
         if: env.PUBLISH == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -374,8 +374,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Full audit (report only)
@@ -391,8 +391,8 @@ jobs:
     # the server needs nothing from devDependencies (client-only packages such
     # as react, vite or tailwindcss must stay there) without building an image.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -419,7 +419,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Refuses to start without POSTGRES_PASSWORD
         run: |
           cp .env.example .env
