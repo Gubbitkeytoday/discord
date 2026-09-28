@@ -622,6 +622,10 @@ export default function VoiceRoom({
         </div>
       </div>
 
+      {/* Everything between the header and the controls scrolls as one: the
+          notices and the "Start the stage" card move with the tiles instead
+          of squeezing them under the audience strip. */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain flex flex-col" data-testid="voice-body">
       {(socketDown || offline) && (
         <div
           role="status"
@@ -722,7 +726,7 @@ export default function VoiceRoom({
       {/* Stage moderators arrive muted and go live on purpose. */}
       {showStageStart && (
         <section
-          className="mx-4 mt-3 p-4 rounded-lg border border-d-brand/50 bg-d-brand/10 flex flex-col gap-3"
+          className="mx-4 mt-3 p-3 sm:p-4 rounded-lg border border-d-brand/50 bg-d-brand/10 flex flex-col gap-2.5 shrink-0"
           aria-labelledby="stage-start-title"
           data-testid="stage-start"
         >
@@ -730,7 +734,7 @@ export default function VoiceRoom({
             <Radio className="w-5 h-5 text-d-brand shrink-0 mt-0.5" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <h3 id="stage-start-title" className="font-bold text-d-strong">{tr('stage.startTitle', 'Start the stage')}</h3>
-              <p className="text-sm text-d-text2">{tr('stage.startHint', 'You are on stage but muted. Nobody hears you until you start.')}</p>
+              <p className="text-sm text-d-text2 max-sm:sr-only">{tr('stage.startHint', 'You are on stage but muted. Nobody hears you until you start.')}</p>
             </div>
             <button
               type="button"
@@ -741,8 +745,9 @@ export default function VoiceRoom({
               <X className="w-4 h-4" />
             </button>
           </div>
+          <div className="flex flex-wrap items-end gap-2">
           {canManageChannel && (
-            <label className="flex flex-col gap-1 text-xs font-semibold text-d-text2">
+            <label className="flex flex-col gap-1 text-xs font-semibold text-d-text2 flex-[1_1_16rem] min-w-0">
               {tr('stage.topicLabel', 'Topic')}
               <input
                 type="text"
@@ -758,7 +763,7 @@ export default function VoiceRoom({
             <button
               type="button"
               onClick={startStage}
-              className="min-h-11 px-4 rounded-md bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold inline-flex items-center gap-2"
+              className="min-h-11 px-3 sm:px-4 rounded-md bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold inline-flex items-center gap-2"
             >
               <Mic className="w-4 h-4" aria-hidden="true" />
               {tr('stage.start', 'Start stage')}
@@ -766,10 +771,11 @@ export default function VoiceRoom({
             <button
               type="button"
               onClick={() => { setStageStartDismissed(true); setSpeaker(selfId, false); }}
-              className="min-h-11 px-4 rounded-md bg-d-control2 hover:bg-d-control text-d-strong text-sm font-semibold"
+              className="min-h-11 px-3 sm:px-4 rounded-md bg-d-control2 hover:bg-d-control text-d-strong text-sm font-semibold"
             >
               {tr('stage.joinAudience', 'Listen from the audience')}
             </button>
+          </div>
           </div>
         </section>
       )}
@@ -812,7 +818,7 @@ export default function VoiceRoom({
 
       {/* Participant tiles. Smaller on phones and in short (landscape) windows,
           so two people fit above the controls without scrolling. */}
-      <div className="flex-1 min-h-0 p-3 sm:p-6 grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 overflow-y-auto content-start">
+      <div className={`flex-[1_0_auto] ${showStageStart ? 'p-3 sm:p-4' : 'p-3 sm:p-6'} grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 content-start`}>
         {participants.length === 0 ? (
           <div className="col-span-full flex flex-col items-center justify-center text-d-text3 py-12">
             <Volume2 className="w-16 h-16 mb-4 text-d-active animate-pulse" aria-hidden="true" />
@@ -835,7 +841,7 @@ export default function VoiceRoom({
                 key={p.userId}
                 data-testid="voice-tile"
                 data-speaking={speaking ? 'true' : 'false'}
-                className={`relative bg-d-surface rounded-2xl h-32 sm:h-44 lg:h-56 [@media(max-height:520px)]:h-24 flex flex-col items-center justify-center p-3 transition-all duration-150 overflow-hidden group ${
+                className={`relative bg-d-surface rounded-2xl ${showStageStart ? 'h-24 sm:h-32 lg:h-40' : 'h-32 sm:h-44 lg:h-56'} [@media(max-height:520px)]:h-24 flex flex-col items-center justify-center p-3 transition-all duration-150 overflow-hidden group ${
                   speaking ? 'ring-4 ring-d-online' : 'border border-d-divider'
                 }`}
               >
@@ -1045,7 +1051,7 @@ export default function VoiceRoom({
 
       {/* Stage audience: compact strip, hands first. */}
       {isStage && (
-        <div className="px-4 sm:px-6 py-3 border-t border-d-edge bg-d-surface/40 shrink-0 max-h-40 overflow-y-auto">
+        <div className="px-4 sm:px-6 py-3 border-t border-d-edge bg-d-surface/40 shrink-0">
           <div className="flex items-center justify-between mb-2 gap-2">
             <h3 className="text-xs font-bold uppercase tracking-wide text-d-text2">
               {t('stage.audience', { count: audience.length })}
@@ -1096,6 +1102,8 @@ export default function VoiceRoom({
           )}
         </div>
       )}
+
+      </div>
 
       {/* Controls. They sit below the tiles (never over them), wrap into
           centred rows on narrow screens, and every button carries a word as

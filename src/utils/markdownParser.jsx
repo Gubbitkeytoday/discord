@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { t } from '../i18n/index.jsx';
 import { proxiedImageUrl } from './media';
+import { INLINE_SOURCE, CODE_BLOCK_SOURCE } from './markdownTokens.js';
 
 /**
  * Discord-flavoured markdown renderer.
@@ -23,10 +24,12 @@ function SpoilerText({ children }) {
   return (
     <span
       onClick={(e) => { e.stopPropagation(); setRevealed(true); }}
-      className={`px-1 py-0.5 rounded transition-all ${
+      // Theme tokens with contrast against the chat surface in every theme
+      // (a light-theme cover used to be white on white).
+      className={`px-1 py-0.5 rounded transition-colors ${
         revealed
-          ? 'bg-d-surface text-d-text'
-          : 'bg-d-sunken text-transparent select-none cursor-pointer hover:bg-d-edge'
+          ? 'bg-d-spoilershown text-d-text'
+          : 'bg-d-spoiler text-transparent select-none cursor-pointer hover:bg-d-spoilerhover'
       }`}
       title={revealed ? undefined : t('chat.clickToReveal')}
     >
@@ -68,39 +71,9 @@ function renderTimestamp(unix, style = 'f') {
   return date.toLocaleString('th-TH', options);
 }
 
-// Order matters: longer delimiters must be tried before their prefixes, so
-// ``` before `, ** before *, and __ before _.
-//
-// Kept as a *source string*, not a shared RegExp: renderInline recurses into
-// itself for nested markup like **bold *italic***, and a module-level /g regex
-// carries `lastIndex` between those nested calls — which corrupts the outer
-// scan and can spin forever.
-const INLINE_SOURCE = [
-  // A backslash escapes one markdown character, as in Discord: `\*not italic\*`,
-  // and what /shrug sends (¯\\\_(ツ)\_/¯) so its arms are not italics.
-  '\\\\[\\\\*_~`|<>#:\\[\\]()-]',
-  '\\|\\|[\\s\\S]+?\\|\\|',                 // spoiler
-  '`[^`\\n]+`',                             // inline code
-  // Lazy [\s\S]+? rather than [^*]+ so a nested span survives:
-  // **bold *italic* more** must match the whole bold run, then recurse.
-  '\\*\\*\\*[\\s\\S]+?\\*\\*\\*',           // bold italic
-  '\\*\\*[\\s\\S]+?\\*\\*',                 // bold
-  '__[\\s\\S]+?__',                         // underline
-  '~~[\\s\\S]+?~~',                         // strikethrough
-  // Emphasis needs a non-space next to each delimiter, otherwise arithmetic
-  // like "2 * 3 * 4" turns italic.
-  '\\*(?!\\*)(?!\\s)[^\\n]+?(?<!\\s)\\*(?!\\*)',
-  // Underscore emphasis only at word boundaries, so snake_case_names survive.
-  '(?<![\\p{L}\\p{M}\\p{N}_])_(?!_)(?!\\s)[^\\n]+?(?<!\\s)_(?!_)(?![\\p{L}\\p{M}\\p{N}_])',
-  '<a?:\\w+:\\d+>',                         // custom emoji
-  '<@!?[\\w-]+>',                           // user mention
-  '<@&[\\w-]+>',                            // role mention
-  '<#[\\w-]+>',                             // channel mention
-  '<t:\\d+(?::[tTdDfFR])?>',                // timestamp
-  '\\[[^\\]\\n]+\\]\\((?:https?:\\/\\/|\\/)[^)\\s]+\\)', // markdown link
-  'https?:\\/\\/[^\\s<]+',                  // bare URL
-  '@(?:everyone|here)\\b'                   // mass mention
-].join('|');
+// The token grammar lives in ./markdownTokens.js, shared with the plain-text
+// summariser (./plainText.js) so previews and messages agree on what is markup.
+
 
 function renderInline(text, keyPrefix, context) {
   const nodes = [];
@@ -336,7 +309,6 @@ function renderBlock(block, keyPrefix, context) {
   return out;
 }
 
-const CODE_BLOCK_SOURCE = '```(?:([\\w+-]+)\\n)?([\\s\\S]*?)```';
 
 /**
  * @param content raw message text

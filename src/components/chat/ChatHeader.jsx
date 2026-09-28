@@ -71,7 +71,12 @@ const ChatHeader = forwardRef(function ChatHeader({
     fn(rect);
   };
 
+  // On a phone the conversation's name comes first: video and "add to group"
+  // move into the ⋯ menu (voice call stays inline), so "Kira ~ 🦊" is not
+  // cut to "Kira…" by a row of icons.
   const overflow = [
+    !medium && onStartCall && { icon: Video, label: t('call.startVideo'), action: () => onStartCall(true) },
+    !medium && onAddGroupRecipients && { icon: UserPlus, label: t('dm.addToGroup'), action: onAddGroupRecipients },
     !compact && { icon: Search, label: t('chat.searchMessages'), action: () => onOpenMobileSearch?.() },
     !medium && { icon: Pin, label: pinsCount ? `${t('chat.pinnedMessages')} (${pinsCount})` : t('chat.pinnedMessages'), action: onTogglePins },
     !medium && !isDM && onToggleMemberList && { icon: Users, label: t('chat.memberList'), checked: showMemberList, action: onToggleMemberList },
@@ -145,9 +150,11 @@ const ChatHeader = forwardRef(function ChatHeader({
             <button type="button" onClick={() => onStartCall(false)} className={BTN} title={t('call.start')} aria-label={t('call.start')}>
               <Phone className="w-5 h-5" aria-hidden="true" />
             </button>
-            <button type="button" onClick={() => onStartCall(true)} className={BTN} title={t('call.startVideo')} aria-label={t('call.startVideo')}>
-              <Video className="w-5 h-5" aria-hidden="true" />
-            </button>
+            {medium && (
+              <button type="button" onClick={() => onStartCall(true)} className={BTN} title={t('call.startVideo')} aria-label={t('call.startVideo')}>
+                <Video className="w-5 h-5" aria-hidden="true" />
+              </button>
+            )}
           </>
         )}
         {channel.type === 'announcement' && onFollowChannel && (
@@ -168,7 +175,7 @@ const ChatHeader = forwardRef(function ChatHeader({
             <Archive className="w-5 h-5" aria-hidden="true" />
           </button>
         )}
-        {onAddGroupRecipients && (
+        {medium && onAddGroupRecipients && (
           <button type="button" onClick={onAddGroupRecipients} className={BTN} title={t('dm.addToGroup')} aria-label={t('dm.addToGroup')}>
             <UserPlus className="w-5 h-5" aria-hidden="true" />
           </button>

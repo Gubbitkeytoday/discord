@@ -91,7 +91,9 @@ export default function ProfileCard({
         )}
       </div>
 
-      <div className="relative z-[1] px-4 pb-4">
+      {/* Above the effect layer (z-[2]): lanterns, petals and sparkles play
+          over the banner and the card's edges, never across the name. */}
+      <div className="relative z-[3] px-4 pb-4">
         <div className={`${size.lift} flex items-end justify-between gap-2`}>
           <div className="flex min-w-0 items-start gap-2">
             <span className="rounded-full" style={{ padding: 5, background: ringColor }}>

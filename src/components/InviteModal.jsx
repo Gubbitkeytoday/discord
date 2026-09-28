@@ -81,8 +81,13 @@ export default function InviteModal({ server, channelId = null, hideLink = false
                 id="invite-link"
                 readOnly
                 value={busy && !invite ? t('common.loading') : hideLink ? '•'.repeat(24) : link}
-                onFocus={(e) => { e.target.select(); e.target.scrollLeft = e.target.scrollWidth; }}
-                ref={(el) => { if (el) el.scrollLeft = el.scrollWidth; }}
+                onFocus={(e) => {
+                  // Select it all for copying, but keep the start in view:
+                  // a backwards selection leaves the caret (and the scroll) at 0.
+                  const el = e.target;
+                  el.setSelectionRange(0, el.value.length, 'backward');
+                  el.scrollLeft = 0;
+                }}
                 className="flex-1 min-w-0 bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge font-mono"
               />
               <button
