@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Hash, Loader2, Search, Send, Users, X } from 'lucide-react';
 import { useDialog } from './settings/primitives';
 import { t, useLocaleCode } from '../i18n/index.jsx';
+import { markdownToPlain } from '../utils/plainText.js';
 
 /**
  * Forward a message to another channel or conversation, the way Discord's
@@ -105,7 +106,11 @@ export default function ForwardMessageModal({
 
         <div className="p-3 border-t border-d-divider bg-d-surface/40">
           <div className="text-[11px] text-d-text3 mb-2 line-clamp-2 whitespace-pre-wrap break-words">
-            {message.content || t('chat.attachmentCount', { count: message.attachments?.length ?? 0 })}
+            {(message.content && markdownToPlain(message.content, {
+              resolveChannel: (id) => channels.find((c) => c.id === id)?.name ?? null,
+              unknownUser: t('dm.unknownUser'), unknownChannel: t('search.unknownChannel'),
+              spoiler: `[${t('chat.spoiler')}]`, singleLine: false
+            })) || t('chat.attachmentCount', { count: message.attachments?.length ?? 0 })}
           </div>
           <p className={`text-[11px] mb-2 ${atLimit ? 'text-d-text2 font-semibold' : 'text-d-text3'}`} aria-live="polite">
             {t('integration.forwardLimit', { count: maxDestinations })}

@@ -6,6 +6,7 @@ import { formatFullTimestamp } from '../utils/messageGrouping';
 import { t } from '../i18n/index.jsx';
 import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import { proxiedImageUrl } from '../utils/media';
+import { markdownToPlain } from '../utils/plainText.js';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const TYPE_ICONS = { announcement: Megaphone, thread: MessagesSquare, forum: MessagesSquare, voice: Volume2 };
@@ -40,7 +41,7 @@ export function highlight(text, terms) {
  * can be narrowed further without re-running the query.
  */
 export default function SearchResultsPanel({
-  query, results = [], channels = [], onJumpToMessage, onClose, hasMore = false, loadingMore = false, onLoadMore
+  query, results = [], channels = [], resolvers = null, onJumpToMessage, onClose, hasMore = false, loadingMore = false, onLoadMore
 }) {
   const [channelFilter, setChannelFilter] = useState('');
   const [authorFilter, setAuthorFilter] = useState('');
@@ -152,7 +153,14 @@ export default function SearchResultsPanel({
                   {message.display_name || message.username}
                 </span>
                 <p className="text-xs text-d-text2 line-clamp-3 break-words whitespace-pre-wrap">
-                  {highlight(message.content, terms)}
+                  {highlight(markdownToPlain(message.content, {
+                    ...resolvers,
+                    resolveChannel: (id) => resolvers?.resolveChannel?.(id) ?? channels.find((c) => c.id === id)?.name ?? null,
+                    unknownUser: t('dm.unknownUser'),
+                    unknownChannel: t('search.unknownChannel'),
+                    spoiler: `[${t('chat.spoiler')}]`,
+                    singleLine: false
+                  }), terms)}
                 </p>
                 {message.attachments?.length > 0 && (
                   <span className="inline-flex items-center gap-1 text-[11px] text-d-text3 mt-1">

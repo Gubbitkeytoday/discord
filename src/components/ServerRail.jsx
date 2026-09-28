@@ -374,7 +374,13 @@ export default function ServerRail({
                 <RailButton
                   {...itemProps(`folder:${folder.id}`)}
                   onClick={() => toggleFolder(folder.id)}
-                  onContextMenu={(e) => { e.preventDefault(); openFolderSettings(folder.id, e.clientX, e.clientY); }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    // Beside the folder (like the keyboard path below), so the
+                    // popover never covers the folder it is editing.
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    openFolderSettings(folder.id, rect.right + 8, rect.top);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
                       e.preventDefault();

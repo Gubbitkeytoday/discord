@@ -18,7 +18,7 @@ export default function ConnectionBanner({ status, onRetry }) {
       aria-live="polite"
       data-testid="connection-banner"
       data-status={status}
-      className={`fixed top-0 inset-x-0 z-[90] flex items-center justify-center gap-2 px-3 py-1 text-xs font-medium shadow ${
+      className={`fixed top-0 inset-x-0 z-[90] h-6 flex items-center justify-center gap-2 px-3 text-xs font-medium shadow ${
         quiet ? 'bg-d-surface text-d-text2 border-b border-d-edge' : 'bg-d-danger text-white'
       }`}
     >

@@ -177,7 +177,7 @@ export default function EmojiPicker({ customEmojis = [], externalGroups = [], on
 
       {/* Category strip */}
       {!searchResults && (
-        <div className="flex items-center gap-0.5 px-2 py-1.5 border-b border-d-edge overflow-x-auto" role="tablist" aria-label={t('emoji.categories')}>
+        <div className="flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-d-edge" role="tablist" aria-label={t('emoji.categories')}>
           {categories.map((c) => (
             <button
               key={c.key}

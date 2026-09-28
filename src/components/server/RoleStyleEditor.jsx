@@ -4,7 +4,7 @@ import { t } from '../../i18n/index.jsx';
 import { upload as httpUpload, api as httpApi } from '../../api';
 import EmojiPicker from '../EmojiPicker';
 import { ToggleRow } from '../ui';
-import { updatePreferences } from '../../hooks/useUserSettings';
+import { updatePreferences, getPreferences } from '../../hooks/useUserSettings';
 import { ROLE_COLOR_PRESETS } from '../../utils/permissionCatalog';
 import RoleIcon, { useShowRoleIcons } from './RoleIcon.jsx';
 import { roleNameStyle, worstStopContrast, styleOf, DEFAULT_ROLE_COLOR } from './roleStyle';
@@ -74,6 +74,7 @@ export default function RoleStyleEditor({ draft, setDraft, serverId, onIconSaved
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
+  const previewRef = useRef(null);
   const showIcons = useShowRoleIcons();
   const angleId = useId();
 
@@ -82,7 +83,17 @@ export default function RoleStyleEditor({ draft, setDraft, serverId, onIconSaved
     [draft]
   );
 
+  // Picking a style is about how the name looks: bring the preview into view.
+  // The settings page keeps a bottom scroll padding the size of the unsaved-
+  // changes bar, so "nearest" lands the preview above the bar, not under it.
+  const revealPreview = () => requestAnimationFrame(() => {
+    const reduce = Boolean(getPreferences().accessibility?.reducedMotion)
+      || (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    previewRef.current?.scrollIntoView?.({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+  });
+
   const setStyle = (next) => {
+    revealPreview();
     if (next === 'solid') setDraft({ ...draft, style: 'solid', color_secondary: null });
     else setDraft({
       ...draft,
@@ -255,7 +266,7 @@ export default function RoleStyleEditor({ draft, setDraft, serverId, onIconSaved
         <p className="mt-1.5 text-[11px] text-d-text2">{t('srv.roleIconHint')}</p>
       </div>
 
-      <div>
+      <div ref={previewRef} className="scroll-mb-4">
         <span className={label}>{t('srv.preview')}</span>
         <div className="grid sm:grid-cols-2 gap-2">
           {PREVIEW_SURFACES.map((surface) => {

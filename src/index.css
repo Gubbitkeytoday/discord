@@ -317,6 +317,12 @@
   --text-color-d-idle:   var(--color-text-warning);
   --text-color-d-mint:   var(--color-text-mint);
 
+  /* Spoiler cover: mixed from the text colour so it stands out from the chat
+     surface in every theme (dark, light, ash, onyx, custom). */
+  --color-d-spoiler:      color-mix(in srgb, var(--color-text-default) 58%, var(--color-bg-chat));
+  --color-d-spoilerhover: color-mix(in srgb, var(--color-text-default) 68%, var(--color-bg-chat));
+  --color-d-spoilershown: color-mix(in srgb, var(--color-text-default) 12%, var(--color-bg-chat));
+
   /* Keyboard focus indicator: ≥3:1 against every surface (2.4.11/1.4.11).
      Brand blurple itself is only 2.6–2.7:1 on the dark surfaces. */
   --color-d-focus:       var(--color-focus-ring);
@@ -1097,3 +1103,22 @@ input[type="range"] { height: 1.25rem; }
    corner setting re-points it here (rounded-md/-lg/… follow --radius-*). */
 :root[data-radius="sharp"] .rounded { border-radius: 0.125rem; }
 :root[data-radius="round"] .rounded { border-radius: 0.375rem; }
+
+/* Admin console tables become one card per row on phones: every value keeps
+   its column name (data-label), nothing is cut off on the right, and the
+   explicit ARIA roles on the markup keep the table semantics for screen
+   readers even though the layout is no longer a CSS table. */
+@media (max-width: 639px) {
+  .admin-cards, .admin-cards tbody, .admin-cards tr, .admin-cards td { display: block; }
+  .admin-cards thead {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .admin-cards tr { padding: 0.5rem 0; }
+  .admin-cards td { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+  .admin-cards td[data-label]::before {
+    content: attr(data-label) " · ";
+    font-weight: 600;
+    color: var(--color-d-text3);
+  }
+}

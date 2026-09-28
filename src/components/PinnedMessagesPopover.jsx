@@ -9,7 +9,7 @@ import { proxiedImageUrl } from '../utils/media';
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
 /** Discord's pinned-messages popover, anchored under the pin icon. */
-export default function PinnedMessagesPopover({ messages = [], canUnpin = true, onClose, onJump, onUnpin }) {
+export default function PinnedMessagesPopover({ messages = [], renderText = null, canUnpin = true, onClose, onJump, onUnpin }) {
   useEscapeLayer(onClose);
   const ref = useRef(null);
   // Focus moves into the popover when it opens and back when it closes.
@@ -73,9 +73,10 @@ export default function PinnedMessagesPopover({ messages = [], canUnpin = true, 
                       {formatFullTimestamp(msg.created_at)}
                     </span>
                   </div>
-                  <p className="text-xs text-d-text mt-0.5 break-words whitespace-pre-wrap line-clamp-3">
-                    {msg.content}
-                  </p>
+                  {/* Rendered like the message itself (bold, mentions, spoilers). */}
+                  <div className="text-xs text-d-text mt-0.5 break-words whitespace-pre-wrap line-clamp-3">
+                    {renderText ? renderText(msg.content) : msg.content}
+                  </div>
                   {msg.attachments?.length > 0 && (
                     <span className="text-[11px] text-d-text3 mt-1 inline-block">
                       📎 {t('chat.attachmentCount', { count: msg.attachments.length })}

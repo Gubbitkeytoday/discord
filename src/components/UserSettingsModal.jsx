@@ -326,8 +326,8 @@ export default function UserSettingsModal({
             >
               <X className="h-4 w-4" strokeWidth={2.5} />
             </span>
-            <span className="text-xs font-bold text-d-text3 transition-colors group-hover:text-d-strong">
-              ESC
+            <span className="whitespace-nowrap text-xs font-bold text-d-text3 transition-colors group-hover:text-d-strong">
+              {t('settings.escHint')}
             </span>
           </button>
         </div>

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { subscribeAnnouncements } from '../../chat/announcer';
+import { joinSentences } from '../../utils/plainText.js';
 
 /**
  * The app's single pair of live regions, mounted once and never unmounted
@@ -19,7 +20,7 @@ export default function LiveAnnouncer() {
       queue.current[kind] = [];
       timers.current[kind] = null;
       if (!items.length) return;
-      const text = items.join('. ');
+      const text = joinSentences(items);
       const set = kind === 'assertive' ? setAssertive : setPolite;
       set('');
       // A tick of empty content makes screen readers treat the next value as
