@@ -13,6 +13,14 @@ Discord (Discord bots and clients will not work against it). Read
 [Status and limitations](#status-and-limitations) before you deploy it for real
 people.
 
+**Screenshots:** every screen on desktop and phone, dark and light, plus Thai —
+see [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md) · ดูภาพหน้าจอทุกหน้าได้ที่ [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md)
+
+<p>
+<a href="docs/SCREENSHOTS.md"><img src="docs/screenshots/20-server-text-chat-desktop-dark.webp" width="560" alt="Server chat on desktop"></a>
+<a href="docs/SCREENSHOTS.md"><img src="docs/screenshots/20-server-text-chat-phone-dark.webp" width="150" alt="Server chat on a phone"></a>
+</p>
+
 ## สรุปภาษาไทย
 
 - **คืออะไร:** แชตแบบ Discord ที่ติดตั้งเองได้ มีห้องข้อความ, thread, forum, DM, โทรใน DM, voice/video, stage, role/สิทธิ์, AutoMod, audit log และ bot API แบบง่าย UI มี 32 ภาษา (รวมไทย) ค้นหาข้อความภาษาไทยได้ (trigram)
