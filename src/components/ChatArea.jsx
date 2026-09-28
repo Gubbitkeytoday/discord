@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Hash, Lock, Megaphone, Volume2, MessagesSquare, PlusCircle, ShieldOff, Flag, X } from 'lucide-react';
 import { parseDiscordMarkdown } from '../utils/markdownParser';
+import { markdownToPlain } from '../utils/plainText.js';
 import { defaultAvatar } from '../utils/avatar';
 import { formatTypingText } from '../utils/messageGrouping';
 import { humanizeTokens, resolveComposerTokens } from '../utils/mentions';
@@ -148,6 +149,14 @@ export default function ChatArea(props) {
     return entry.node;
   }, [markdownContext]);
   const renderText = useCallback((text) => parseDiscordMarkdown(text, markdownContext), [markdownContext]);
+  // One-line previews (reply spines): the message's words, no markup or raw ids.
+  const previewText = useCallback((text) => markdownToPlain(text, {
+    ...markdownContext,
+    resolveRole: (id) => markdownContext.resolveRole(id)?.name ?? null,
+    unknownUser: t('dm.unknownUser'),
+    unknownChannel: t('search.unknownChannel'),
+    spoiler: `[${t('chat.spoiler')}]`
+  }), [markdownContext]);
 
   // --- stable actions -------------------------------------------------------------
 
@@ -287,13 +296,14 @@ export default function ChatArea(props) {
     myRoleIds,
     renderMarkdown,
     renderText,
+    previewText,
     nameFor,
     safetyHold,
     canShowEditHistory: Boolean(onShowEditHistory),
     longPressMs: 450
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [actions, currentUser?.id, currentUser?.display_name, chatPrefs, a11yPrefs, canManageMessages, canSend, isArchived,
-    canPin, canThread, blockedIds, myRoleKey, renderMarkdown, renderText, nameFor, safetyHold, onShowEditHistory ? 1 : 0]);
+    canPin, canThread, blockedIds, myRoleKey, renderMarkdown, renderText, previewText, nameFor, safetyHold, onShowEditHistory ? 1 : 0]);
 
   // --- signals from app-wide shortcuts --------------------------------------------------
 
@@ -376,6 +386,11 @@ export default function ChatArea(props) {
   const introAvatar = channel?.avatar_url || defaultAvatar(channel?.recipients?.[0]?.id ?? channel?.id);
   const introTitle = isDM ? channel?.display_name : channel?.name;
   const introType = channel?.type;
+  // Threads and forum posts are named by their parent, not a # channel.
+  const introParent = introType === 'thread' && channel?.parent_id
+    ? channels.find((c) => c.id === channel.parent_id) ?? null : null;
+  const introParentType = introParent?.type ?? null;
+  const introParentName = introParent?.name ?? '';
   const intro = useMemo(() => {
     if (!introType) return null;
     const IntroIcon = INTRO_ICONS[introType] ?? Hash;
@@ -388,16 +403,25 @@ export default function ChatArea(props) {
             <IntroIcon className="w-10 h-10 text-d-strong" />
           </div>
         )}
+        {/* Distinct copy per kind of conversation: a group is not "@Design
+            squad", and a thread or forum post is not a "#channel". */}
         <h2 className="text-3xl max-sm:text-2xl font-extrabold text-d-strong mb-1 break-words">
-          {isDM ? t('chat.welcomeToDm', { name: introTitle }) : t('chat.welcomeToChannel', { channel: introTitle })}
+          {introType === 'group_dm' ? t('chat.welcomeToGroupDm', { name: introTitle })
+            : isDM ? t('chat.welcomeToDm', { name: introTitle })
+            : introType === 'thread' ? introTitle
+            : t('chat.welcomeToChannel', { channel: introTitle })}
         </h2>
         <p className="text-sm text-d-text2">
-          {isDM ? t('chat.dmStart', { name: introTitle }) : t('chat.channelStartSimple', { channel: introTitle })}
+          {introType === 'group_dm' ? t('chat.groupDmStart', { name: introTitle })
+            : isDM ? t('chat.dmStart', { name: introTitle })
+            : introType === 'thread' && introParentType === 'forum' ? t('chat.forumPostStart', { forum: introParentName })
+            : introType === 'thread' ? t('chat.threadStart', { channel: introParentName })
+            : t('chat.channelStartSimple', { channel: introTitle })}
         </p>
         <div className="w-full h-px bg-d-divider mt-4" />
       </div>
     );
-  }, [isDM, introAvatar, introTitle, introType]);
+  }, [isDM, introAvatar, introTitle, introType, introParentType, introParentName]);
 
   if (!channel) {
     return (
@@ -612,6 +636,7 @@ export default function ChatArea(props) {
       {showPins && (
         <PinnedMessagesPopover
           messages={pins}
+          renderText={renderText}
           canUnpin={canPin}
           onClose={() => setShowPins(false)}
           onJump={(msg) => { setShowPins(false); actions.jumpTo(msg.id); }}

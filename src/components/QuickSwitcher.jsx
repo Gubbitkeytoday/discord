@@ -7,6 +7,7 @@ import { proxiedImageUrl } from '../utils/media';
 import { MentionBadge } from './ui';
 import { recordRecentDestination, getRecentDestinations } from './server/recentDestinations';
 import { channelEmojiOf } from './server/ChannelEmojiIcon.jsx';
+import { rankSwitcherEntries } from '../utils/switcherRank.js';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 const CHANNEL_ICONS = { voice: Volume2, stage: Volume2, announcement: Megaphone, forum: MessagesSquare, thread: MessagesSquare };
@@ -57,7 +58,7 @@ export default function QuickSwitcher({
     }
     return [
       ...channels
-        .filter((c) => c.type !== 'category' && c.id !== activeChannelId)
+        .filter((c) => c.type !== 'category')
         .map((c) => ({
           key: `c-${c.id}`, kind: c.type === 'voice' || c.type === 'stage' ? 'voice' : 'text', id: c.id,
           serverId: c.server_id,
@@ -68,7 +69,7 @@ export default function QuickSwitcher({
           unread: unreadScore(c.id),
           mentions: mentionsOf(c.id)
         })),
-      ...dms.filter((d) => d.id !== activeChannelId).map((d) => ({
+      ...dms.map((d) => ({
         key: `d-${d.id}`, kind: 'dm', id: d.id,
         label: d.display_name, hint: t('dm.directMessages'),
         avatar: d.avatar_url, icon: AtSign, unread: unreadScore(d.id), mentions: mentionsOf(d.id)
@@ -97,27 +98,16 @@ export default function QuickSwitcher({
         .slice(0, 5);
       const seen = new Set(recent.map((e) => e.key));
       const unread = pool
-        .filter((e) => e.unread > 0 && !seen.has(e.key))
+        .filter((e) => e.unread > 0 && !seen.has(e.key) && e.id !== activeChannelId)
         .sort((a, b) => b.unread - a.unread || b.mentions - a.mentions)
         .slice(0, 8);
       const out = [];
       if (recent.length) out.push({ key: 'recent', title: t('srv.switcherRecent'), items: recent });
       if (unread.length) out.push({ key: 'unread', title: t('srv.switcherUnread'), items: unread });
-      if (!out.length) out.push({ key: 'suggested', title: t('srv.switcherSuggested'), items: pool.slice(0, 12) });
+      if (!out.length) out.push({ key: 'suggested', title: t('srv.switcherSuggested'), items: pool.filter((e) => e.id !== activeChannelId).slice(0, 12) });
       return out;
     }
-    const items = pool
-      .map((entry) => {
-        const label = entry.label?.toLowerCase() ?? '';
-        if (label.startsWith(q)) return { entry, score: 0 };
-        if (label.split(/[\s_-]+/).some((word) => word.startsWith(q))) return { entry, score: 1 };
-        if (label.includes(q)) return { entry, score: 2 };
-        return null;
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.score - b.score || b.entry.unread - a.entry.unread)
-      .slice(0, 20)
-      .map((r) => r.entry);
+    const items = rankSwitcherEntries(pool, q, { activeId: activeChannelId });
     return items.length ? [{ key: 'results', title: t('switcher.results'), items }] : [];
   }, [entries, query, activeChannelId, locale]); // eslint-disable-line react-hooks/exhaustive-deps
 

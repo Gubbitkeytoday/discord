@@ -270,7 +270,7 @@ function MessageRow({
                     className="truncate max-w-xs text-d-text2 hover:underline text-left"
                     aria-label={t('chat.jumpToReplied', { name: msg.replyToMsg.display_name })}
                   >
-                    {msg.replyToMsg.content || t('chat.clickToSeeAttachment')}
+                    {(msg.replyToMsg.content && ctx.previewText ? ctx.previewText(msg.replyToMsg.content) : msg.replyToMsg.content) || t('chat.clickToSeeAttachment')}
                   </button>
                 </>
               ) : (

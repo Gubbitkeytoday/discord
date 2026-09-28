@@ -93,10 +93,15 @@ export default function HomeDirectMessages({
     [friends]
   );
 
+  // Every pending request, both ways: the list under "Pending — N" and the
+  // phone selector's "Pending (N)" count the same rows. (The red badge on the
+  // desktop tab is a different thing: requests waiting for *you*.)
+  const pendingAll = useMemo(() => friends.filter((f) => f.friend_status === 'pending'), [friends]);
+
   const visibleFriends = useMemo(() => {
     const base =
       activeTab === 'online' ? acceptedFriends.filter((f) => f.status && f.status !== 'offline' && f.status !== 'invisible')
-      : activeTab === 'pending' ? friends.filter((f) => f.friend_status === 'pending')
+      : activeTab === 'pending' ? pendingAll
       : activeTab === 'blocked' ? blocked
       : acceptedFriends;
 
@@ -448,7 +453,7 @@ export default function HomeDirectMessages({
               >
                 {tabs().map((tab) => (
                   <option key={tab.key} value={tab.key}>
-                    {tab.label}{tab.key === 'pending' && pendingIncoming.length > 0 ? ` (${pendingIncoming.length})` : ''}
+                    {tab.label}{tab.key === 'pending' && pendingAll.length > 0 ? ` (${pendingAll.length})` : ''}
                   </option>
                 ))}
                 <option value="add">{t('dm.addFriend')}</option>

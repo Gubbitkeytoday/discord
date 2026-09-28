@@ -18,6 +18,7 @@ import SafetyTab from './admin/SafetyTab';
 import ModerationDialog from './admin/ModerationDialog';
 import TypeToConfirmDialog from './admin/TypeToConfirmDialog';
 import { t, localeTag, useLocaleCode, formatDate, formatRelative } from '../i18n/index.jsx';
+import { auditActionLabel, formatAuditChange } from '../utils/auditFormat.js';
 import { api as httpApi, upload as httpUpload } from '../api';
 import { DEFAULT_AVATAR, serverIconOf, serverInitials, defaultAvatar } from '../utils/avatar';
 import {
@@ -89,24 +90,8 @@ const tabGroups = () => [
   }
 ];
 
-const auditLabels = () => ({
-  SERVER_CREATE: t('audit.SERVER_CREATE'), SERVER_UPDATE: t('audit.SERVER_UPDATE'),
-  SERVER_OWNER_TRANSFER: t('audit.SERVER_OWNER_TRANSFER'),
-  CHANNEL_CREATE: t('adm.audit.CHANNEL_CREATE'), CHANNEL_UPDATE: t('audit.CHANNEL_UPDATE'), CHANNEL_DELETE: t('audit.CHANNEL_DELETE'),
-  ROLE_CREATE: t('audit.ROLE_CREATE'), ROLE_UPDATE: t('audit.ROLE_UPDATE'), ROLE_DELETE: t('audit.ROLE_DELETE'),
-  MEMBER_ROLE_UPDATE: t('audit.MEMBER_ROLE_UPDATE'), MEMBER_KICK: t('audit.MEMBER_KICK'),
-  MEMBER_BAN_ADD: t('audit.MEMBER_BAN_ADD'), MEMBER_BAN_REMOVE: t('bans.unban'),
-  MEMBER_TIMEOUT: t('audit.MEMBER_TIMEOUT'), MEMBER_UPDATE: t('audit.MEMBER_UPDATE'),
-  EMOJI_CREATE: t('audit.EMOJI_CREATE'), EMOJI_DELETE: t('audit.EMOJI_DELETE'), INVITE_DELETE: t('invites.revoke'),
-  LOCKDOWN_START: t('adm.audit.LOCKDOWN_START'), LOCKDOWN_LIFT: t('adm.audit.LOCKDOWN_LIFT'),
-  AUTOMOD_BLOCK: t('adm.audit.AUTOMOD_BLOCK'), AUTOMOD_ALERT: t('adm.audit.AUTOMOD_ALERT'),
-  RAID_DETECTED: t('adm.audit.RAID_DETECTED'),
-  CHANNEL_OVERWRITE_UPDATE: t('adm.audit.CHANNEL_OVERWRITE_UPDATE'),
-  CHANNEL_OVERWRITE_DELETE: t('adm.audit.CHANNEL_OVERWRITE_DELETE'),
-  MEMBER_MOVE: t('adm.audit.MEMBER_MOVE'), MEMBER_DISCONNECT: t('adm.audit.MEMBER_DISCONNECT'),
-  TEMPLATE_CREATE: t('adm.audit.TEMPLATE_CREATE'),
-  STICKER_CREATE: t('adm.audit.STICKER_CREATE'), STICKER_DELETE: t('adm.audit.STICKER_DELETE')
-});
+// Action labels and change wording: src/utils/auditFormat.js (every action type).
+
 
 /** Audit filter groups, Discord-style ("All actions", "Members", …). */
 const AUDIT_FILTERS = () => [
@@ -279,7 +264,9 @@ export default function ServerSettingsModal({
       {/* Content */}
       {/* No top padding on the scroller itself: sticky headers inside a tab
           (role name, permission target) must stick to its very top edge. */}
-      <div className={`flex-1 overflow-y-auto px-10 max-md:px-4 pb-14 max-md:pb-6 max-w-4xl min-w-0 ${mobilePage === 'nav' ? 'max-md:hidden' : ''}`}>
+      {/* scroll-pb: focus and scrollIntoView keep things above the sticky
+          unsaved-changes bar instead of under it. */}
+      <div className={`flex-1 overflow-y-auto scroll-pb-28 px-10 max-md:px-4 pb-14 max-md:pb-6 max-w-4xl min-w-0 ${mobilePage === 'nav' ? 'max-md:hidden' : ''}`}>
         <div className="h-14 max-md:h-4" aria-hidden="true" />
         {loading && <p className="text-xs text-d-text3 mb-3" role="status">{t('common.loading')}</p>}
 
@@ -355,7 +342,7 @@ export default function ServerSettingsModal({
         {tab === 'reports' && (
           <ReportsTab reports={reports} reload={() => load('reports')} onToast={onToast} />
         )}
-        {tab === 'audit' && <AuditTab entries={auditLog} api={api} members={members} onLoadMembers={() => load('members')} onToast={onToast} />}
+        {tab === 'audit' && <AuditTab entries={auditLog} api={api} members={members} channels={channels} roles={roles} onLoadMembers={() => load('members')} onToast={onToast} />}
       </div>
 
       {/* Close */}
@@ -367,7 +354,7 @@ export default function ServerSettingsModal({
         >
           <X className="w-4 h-4" />
         </button>
-        <span className="block text-[11px] font-bold text-d-text2 mt-1 text-center">ESC</span>
+        <span className="flex w-9 justify-center whitespace-nowrap text-[11px] font-bold text-d-text2 mt-1">{t('settings.escHint')}</span>
       </div>
     </div>
   );
@@ -558,8 +545,10 @@ function OverviewTab({
           />
         </Field>
         <Field label={t('settings.vanityUrl')}>
-          <div className="flex items-center gap-1">
-            <span className="shrink-0 text-xs text-d-text3">{window.location.origin}/invite/</span>
+          {/* The origin wraps above the field on narrow screens instead of
+              pushing the input out of the page. */}
+          <div className="flex flex-wrap items-center gap-1 min-w-0">
+            <span className="min-w-0 max-w-full break-all text-xs text-d-text3">{window.location.origin}/invite/</span>
             <input
               value={form.vanity_url}
               onChange={(e) => setForm({ ...form, vanity_url: e.target.value.toLowerCase() })}
@@ -567,7 +556,7 @@ function OverviewTab({
               placeholder="my-server"
               pattern="[a-z0-9-]*"
               aria-label={t('settings.vanityUrl')}
-              className="flex-1 bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+              className="flex-1 min-w-[8rem] w-full bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
             />
           </div>
           <p className="mt-1 text-[11px] text-d-text3">{t('settings.vanityHint')}</p>
@@ -1748,7 +1737,9 @@ function InvitesTab({ invites, api, reload, channels, onToast }) {
     <div>
       <h1 className="text-xl font-bold text-d-strong mb-5">{t('settings.invites')}</h1>
 
-      <div className="bg-d-surface rounded-lg p-4 mb-6 grid grid-cols-4 gap-3 items-end">
+      {/* One column on phones, two on small tablets, four on desktop, so the
+          selects are never cut to "Non" / "Unli". */}
+      <div className="bg-d-surface rounded-lg p-4 mb-6 grid grid-cols-1 min-[480px]:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
         <Field label={t('autocomplete.channels')}>
           <ChannelSelect value={channelId} options={channels.filter((c) => c.type === 'text')} onChange={setChannelId} />
         </Field>
@@ -1770,7 +1761,7 @@ function InvitesTab({ invites, api, reload, channels, onToast }) {
             <option value={0}>{t('invites.never')}</option>
           </select>
         </Field>
-        <button onClick={create} className="bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-4 py-2 rounded transition-colors">
+        <button onClick={create} className="min-h-10 bg-d-brand hover:bg-d-brandhover text-white text-xs font-semibold px-4 py-2 rounded transition-colors">
           {t('invites.createLink')}
         </button>
       </div>
@@ -1865,7 +1856,7 @@ function BansTab({ bans, api, reload, onToast }) {
 
 // --- Audit log ---------------------------------------------------------------
 
-function AuditTab({ entries, api, onToast }) {
+function AuditTab({ entries, api, channels = [], roles = [], onToast }) {
   const [extra, setExtra] = useState([]);
   const [action, setAction] = useState('');
   const [actor, setActor] = useState('');
@@ -1947,21 +1938,38 @@ function AuditTab({ entries, api, onToast }) {
             <div className="min-w-0">
               <p className="text-sm text-d-text break-words">
                 <strong className="text-d-strong">{entry.display_name ?? entry.username ?? t('audit.system')}</strong>{' '}
-                <span className="text-d-text2">{auditLabels()[entry.action_type] ?? entry.action_type}</span>
+                <span className="text-d-text2">{auditActionLabel(entry.action_type, t)}</span>
                 {targetNode(entry) && <>{' · '}{targetNode(entry)}</>}
               </p>
-              {entry.changes?.length > 0 && (
-                <ul className="text-[11px] text-d-text2 mt-0.5 space-y-0.5">
-                  {entry.changes.slice(0, 4).map((change, i) => (
-                    <li key={i} className="break-words">
-                      {change.key}: {change.old !== undefined && change.old !== null && (
-                        <><span className="line-through opacity-75">{String(change.old).slice(0, 60)}</span>{' → '}</>
-                      )}
-                      {String(change.new ?? '—').slice(0, 120)}
-                    </li>
-                  ))}
-                </ul>
-              )}
+              {(() => {
+                // Readable changes: translated field names, names instead of
+                // ids, and never a storage path, URL or JSON blob.
+                const changes = (entry.changes ?? []).map((change) => formatAuditChange(change, {
+                  t,
+                  resolveChannel: (id) => channels.find((c) => String(c.id) === id)?.name ?? null,
+                  resolveRole: (id) => roles.find((r) => String(r.id) === id)?.name ?? null,
+                  formatDate: (date) => formatDate(date, { dateStyle: 'medium', timeStyle: 'short' })
+                })).filter(Boolean).slice(0, 4);
+                if (!changes.length) return null;
+                return (
+                  <ul className="text-[11px] text-d-text2 mt-0.5 space-y-0.5">
+                    {changes.map((change, i) => (
+                      <li key={i} className="break-words">
+                        <span className="font-semibold">{change.label}</span>
+                        {change.updated ? ` · ${change.updated}` : (
+                          <>
+                            {': '}
+                            {change.from !== null && change.from !== undefined && (
+                              <><span className="line-through opacity-75">{change.from}</span>{' → '}</>
+                            )}
+                            {change.to}
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                );
+              })()}
               <p className="text-[11px] text-d-text2 mt-0.5">
                 <time dateTime={entry.created_at}>{formatDate(entry.created_at, { dateStyle: 'medium', timeStyle: 'short' })}</time>
                 {entry.reason ? ` · ${t('bans.reason', { reason: entry.reason })}` : ''}
@@ -2132,22 +2140,30 @@ function SoundboardTab({ sounds, api, reload, onToast }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             maxLength={32}
-            className="bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
+            className="min-h-9 bg-d-base text-sm text-d-strong px-3 py-2 rounded border border-d-edge focus:outline-none focus:border-d-brand"
           />
         </label>
-        <label className="block">
+        {/* The app's upload button, not the browser's "Choose File / No file
+            chosen": the real input stays in the tab order (visually hidden)
+            and the frame shows its focus ring. */}
+        <label className="block min-w-0">
           <span className="block text-[11px] font-bold text-d-text2 uppercase mb-1.5">{t('sounds.file')}</span>
-          <input
-            type="file"
-            accept="audio/*"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="text-xs text-d-text2"
-          />
+          <span className="relative inline-flex max-w-[16rem] min-h-9 items-center gap-2 rounded bg-d-control2 hover:bg-d-control px-3 py-2 text-sm font-medium text-d-strong cursor-pointer transition-colors focus-within:ring-2 focus-within:ring-d-focus">
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              className="sr-only"
+              data-testid="sound-file-input"
+            />
+            <Upload className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">{file ? file.name : t('sounds.chooseFile')}</span>
+          </span>
         </label>
         <button
           type="submit"
           disabled={busy || !file || !name.trim()}
-          className="bg-d-brand hover:bg-d-brandhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded flex items-center gap-2"
+          className="min-h-9 bg-d-brand hover:bg-d-brandhover disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded flex items-center gap-2"
         >
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
           {t('common.upload')}

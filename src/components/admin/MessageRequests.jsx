@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, EyeOff, ShieldAlert, X, Mail, Loader2 } from 'lucide-react';
 import { get, post } from '../../api';
 import { t } from '../../i18n/index.jsx';
+import { markdownToPlain } from '../../utils/plainText.js';
 import { defaultAvatar } from '../../utils/avatar';
 import { proxiedImageUrl } from '../../utils/media';
 import ReportDialog from './ReportDialog';
@@ -41,7 +42,9 @@ export function useMessageRequests(refreshKey) {
 export function MessageRequestRow({ request, blur, active, onOpen }) {
   const [revealed, setRevealed] = useState(false);
   const name = request.user.display_name || request.user.username;
-  const preview = request.last_message?.content || '';
+  const preview = markdownToPlain(request.last_message?.content || '', {
+    unknownUser: t('dm.unknownUser'), unknownChannel: t('search.unknownChannel'), spoiler: `[${t('chat.spoiler')}]`
+  });
   const hidden = blur && !revealed;
   return (
     <div className="relative">

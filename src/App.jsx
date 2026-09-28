@@ -69,6 +69,7 @@ const QuickSwitcher = lazyComponent(() => import('./components/QuickSwitcher'));
 const LoginScreen = lazyComponent(() => import('./components/LoginScreen'));
 const NotificationsInbox = lazyComponent(() => import('./components/NotificationsInbox'));
 const DiscoverPage = lazyComponent(() => import('./components/server/DiscoverPage'));
+const NotFoundView = lazyComponent(() => import('./components/NotFoundView'));
 
 // Same origin in production (the API serves the SPA); the Vite dev server
 // proxies /socket.io to :3001, so a relative connection works in both.
@@ -133,6 +134,9 @@ function rememberLastChannel(serverId, channelId) {
 function initialPlace() {
   const loc = parseLocation();
   if (loc.serverId) return { serverId: loc.serverId, channelId: loc.channelId ?? lastChannelFor(loc.serverId) };
+  // Discover and the 404 page stand on their own: open on Home behind them,
+  // so loading a server's last channel does not navigate away at once.
+  if (loc.discover || loc.notFound) return { serverId: 'home', channelId: null };
   let serverId = 'home';
   try { serverId = localStorage.getItem(LAST_SERVER_KEY) || 'home'; } catch { /* storage unavailable */ }
   return { serverId, channelId: loc.invite || loc.template ? null : lastChannelFor(serverId) };
@@ -170,19 +174,28 @@ function rememberRecent(entry) {
 // server's own number (GET /api/health) so a stale backend is loud, not silent.
 const EXPECTED_SCHEMA_VERSION = 48;
 
-/** Parse a Discord-style path: /channels/@me/:dm, /channels/:server/:channel, /invite/:code */
+// Paths the shell answers without a view of their own (the home page, e-mail
+// links handled elsewhere). Anything else unknown is a 404, not a silent Home.
+const QUIET_PATHS = new Set(['login', 'register', 'verify-email', 'reset-password', 'app']);
+
+/**
+ * Parse a Discord-style path: /channels/@me/:dm, /channels/:server/:channel,
+ * /invite/:code, /template/:code, /discover. `notFound` for anything else.
+ */
 function parseLocation() {
   const parts = window.location.pathname.split('/').filter(Boolean);
   if (parts[0] === 'invite' && parts[1]) return { invite: parts[1] };
   if (parts[0] === 'template' && parts[1]) return { template: parts[1] };
-  if (parts[0] === 'channels') {
+  if (parts[0] === 'discover' && parts.length === 1) return { discover: true };
+  if (parts[0] === 'channels' && parts[1]) {
     return {
       serverId: parts[1] === '@me' ? 'home' : parts[1] ?? null,
       channelId: parts[2] ?? null,
       messageId: parts[3] ?? null
     };
   }
-  return {};
+  if (parts.length === 0 || (parts.length === 1 && QUIET_PATHS.has(parts[0]))) return {};
+  return { notFound: true };
 }
 
 export default function App() {
@@ -269,6 +282,7 @@ export default function App() {
   // (the drawer used to cover it on every load).
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(
     () => isNarrowViewport('(max-width: 767px)') && !BOOT_PLACE.channelId && !parseLocation().invite
+      && !parseLocation().notFound && !parseLocation().discover
   );
   // Layout breakpoints as state, for behaviour that differs on phones
   // (history entries for drawers, swipe gestures).
@@ -305,10 +319,33 @@ export default function App() {
   // Where the profile popout points: the row or name that was clicked.
   const [profileAnchor, setProfileAnchor] = useState(null);
   // Server Discovery replaces the server/home columns while it is open.
-  const [showDiscover, setShowDiscover] = useState(false);
+  // /discover is a real address: it opens Discover, and survives a reload.
+  const [showDiscover, setShowDiscover] = useState(() => Boolean(parseLocation().discover));
+  // An address the app does not know: the 404 view, until you go somewhere.
+  const [notFound, setNotFound] = useState(() => Boolean(parseLocation().notFound));
+  const showDiscoverRef = useRef(showDiscover);
+  showDiscoverRef.current = showDiscover;
   // Going anywhere else (a server, a DM, a switcher pick, a notification)
-  // leaves Discover.
-  useEffect(() => { setShowDiscover(false); }, [activeServerId, activeChannelId]);
+  // leaves Discover and the 404 page. Not on mount: that is where they came from.
+  const placeMounted = useRef(false);
+  useEffect(() => {
+    if (!placeMounted.current) { placeMounted.current = true; return; }
+    setShowDiscover(false);
+    setNotFound(false);
+  }, [activeServerId, activeChannelId]);
+  useEffect(() => { if (showDiscover) setNotFound(false); }, [showDiscover]);
+  // Keep the address bar in step with Discover: /discover while it is open,
+  // back to the conversation behind it when it closes.
+  const discoverWasOpen = useRef(showDiscover);
+  useEffect(() => {
+    if (showDiscover) setCanonicalPath('/discover');
+    else if (discoverWasOpen.current) {
+      setCanonicalPath(activeChannelId
+        ? (activeServerId === 'home' ? `/channels/@me/${activeChannelId}` : `/channels/${activeServerId}/${activeChannelId}`)
+        : (activeServerId === 'home' ? '/channels/@me' : `/channels/${activeServerId}`));
+    }
+    discoverWasOpen.current = showDiscover;
+  }, [showDiscover]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(false);
   const [serverSettingsTab, setServerSettingsTab] = useState(null);
   const [viewerPermissions, setViewerPermissions] = useState([]);
@@ -672,6 +709,26 @@ export default function App() {
     for (const c of allChannels) byId.set(c.id, c);
     return [...byId.values()];
   }, [allChannels, serverChannels]);
+  // Names for the ids inside message text (<@id>, <#id>, <@&id>), so inbox
+  // previews read like the chat does instead of showing raw tokens.
+  const previewResolvers = useMemo(() => {
+    const users = new Map();
+    const add = (u, id = u?.id) => {
+      const name = u?.nickname || u?.display_name || u?.global_name || u?.username;
+      if (id && name) users.set(String(id), name);
+    };
+    for (const f of friends) add(f);
+    for (const d of dmChannels) for (const r of d.recipients ?? []) add(r);
+    for (const m of members) add(m, m.id ?? m.user_id);
+    add(currentUser);
+    const channelNames = new Map(inboxChannels.map((c) => [String(c.id), c.name]));
+    const roleNames = new Map(roles.map((r) => [String(r.id), r.name]));
+    return {
+      resolveUser: (id) => users.get(String(id)) ?? null,
+      resolveChannel: (id) => channelNames.get(String(id)) ?? null,
+      resolveRole: (id) => roleNames.get(String(id)) ?? null
+    };
+  }, [friends, dmChannels, members, currentUser, inboxChannels, roles]);
 
   const markChannelRead = useCallback((channelId, messageId) => {
     if (!channelId) return;
@@ -824,7 +881,7 @@ export default function App() {
     const path = activeServerId === 'home'
       ? `/channels/@me/${activeChannelId}`
       : `/channels/${activeServerId}/${activeChannelId}`;
-    if (!pendingJumpMessageId) setCanonicalPath(path);
+    if (!pendingJumpMessageId && !showDiscoverRef.current) setCanonicalPath(path);
     rememberLastChannel(activeServerId, activeChannelId);
     // "Recent" in the quick switcher means visited, not only jumped to.
     rememberRecent({
@@ -2327,6 +2384,7 @@ export default function App() {
       viewerPermissions={viewerPermissions}
       isOwner={isOwner}
       socket={socket}
+      resolvers={previewResolvers}
       onToast={pushToast}
       onOpenPost={(threadId) => setActiveChannelId(threadId)}
       onOpenNotificationSettings={(x, y) => activeChannel && setNotifPopover({ kind: 'channel', id: activeChannel.id, x, y })}
@@ -2725,6 +2783,10 @@ export default function App() {
       });
     }
   }, []);
+  // The inbox's Unreads tab lists every server's channels, so it needs their
+  // names — fetched once when it opens, like the quick switcher does.
+  const inboxOpen = Boolean(showInbox);
+  useEffect(() => { if (inboxOpen) loadAllServerChannels(); }, [inboxOpen, loadAllServerChannels]);
   const switcherChannels = useMemo(() => {
     const byId = new Map();
     for (const list of Object.values(serverChannels)) for (const c of list) byId.set(c.id, c);
@@ -2786,7 +2848,11 @@ export default function App() {
 
   return (
     <div
-      className="flex h-[var(--app-height,100dvh)] w-screen overflow-hidden overscroll-none bg-d-base text-d-text font-sans antialiased"
+      className={`flex h-[var(--app-height,100dvh)] w-screen overflow-hidden overscroll-none bg-d-base text-d-text font-sans antialiased ${
+        // The connection strip is 24px tall: push the app down by that much
+        // rather than laying it over the channel header.
+        connection.showBanner ? 'pt-6' : ''}`}
+      data-connection-banner={connection.showBanner ? 'on' : undefined}
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
     >
@@ -2821,10 +2887,10 @@ export default function App() {
           readStates={readStates}
           channels={channels}
           activeServerId={activeServerId}
-          onSelectServer={(id) => { setShowDiscover(false); setActiveServerId(id); }}
+          onSelectServer={(id) => { setShowDiscover(false); setNotFound(false); setActiveServerId(id); }}
           mobileOpen={mobileSidebarOpen}
           onOpenCreateServerModal={() => setShowCreateServerModal(true)}
-          onSelectHome={() => { setShowDiscover(false); setActiveServerId('home'); }}
+          onSelectHome={() => { setShowDiscover(false); setNotFound(false); setActiveServerId('home'); }}
           discoverActive={showDiscover}
           onMarkServersRead={(serverIds) => {
             const wanted = new Set(serverIds);
@@ -2839,7 +2905,20 @@ export default function App() {
         />
       </ErrorBoundary>
 
-      {showDiscover ? (
+      {notFound && !showDiscover ? (
+        <ErrorBoundary region="not-found">
+          <main id="main-content" className="flex-1 flex min-w-0 min-h-0">
+            <NotFoundView
+              onGoHome={() => {
+                setNotFound(false);
+                setActiveServerId('home');
+                setActiveChannelId(null);
+                setCanonicalPath('/channels/@me');
+              }}
+            />
+          </main>
+        </ErrorBoundary>
+      ) : showDiscover ? (
         <ErrorBoundary region="discover">
           <main id="main-content" className="flex-1 flex min-w-0 min-h-0">
             <DiscoverPage
@@ -2902,6 +2981,7 @@ export default function App() {
                 loadingMore={searchPaging.loading}
                 onLoadMore={loadMoreSearch}
                 channels={allChannels}
+                resolvers={previewResolvers}
                 onJumpToMessage={handleJumpToMessage}
                 onClose={() => setSearchResults(null)}
               />
@@ -3029,6 +3109,7 @@ export default function App() {
               loadingMore={searchPaging.loading}
               onLoadMore={loadMoreSearch}
               channels={allChannels}
+              resolvers={previewResolvers}
               onJumpToMessage={handleJumpToMessage}
               onClose={() => setSearchResults(null)}
             />
@@ -3308,6 +3389,7 @@ export default function App() {
           channels={inboxChannels}
           readStates={readStates}
           servers={servers}
+          resolvers={previewResolvers}
           onOpenChannel={(channel) => {
             setShowInbox(false);
             setActiveServerId(channel.server_id ?? 'home');

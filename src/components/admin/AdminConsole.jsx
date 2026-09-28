@@ -74,7 +74,11 @@ export default function AdminConsole({ currentUser, onClose, onToast }) {
             <h2 id={titleId} className="text-lg font-bold text-d-strong">{t('admin.title')}</h2>
             {overview && (
               <p className="text-xs text-d-text2">
-                {t('admin.summary', { users: overview.users, servers: overview.servers, reports: overview.open_reports })}
+                {[
+                  t('admin.summaryAccounts', { count: Number(overview.users) || 0 }),
+                  t('admin.summaryServers', { count: Number(overview.servers) || 0 }),
+                  t('admin.summaryReports', { count: Number(overview.open_reports) || 0 })
+                ].join(' · ')}
               </p>
             )}
           </div>
@@ -186,12 +190,12 @@ function ReportsPanel({ onChanged, onError, onToast }) {
                 <span className={`rounded px-2 py-0.5 text-xs font-bold ${['self_harm', 'minor_safety', 'illegal'].includes(r.reason) ? 'bg-d-danger text-white' : 'bg-d-base text-d-strong'}`}>
                   {reasonLabel(r.reason)}
                 </span>
-                <span className="min-w-0 flex-1 text-sm text-d-strong">
+                <span className="min-w-0 flex-1 text-sm text-d-strong max-sm:order-last max-sm:basis-full">
                   {r.target_type === 'user'
                     ? t('admin.reportUserLine', { name: r.target_display || r.target_username || '?' })
                     : t('admin.reportMessageLine', { name: r.target_display || r.target_username || '?', where: r.server_name || t('admin.dm') })}
                 </span>
-                <span className="text-xs text-d-text3">{fmtDate(r.created_at)} · {t(`safety.status.${r.status}`)}</span>
+                <span className="text-xs text-d-text3 max-sm:ml-auto">{fmtDate(r.created_at)} · {t(`safety.status.${r.status}`)}</span>
               </button>
               {open === r.id && (
                 <ReportDetail report={r} onDone={() => { load(); onChanged?.(); }} onError={onError} onToast={onToast} />
@@ -303,35 +307,35 @@ function UsersPanel({ currentUser, onChanged, onError, onToast }) {
         <button type="submit" className={`${btn} bg-d-brand text-white hover:bg-d-brandhover`}>{t('common.search')}</button>
       </form>
       {!rows ? <Loading /> : (
-        <div className="overflow-x-auto rounded-lg border border-d-divider">
-          <table className="w-full min-w-[640px] text-left text-sm">
-            <thead className="bg-d-surface text-xs uppercase text-d-text3">
-              <tr>
-                <th scope="col" className="px-3 py-2">{t('admin.col.user')}</th>
-                <th scope="col" className="px-3 py-2">{t('admin.col.joined')}</th>
-                <th scope="col" className="px-3 py-2">{t('admin.col.reports')}</th>
-                <th scope="col" className="px-3 py-2">{t('admin.col.status')}</th>
-                <th scope="col" className="px-3 py-2"><span className="sr-only">{t('admin.col.actions')}</span></th>
+        <div className="rounded-lg border border-d-divider sm:overflow-x-auto">
+          <table className="admin-cards w-full sm:min-w-[640px] text-left text-sm" role="table">
+            <thead className="bg-d-surface text-xs uppercase text-d-text3" role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.user')}</th>
+                <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.joined')}</th>
+                <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.reports')}</th>
+                <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.status')}</th>
+                <th scope="col" role="columnheader" className="px-3 py-2"><span className="sr-only">{t('admin.col.actions')}</span></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-d-divider">
+            <tbody className="divide-y divide-d-divider" role="rowgroup">
               {rows.map((u) => (
-                <tr key={u.id}>
-                  <td className="px-3 py-2">
+                <tr key={u.id} role="row">
+                  <td role="cell" className="px-3 py-2">
                     <span className="block font-medium text-d-strong">{u.display_name}</span>
                     <span className="block text-xs text-d-text3">
                       @{u.username}{u.email ? ` · ${mask.personal ? maskEmail(u.email) : u.email}` : ''}
                       {u.instance_admin ? ` · ${t('admin.adminBadge')}` : ''}{u.is_bot ? ' · BOT' : ''}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-xs text-d-text2">{fmtDate(u.created_at)}</td>
-                  <td className="px-3 py-2 text-xs text-d-text2">{u.report_count}</td>
-                  <td className="px-3 py-2 text-xs">
+                  <td role="cell" data-label={t('admin.col.joined')} className="px-3 py-2 text-xs text-d-text2">{fmtDate(u.created_at)}</td>
+                  <td role="cell" data-label={t('admin.col.reports')} className="px-3 py-2 text-xs text-d-text2">{u.report_count}</td>
+                  <td role="cell" data-label={t('admin.col.status')} className="px-3 py-2 text-xs">
                     {u.disabled_at ? <span className="font-semibold text-d-danger">{t('admin.disabled')}</span> : <span className="text-d-text2">{t('admin.active')}</span>}
                   </td>
-                  <td className="px-3 py-2">
+                  <td role="cell" className="px-3 py-2">
                     {u.id !== currentUser?.id && !u.instance_admin && (
-                      <div className="flex justify-end gap-1.5">
+                      <div className="flex justify-end max-sm:justify-start gap-1.5">
                         {u.disabled_at ? (
                           <button type="button" disabled={Boolean(busy)} onClick={act(u, 'enable')} className={`${btn} bg-d-control2 text-d-strong hover:bg-d-control`}
                             aria-label={t('admin.enableNamed', { name: u.username })}>
@@ -367,25 +371,25 @@ function ServersPanel({ onError }) {
   if (!rows) return <Loading />;
   if (rows.length === 0) return <p className="text-sm text-d-text2">{t('admin.noServers')}</p>;
   return (
-    <div className="overflow-x-auto rounded-lg border border-d-divider">
-      <table className="w-full min-w-[520px] text-left text-sm">
-        <thead className="bg-d-surface text-xs uppercase text-d-text3">
-          <tr>
-            <th scope="col" className="px-3 py-2">{t('admin.col.server')}</th>
-            <th scope="col" className="px-3 py-2">{t('admin.col.owner')}</th>
-            <th scope="col" className="px-3 py-2">{t('admin.col.members')}</th>
-            <th scope="col" className="px-3 py-2">{t('admin.col.openReports')}</th>
-            <th scope="col" className="px-3 py-2">{t('admin.col.created')}</th>
+    <div className="rounded-lg border border-d-divider sm:overflow-x-auto">
+      <table className="admin-cards w-full sm:min-w-[520px] text-left text-sm" role="table">
+        <thead className="bg-d-surface text-xs uppercase text-d-text3" role="rowgroup">
+          <tr role="row">
+            <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.server')}</th>
+            <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.owner')}</th>
+            <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.members')}</th>
+            <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.openReports')}</th>
+            <th scope="col" role="columnheader" className="px-3 py-2">{t('admin.col.created')}</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-d-divider">
+        <tbody className="divide-y divide-d-divider" role="rowgroup">
           {rows.map((s) => (
-            <tr key={s.id}>
-              <td className="px-3 py-2 font-medium text-d-strong">{s.name}</td>
-              <td className="px-3 py-2 text-xs text-d-text2">{s.owner_display || s.owner_username || '—'}</td>
-              <td className="px-3 py-2 text-xs text-d-text2">{s.member_count}</td>
-              <td className="px-3 py-2 text-xs text-d-text2">{s.open_reports}</td>
-              <td className="px-3 py-2 text-xs text-d-text2">{fmtDate(s.created_at)}</td>
+            <tr key={s.id} role="row">
+              <td role="cell" className="px-3 py-2 font-medium text-d-strong">{s.name}</td>
+              <td role="cell" data-label={t('admin.col.owner')} className="px-3 py-2 text-xs text-d-text2">{s.owner_display || s.owner_username || '—'}</td>
+              <td role="cell" data-label={t('admin.col.members')} className="px-3 py-2 text-xs text-d-text2">{s.member_count}</td>
+              <td role="cell" data-label={t('admin.col.openReports')} className="px-3 py-2 text-xs text-d-text2">{s.open_reports}</td>
+              <td role="cell" data-label={t('admin.col.created')} className="px-3 py-2 text-xs text-d-text2">{fmtDate(s.created_at)}</td>
             </tr>
           ))}
         </tbody>

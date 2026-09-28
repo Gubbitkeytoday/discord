@@ -6,6 +6,7 @@ import { t } from '../i18n/index.jsx';
 import EmptyState from './ui/EmptyState.jsx';
 import useRestoreFocus from './ui/useRestoreFocus.js';
 import { menuSurface } from './ui/menu.js';
+import { markdownToPlain } from '../utils/plainText.js';
 
 // Mentions, keyword highlights and DMs each get their own glyph and a spoken
 // type, so the list is not just "icon, name" to a screen reader.
@@ -39,7 +40,7 @@ const isoOrUndefined = (value) => {
  * list is a real list, and each item says what it is, who, where and when.
  */
 export default function NotificationsInbox({
-  x, y, notifications = [], channels = [], readStates = {}, servers = [], onJump, onOpenChannel, onMarkAllRead, onClose
+  x, y, notifications = [], channels = [], readStates = {}, servers = [], resolvers = null, onJump, onOpenChannel, onMarkAllRead, onClose
 }) {
   const ref = useRef(null);
   const listRef = useRef(null);
@@ -200,7 +201,13 @@ export default function NotificationsInbox({
               const Icon = TYPE_ICON[n.type] ?? AtSign;
               const who = n.actor_name ?? n.message?.display_name ?? '';
               const where = channelName(n.channel_id);
-              const preview = n.preview ?? n.message?.content ?? '';
+              // The same words the chat shows: names for <@id> tokens, no markup.
+              const preview = markdownToPlain(n.preview ?? n.message?.content ?? '', {
+                ...resolvers,
+                unknownUser: t('dm.unknownUser'),
+                unknownChannel: t('search.unknownChannel'),
+                spoiler: `[${t('chat.spoiler')}]`
+              });
               return (
                 <li key={n.id} className="border-b border-d-divider/40 last:border-b-0">
                   <button

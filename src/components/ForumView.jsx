@@ -18,6 +18,7 @@ import { useDialog } from './settings/primitives';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { avatarOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
+import { markdownToPlain } from '../utils/plainText.js';
 import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
 
 const SORTS = () => [
@@ -637,7 +638,7 @@ function TagEditRow({ tag, busy, onCancel, onSave }) {
 /* --- the view --------------------------------------------------------------- */
 
 export default function ForumView({
-  channel, currentUser, viewerPermissions, isOwner, socket,
+  channel, currentUser, viewerPermissions, isOwner, socket, resolvers = null,
   onOpenPost, onToast, onOpenNotificationSettings, channelSettings, onToggleMemberList, showMemberList
 }) {
   const [tags, setTags] = useState([]);
@@ -885,7 +886,17 @@ export default function ForumView({
           <div className={effectiveLayout === 'gallery'
             ? 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(180px,1fr))] max-w-6xl mx-auto'
             : 'space-y-2 max-w-4xl mx-auto'}>
-            {posts.map((p) => (effectiveLayout === 'gallery' ? (
+            {posts.map((raw) => ({
+              ...raw,
+              // Card previews: the first message's words, not its markdown or raw <@id> tokens.
+              preview: raw.preview ? markdownToPlain(raw.preview, {
+                ...resolvers,
+                unknownUser: t('dm.unknownUser'),
+                unknownChannel: t('search.unknownChannel'),
+                spoiler: `[${t('chat.spoiler')}]`,
+                singleLine: false
+              }) : raw.preview
+            })).map((p) => (effectiveLayout === 'gallery' ? (
               <GalleryCard
                 key={p.id}
                 post={p}
