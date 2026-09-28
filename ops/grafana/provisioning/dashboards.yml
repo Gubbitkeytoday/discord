@@ -1,0 +1,16 @@
+# Grafana dashboard provider for the compose `observability` profile.
+# Mounted at /otel-lgtm/grafana/conf/provisioning/dashboards/antigravity.yml;
+# the JSON files in ops/grafana/dashboards are mounted at the path below.
+apiVersion: 1
+
+providers:
+  - name: antigravity
+    folder: Antigravity
+    type: file
+    disableDeletion: true
+    # Edits in the UI are allowed but lost on restart: change the JSON in git.
+    allowUiUpdates: true
+    updateIntervalSeconds: 60
+    options:
+      path: /otel-lgtm/antigravity-dashboards
+      foldersFromFilesStructure: false

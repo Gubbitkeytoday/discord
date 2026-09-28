@@ -105,6 +105,18 @@ describe('authentication', () => {
 });
 
 describe('rate limiting', () => {
+  test('current-password guesses on change-password are throttled per user', async () => {
+    const statuses = [];
+    for (let i = 0; i < 11; i += 1) {
+      const res = await api('POST', '/api/auth/change-password', {
+        current_password: `wrong-${i}`, new_password: 'never-applied-1'
+      }, { 'x-user-id': 'user-4' });
+      statuses.push(res.status);
+    }
+    assert.deepEqual(statuses.slice(0, 10), Array(10).fill(401));
+    assert.equal(statuses[10], 429);
+  });
+
   test('repeated failed logins are throttled', async () => {
     let throttled = false;
     for (let i = 0; i < 16; i += 1) {
@@ -112,6 +124,43 @@ describe('rate limiting', () => {
       if (status === 429) { throttled = true; break; }
     }
     assert.ok(throttled, 'login was never rate limited');
+  });
+
+  test('express-rate-limit on the token-bucket store: headers, 429 RATE_LIMITED, methods, reset', async () => {
+    const { default: express } = await import('express');
+    const { rateLimit, TokenBucketStore } = await import('../lib/rateLimit.js');
+    const limiter = rateLimit({ name: `unit-${Date.now()}`, limit: 2, windowMs: 60_000, methods: ['GET'] });
+    const app = express();
+    app.use((req, _res, next) => { req.userId = req.get('x-user') || undefined; next(); });
+    app.all('/x', limiter, (_req, res) => res.json({ ok: true }));
+    app.use((err, _req, res, _next) => res.status(err.status).json({ code: err.code, details: err.details }));
+    const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/x`;
+      const hit = (method = 'GET', user = 'u1') => fetch(url, { method, headers: { 'x-user': user } });
+      const first = await hit();
+      assert.equal(first.status, 200);
+      assert.equal(first.headers.get('x-ratelimit-limit'), '2');
+      assert.equal(first.headers.get('x-ratelimit-remaining'), '1');
+      assert.equal((await hit()).status, 200);
+      const blocked = await hit();
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.headers.get('x-ratelimit-remaining'), '0');
+      const seconds = Number(blocked.headers.get('retry-after'));
+      assert.ok(seconds >= 1 && seconds <= 30, String(seconds));
+      assert.deepEqual(await blocked.json(), { code: 'RATE_LIMITED', details: { retry_after_seconds: seconds } });
+      assert.equal((await hit('POST')).status, 200, 'methods outside the list are not counted');
+      assert.equal((await hit('GET', 'u2')).status, 200, 'budgets are per user');
+      await limiter.resetKey('u1');
+      assert.equal((await hit()).status, 200, 'resetKey refills the bucket');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+    const store = new TokenBucketStore({ name: `unit-store-${Date.now()}`, limit: 3, windowMs: 60_000 });
+    assert.equal((await store.increment('k')).totalHits, 1);
+    assert.equal((await store.increment('k')).totalHits, 2);
+    await store.decrement('k');
+    assert.equal((await store.increment('k')).totalHits, 2, 'decrement returns a token');
   });
 });
 
@@ -165,6 +214,34 @@ describe('automod', () => {
     });
     assert.equal(status, 400);
     assert.equal(body.code, 'INVALID_REGEX');
+  });
+
+  test('regex rules run in linear time (RE2) and still match', async () => {
+    // Lookaround and backreferences are not RE2 syntax: refused on save.
+    for (const pattern of ['(?<=a)b', '(?=x)y', '(a)\\1']) {
+      const res = await api('POST', '/api/servers/server-1/automod', {
+        name: 'no-lookaround', trigger_type: 'regex', trigger_metadata: { pattern }, actions: ['block']
+      });
+      assert.equal(res.status, 400, pattern);
+    }
+    // `(\w+\s?)+$` slips past the nested-quantifier heuristic and backtracks
+    // exponentially in V8; under RE2 the check is linear.
+    const rule = await api('POST', '/api/servers/server-1/automod', {
+      name: 'redos-shape', trigger_type: 'regex',
+      trigger_metadata: { pattern: '(\\w+\\s?)+$|ห้าม\\s*สแปม' }, actions: ['block']
+    });
+    assert.equal(rule.status, 200, JSON.stringify(rule.body));
+    const started = Date.now();
+    const slow = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', user_id: 'user-3', content: `${'a'.repeat(1500)}!`
+    }, { 'x-user-id': 'user-3' });
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+    assert.equal(slow.status, 200, 'no match: the string ends in "!"');
+    const thai = await api('POST', '/api/messages', {
+      channel_id: 'chan-102', user_id: 'user-3', content: 'อย่า ห้าม สแปม นะ!'
+    }, { 'x-user-id': 'user-3' });
+    assert.equal(thai.status, 403, 'unicode pattern matched case-insensitively');
+    await api('DELETE', `/api/servers/server-1/automod/${rule.body.id}`);
   });
 
   test('mention spam rule counts mentions', async () => {
@@ -860,16 +937,23 @@ describe('gateway', () => {
     const socket = track(await connectAs('user-me'));
     await new Promise((resolve) => socket.emit('join_channel', 'chan-102', resolve));
 
-    let limited = false;
-    for (let i = 0; i < 45 && !limited; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const ack = await new Promise((resolve) => {
-        socket.emit('send_message', { channel_id: 'chan-102', content: `flood ${i}` }, resolve);
-        setTimeout(() => resolve({ ok: true }), 1500);
+    // The budget is 30 per 10 s, refilling at 3/s. Sending one at a time and
+    // waiting for each ack let the bucket refill whenever a send took over
+    // ~330 ms (a loaded CI host), so the test flaked. Emit the whole burst at
+    // once instead: the budget is checked before any database work, so 45
+    // back-to-back sends always overrun 30 tokens, however slow the host is.
+    const BURST = 45;
+    const acks = await Promise.all(Array.from({ length: BURST }, (_, i) => new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, code: 'NO_ACK' }), 20_000);
+      socket.emit('send_message', { channel_id: 'chan-102', content: `flood ${i}` }, (ack) => {
+        clearTimeout(timer);
+        resolve(ack);
       });
-      if (ack?.code === 'RATE_LIMITED') limited = true;
-    }
-    assert.ok(limited, 'the gateway accepted an unbounded burst of messages');
+    })));
+    const limited = acks.filter((ack) => ack?.code === 'RATE_LIMITED').length;
+    assert.ok(limited >= BURST - 30 - 3,
+      `the gateway accepted an unbounded burst of messages (${limited} of ${BURST} limited)`);
+    assert.equal(acks.filter((ack) => ack?.code === 'NO_ACK').length, 0, 'every send is acknowledged');
   });
 });
 

@@ -14,8 +14,23 @@
 //    control column   never wraps; the text column shrinks instead
 // ============================================================================
 
-import React, { useId } from 'react';
-import { Check, X, RotateCcw } from 'lucide-react';
+import React, { useEffect, useId, useRef } from 'react';
+import { Check, X, RotateCcw, Loader2 } from 'lucide-react';
+import { useFocusTrap, useEscapeLayer } from '../../hooks/useFocusTrap';
+import { t } from '../../i18n/index.jsx';
+
+/* --- dialogs ---------------------------------------------------------------- */
+
+/**
+ * Focus trap + Escape layer for a modal. The trap's dependencies never change
+ * and Escape reads the latest handler through a ref, so passing an inline
+ * `onClose` is safe (see hooks/useFocusTrap.js).
+ */
+export function useDialog(onClose, { active = true } = {}) {
+  return useFocusTrap(active, onClose);
+}
+
+export { useEscapeLayer };
 
 /* --- page ------------------------------------------------------------------ */
 
@@ -137,9 +152,12 @@ export function Toggle({ checked, onChange, disabled = false, label, id }) {
 
 /** Row + Toggle, the pairing that makes up most of every settings page. */
 export function SettingToggle({ label, hint, checked, onChange, disabled, last }) {
+  // The whole row is the target, as on Discord: the label is a <label> for
+  // the switch (a button is labelable), so clicking the words toggles it.
+  const id = useId();
   return (
-    <Row label={label} hint={hint} last={last}>
-      <Toggle checked={checked} onChange={onChange} disabled={disabled} label={label} />
+    <Row label={label} hint={hint} last={last} htmlFor={disabled ? undefined : id}>
+      <Toggle id={id} checked={checked} onChange={onChange} disabled={disabled} label={label} />
     </Row>
   );
 }
@@ -176,7 +194,7 @@ export function RadioList({ value, onChange, options, label }) {
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-d-strong">{option.label}</span>
-              {option.hint && (
+              {Boolean(option.hint) && (
                 <span className="mt-0.5 block text-xs text-d-text2 leading-relaxed">{option.hint}</span>
               )}
             </span>
@@ -313,6 +331,67 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+/** Tell the settings shell whether this page is holding unsaved edits. */
+export function useReportDirty(dirty, onDirtyChange) {
+  useEffect(() => { onDirtyChange?.(Boolean(dirty)); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+}
+
+/**
+ * Discord's "You have unsaved changes" bar. Sticky to the bottom of the page.
+ * Each time `nudge` increases (someone tried to leave with edits pending) it
+ * turns red, says so, and shakes — Discord's way of refusing navigation
+ * without a modal.
+ */
+export function UnsavedBar({
+  nudge = 0, onReset, onSave, saving = false, saveDisabled = false, saveLabel, resetLabel
+}) {
+  const ref = useRef(null);
+  const baseline = useRef(nudge);
+  const warned = nudge > baseline.current;
+
+  useEffect(() => {
+    if (nudge <= baseline.current) return;
+    ref.current?.scrollIntoView?.({ block: 'nearest' });
+    ref.current?.animate?.(
+      [0, -10, 10, -8, 8, -4, 0].map((x) => ({ transform: `translateX(${x}px)` })),
+      { duration: 420, easing: 'ease-in-out' }
+    );
+  }, [nudge]);
+
+  return (
+    <div
+      ref={ref}
+      role="status"
+      className={`sticky bottom-4 z-10 mt-6 flex items-center justify-between gap-4 rounded-lg px-4 py-3
+        shadow-xl ring-1 ring-black/20 transition-colors ${warned ? 'bg-d-danger' : 'bg-d-base3'}`}
+    >
+      <span className={`text-sm font-medium ${warned ? 'text-white' : 'text-d-strong'}`}>
+        {warned ? t('common.unsavedCareful') : t('common.unsavedChanges')}
+      </span>
+      <div className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={saving}
+          className={`text-sm font-medium hover:underline disabled:opacity-50 ${warned ? 'text-white' : 'text-d-strong'}`}
+        >
+          {resetLabel ?? t('common.resetChanges')}
+        </button>
+        <Button
+          variant="primary"
+          onClick={onSave}
+          disabled={saving || saveDisabled}
+          className="bg-d-success hover:bg-d-successhover"
+        >
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saveLabel ?? t('common.saveChanges')}
+        </Button>
+      </div>
+    </div>
   );
 }
 

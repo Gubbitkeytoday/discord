@@ -1,31 +1,62 @@
-// SQLite access layer: connection, promise helpers, transactions, migrations.
+// Database access layer: driver selection, promise helpers, transactions,
+// migrations.
 //
-// Exports runQuery / getQuery / allQuery / initDB and the raw `db` handle so
-// existing callers keep working unchanged.
+//   DATABASE_URL=postgres://…  → PostgreSQL (db/postgres.js, pooled)
+//   otherwise                  → SQLite at DB_PATH (db/sqlite.js)
+//
+// Callers use runQuery / getQuery / allQuery / transaction with `?`
+// placeholders, and the `sql` fragments from db/dialect.js wherever the two
+// engines genuinely differ. See DEPLOYMENT.md for the operational side.
 
-import sqlite3 from 'sqlite3';
+// dialect.js loads .env, so it must stay the first import.
+import { DIALECT, isPostgres, sql } from './db/dialect.js';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
-import { AsyncLocalStorage } from 'async_hooks';
+import { createSqliteDriver } from './db/sqlite.js';
 import { seedDatabase } from './db/seed.js';
 import { DISCORD_EPOCH } from './lib/snowflake.js';
+import { PASSKEY_DDL } from './db/migrations/passkeys.js'; // passkeys
+import { TRANSLATION_DDL } from './db/migrations/translation.js'; // translation
+import { REALTIME_SCALE_DDL } from './db/migrations/realtimeScale.js'; // realtime-scale
+import { safetyV39Sqlite, safetyV39Postgres, safetyV40Sqlite, safetyV40Postgres } from './db/migrations/safety.js'; // safety
+import { ADMIN_POLISH_MIGRATIONS } from './db/migrations/adminPolish.js'; // admin polish (v41–v42)
+import { INTEGRATION_MIGRATIONS } from './db/migrations/integration.js'; // integration (v43)
+import { PROFILES_MIGRATIONS } from './db/migrations/profiles.js'; // profiles (v44–v45)
+import { SERVERS_MIGRATIONS } from './db/migrations/servers.js'; // servers (v46–v47)
+import { PAYMENTS_MIGRATIONS } from './db/migrations/payments.js'; // payments (v48)
+import { getLogger } from './lib/logger.js';
+import { traceDb } from './lib/telemetry.js';
+
+const log = getLogger('db');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-if (!process.env.NODE_TEST_CONTEXT && process.env.NODE_ENV !== 'test') {
-  try {
-    process.loadEnvFile?.();
-  } catch {}
-}
+export { sql, DIALECT, isPostgres };
 
 export const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'discord.db');
 const SCHEMA_PATH = path.join(__dirname, 'db', 'schema.sql');
+const PG_SCHEMA_PATH = path.join(__dirname, 'db', 'schema.pg.sql');
+
+/**
+ * db/schema.pg.sql is the Postgres baseline and already contains everything
+ * SQLite migrations 1..PG_BASELINE_VERSION add, so on Postgres those versions
+ * are recorded as applied when the baseline is created. Every migration after
+ * it must provide a `postgres` implementation alongside the SQLite `up`.
+ */
+const PG_BASELINE_VERSION = 17;
+
+// Arbitrary but fixed: every instance contends for the same advisory lock, so
+// only one of several processes booting at once runs migrations and seeding.
+const MIGRATION_LOCK_KEY = 7_311_452_019;
 
 /**
  * Ordered migrations applied after schema.sql. schema.sql is the baseline for a
  * fresh database (every statement is CREATE ... IF NOT EXISTS); these handle
  * changes that an existing database cannot pick up from it.
+ *
+ * `up` is the SQLite implementation. From v18 on, each entry also needs a
+ * `postgres` implementation (see PG_BASELINE_VERSION).
  */
 const MIGRATIONS = [
   { version: 1, name: 'initial full schema', up: async () => {} },
@@ -90,7 +121,7 @@ const MIGRATIONS = [
       } finally {
         await runQuery('PRAGMA foreign_keys = ON');
       }
-      console.log(`   renumbered ${legacy.length} legacy message id(s)`);
+      log.info({ count: legacy.length }, 'renumbered legacy message ids');
     }
   },
   {
@@ -116,7 +147,7 @@ const MIGRATIONS = [
           [hash, `${account.id}@example.dev`, account.id]
         );
       }
-      console.log(`   backfilled dev password for ${seedAccounts.length} seed account(s)`);
+      log.info({ count: seedAccounts.length }, 'backfilled dev password for seed accounts');
     }
   },
   {
@@ -379,7 +410,318 @@ const MIGRATIONS = [
       // ALTER TABLE cannot add a CHECK, so the constraint lives in the service.
       await addColumn('application_commands', 'type', "TEXT NOT NULL DEFAULT 'slash'");
     }
+  },
+  // --- notifications / web push (services/notifications.js, services/push.js) ---
+  // DDL lives only here (idempotent), not in schema.sql / schema.pg.sql.
+  {
+    version: 32,
+    name: 'notification level inheritance, keyword highlights, push privacy',
+    up: async () => {
+      const cols = await allQuery(`PRAGMA table_info(server_settings)`);
+      if (!cols.some((c) => c.name === 'level_override')) {
+        // NULL = "use the server's default_notifications". notification_level
+        // cannot express that (its CHECK has no 'inherit' and rows are created
+        // with 'all_messages' on join), so an explicit choice lives here.
+        await runQuery(`ALTER TABLE server_settings ADD COLUMN level_override TEXT`);
+      }
+      await runQuery(
+        `UPDATE server_settings SET level_override = notification_level
+          WHERE level_override IS NULL AND notification_level <> 'all_messages'`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS notification_prefs (
+           user_id       TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+           keywords      TEXT NOT NULL DEFAULT '[]',
+           push_content  TEXT NOT NULL DEFAULT 'full'
+                         CHECK (push_content IN ('full','name_only','hidden')),
+           updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_channel_settings_channel ON channel_settings(channel_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_server_settings_server ON server_settings(server_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `ALTER TABLE server_settings ADD COLUMN IF NOT EXISTS level_override TEXT COLLATE "C"
+           CHECK (level_override IN ('all_messages','only_mentions','nothing'))`
+      );
+      await runQuery(
+        `UPDATE server_settings SET level_override = notification_level
+          WHERE level_override IS NULL AND notification_level <> 'all_messages'`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS notification_prefs (
+           user_id       TEXT COLLATE "C" PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           keywords      TEXT NOT NULL DEFAULT '[]',
+           push_content  TEXT COLLATE "C" NOT NULL DEFAULT 'full'
+                         CHECK (push_content IN ('full','name_only','hidden')),
+           updated_at    TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_channel_settings_channel ON channel_settings(channel_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_server_settings_server ON server_settings(server_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id)`);
+    }
   }
+  ,{
+    version: 33,
+    name: 'web push subscriptions',
+    up: async () => {
+      // A subscription belongs to the session (device login) that created it:
+      // ending the session — logout, revoke, expiry prune — removes it.
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS push_subscriptions (
+           id               TEXT PRIMARY KEY,
+           user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+           session_id       TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+           endpoint         TEXT NOT NULL UNIQUE,
+           p256dh           TEXT NOT NULL,
+           auth             TEXT NOT NULL,
+           user_agent       TEXT,
+           expiration_time  TEXT,
+           failure_count    INTEGER NOT NULL DEFAULT 0,
+           last_success_at  TEXT,
+           created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_session ON push_subscriptions(session_id)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS push_subscriptions (
+           id               TEXT COLLATE "C" PRIMARY KEY,
+           user_id          TEXT COLLATE "C" NOT NULL REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           session_id       TEXT COLLATE "C" REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE,
+           endpoint         TEXT COLLATE "C" NOT NULL UNIQUE,
+           p256dh           TEXT NOT NULL,
+           auth             TEXT NOT NULL,
+           user_agent       TEXT,
+           expiration_time  TIMESTAMPTZ(3),
+           failure_count    INTEGER NOT NULL DEFAULT 0,
+           last_success_at  TIMESTAMPTZ(3),
+           created_at       TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)`);
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_session ON push_subscriptions(session_id)`);
+    }
+  }
+  // realtime-scale (v34): sync indexes, and the guild permission version
+  // counter + triggers behind services/permCache.js. Self-contained DDL in
+  // db/migrations/realtimeScale.js; every statement is IF NOT EXISTS / OR
+  // REPLACE, so re-running is harmless.
+  ,{
+    version: 34,
+    name: 'sync indexes; guild permission versions for the permission cache',
+    up: async () => { for (const ddl of REALTIME_SCALE_DDL.sqlite) await runQuery(ddl); },
+    postgres: async () => { for (const ddl of REALTIME_SCALE_DDL.postgres) await runQuery(ddl); }
+  }
+  // passkeys (v35) — WebAuthn credentials, single-use challenges, audit trail.
+  // Self-contained DDL (not in schema.sql / schema.pg.sql) so it merges cleanly.
+  ,{
+    version: 35,
+    name: 'passkeys (WebAuthn credentials, challenges, events)',
+    up: async () => { for (const ddl of PASSKEY_DDL.sqlite) await runQuery(ddl); },
+    postgres: async () => { for (const ddl of PASSKEY_DDL.postgres) await runQuery(ddl); }
+  }
+  // translation (v36) — per-message translation cache + guild opt-out.
+  ,{
+    version: 36,
+    name: 'message translation cache, guild translation switch',
+    up: async () => {
+      for (const ddl of TRANSLATION_DDL.sqlite) await runQuery(ddl);
+      const cols = await allQuery(`PRAGMA table_info(servers)`);
+      if (!cols.some((c) => c.name === 'translation_disabled')) {
+        await runQuery(`ALTER TABLE servers ADD COLUMN translation_disabled INTEGER NOT NULL DEFAULT 0`);
+      }
+    },
+    postgres: async () => {
+      for (const ddl of TRANSLATION_DDL.postgres) await runQuery(ddl);
+      await runQuery(`ALTER TABLE servers ADD COLUMN IF NOT EXISTS translation_disabled INTEGER NOT NULL DEFAULT 0`);
+    }
+  }
+  // media pipeline (v37–v38): responsive renditions, persisted job queue,
+  // presigned direct uploads. See services/mediaPipeline.js.
+  ,{
+    version: 37,
+    name: 'media pipeline: renditions, thumbhash, job queue',
+    up: async () => {
+      const addColumn = async (t, column, ddl) => {
+        const cols = await allQuery(`PRAGMA table_info(${t})`);
+        if (!cols.some((c) => c.name === column)) await runQuery(`ALTER TABLE ${t} ADD COLUMN ${column} ${ddl}`);
+      };
+      await addColumn('files', 'thumbhash', 'TEXT');
+      // NULL: not an image/video (or pre-pipeline). processing | ready | failed | unsupported
+      await addColumn('files', 'media_status', 'TEXT');
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS file_renditions (
+           id          TEXT PRIMARY KEY,
+           file_id     TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+           bucket      INTEGER NOT NULL,
+           format      TEXT NOT NULL CHECK (format IN ('webp','avif')),
+           storage_key TEXT NOT NULL UNIQUE,
+           mime_type   TEXT NOT NULL,
+           width       INTEGER NOT NULL,
+           height      INTEGER NOT NULL,
+           size        INTEGER NOT NULL DEFAULT 0,
+           animated    INTEGER NOT NULL DEFAULT 0,
+           created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           UNIQUE (file_id, bucket, format)
+         )`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS media_jobs (
+           id           TEXT PRIMARY KEY,
+           file_id      TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+           kind         TEXT NOT NULL,
+           status       TEXT NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','done','failed')),
+           attempts     INTEGER NOT NULL DEFAULT 0,
+           last_error   TEXT,
+           run_after    TEXT NOT NULL,
+           locked_until TEXT,
+           created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           UNIQUE (file_id, kind)
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_media_jobs_due ON media_jobs(status, run_after)`);
+    },
+    postgres: async () => {
+      await runQuery(`ALTER TABLE files ADD COLUMN IF NOT EXISTS thumbhash TEXT COLLATE "C"`);
+      await runQuery(`ALTER TABLE files ADD COLUMN IF NOT EXISTS media_status TEXT COLLATE "C"`);
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS file_renditions (
+           id          TEXT COLLATE "C" PRIMARY KEY,
+           file_id     TEXT COLLATE "C" NOT NULL REFERENCES files(id) ON DELETE CASCADE DEFERRABLE,
+           bucket      INTEGER NOT NULL,
+           format      TEXT COLLATE "C" NOT NULL CHECK (format IN ('webp','avif')),
+           storage_key TEXT COLLATE "C" NOT NULL UNIQUE,
+           mime_type   TEXT COLLATE "C" NOT NULL,
+           width       INTEGER NOT NULL,
+           height      INTEGER NOT NULL,
+           size        BIGINT NOT NULL DEFAULT 0,
+           animated    INTEGER NOT NULL DEFAULT 0,
+           created_at  TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           UNIQUE (file_id, bucket, format)
+         )`
+      );
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS media_jobs (
+           id           TEXT COLLATE "C" PRIMARY KEY,
+           file_id      TEXT COLLATE "C" NOT NULL REFERENCES files(id) ON DELETE CASCADE DEFERRABLE,
+           kind         TEXT COLLATE "C" NOT NULL,
+           status       TEXT COLLATE "C" NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','done','failed')),
+           attempts     INTEGER NOT NULL DEFAULT 0,
+           last_error   TEXT,
+           run_after    TIMESTAMPTZ(3) NOT NULL,
+           locked_until TIMESTAMPTZ(3),
+           created_at   TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           updated_at   TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+           UNIQUE (file_id, kind)
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_media_jobs_due ON media_jobs(status, run_after)`);
+    }
+  }
+  ,{
+    version: 38,
+    name: 'presigned direct uploads',
+    up: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS direct_uploads (
+           id            TEXT PRIMARY KEY,
+           user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+           category      TEXT NOT NULL,
+           object_key    TEXT NOT NULL UNIQUE,
+           filename      TEXT NOT NULL,
+           declared_mime TEXT NOT NULL,
+           declared_size INTEGER NOT NULL,
+           visibility    TEXT NOT NULL DEFAULT 'public',
+           status        TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','completed','rejected','expired')),
+           file_id       TEXT REFERENCES files(id) ON DELETE SET NULL,
+           expires_at    TEXT NOT NULL,
+           created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
+    },
+    postgres: async () => {
+      await runQuery(
+        `CREATE TABLE IF NOT EXISTS direct_uploads (
+           id            TEXT COLLATE "C" PRIMARY KEY,
+           user_id       TEXT COLLATE "C" NOT NULL REFERENCES users(id) ON DELETE CASCADE DEFERRABLE,
+           category      TEXT COLLATE "C" NOT NULL,
+           object_key    TEXT COLLATE "C" NOT NULL UNIQUE,
+           filename      TEXT NOT NULL,
+           declared_mime TEXT COLLATE "C" NOT NULL,
+           declared_size BIGINT NOT NULL,
+           visibility    TEXT COLLATE "C" NOT NULL DEFAULT 'public',
+           status        TEXT COLLATE "C" NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','completed','rejected','expired')),
+           file_id       TEXT COLLATE "C" REFERENCES files(id) ON DELETE SET NULL DEFERRABLE,
+           expires_at    TIMESTAMPTZ(3) NOT NULL,
+           created_at    TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+         )`
+      );
+      await runQuery(`CREATE INDEX IF NOT EXISTS idx_direct_uploads_user ON direct_uploads(user_id, status)`);
+    }
+  }
+  // safety (v39–v40): age, instance admin, report routing, message requests,
+  // instance settings + audit log. See db/migrations/safety.js.
+  ,{
+    version: 39,
+    name: 'safety: age, instance admin, report routing, message requests',
+    up: () => safetyV39Sqlite({ runQuery, allQuery }),
+    postgres: () => safetyV39Postgres({ runQuery })
+  }
+  ,{
+    version: 40,
+    name: 'safety: instance settings and admin audit log',
+    up: () => safetyV40Sqlite({ runQuery }),
+    postgres: () => safetyV40Postgres({ runQuery })
+  }
+  // admin polish (v41–v42): recurring events, moderator alert channel.
+  ,...ADMIN_POLISH_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // integration (v43): message forwarding snapshot. See db/migrations/integration.js.
+  ,...INTEGRATION_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // profiles (v44–v45): status expiry, profile theme, name styles, cosmetics
+  // catalogue, badges, server tags. See db/migrations/profiles.js.
+  ,...PROFILES_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // servers (v46–v47): role styles/icons, channel emoji, server profile, discovery.
+  ,...SERVERS_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
+  // payments (v48): donation orders, webhook idempotency, supporter badge.
+  // See db/migrations/payments.js.
+  ,...PAYMENTS_MIGRATIONS.map((m) => ({
+    version: m.version,
+    name: m.name,
+    up: () => m.up({ runQuery, allQuery }),
+    postgres: () => m.postgres({ runQuery, allQuery })
+  }))
 ];
 
 // Applied in array order, so the array order must be the version order — and
@@ -394,119 +736,132 @@ for (let i = 1; i < MIGRATIONS.length; i += 1) {
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
 
-const verbose = process.env.SQL_DEBUG === '1' ? sqlite3.verbose() : sqlite3;
-
-const db = new verbose.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('❌ Error opening SQLite database:', err.message);
-    process.exit(1);
+for (const migration of MIGRATIONS) {
+  if (migration.version > PG_BASELINE_VERSION && typeof migration.postgres !== 'function') {
+    throw new Error(`Migration v${migration.version} has no postgres implementation`);
   }
-  // Inside `node --test` the child's stdout is the runner's own channel, and a
-  // stray banner from a directly-imported module corrupts it.
-  if (!process.env.NODE_TEST_CONTEXT) {
-    console.log(`🗄️  Connected to SQLite database: ${path.basename(DB_PATH)}`);
-  }
-});
+}
 
-// Serialize writes so concurrent socket handlers never interleave a transaction.
-db.serialize();
+// Inside `node --test` the child's stdout is the runner's own channel, and a
+// stray banner from a directly-imported module corrupts it.
+const quiet = Boolean(process.env.NODE_TEST_CONTEXT);
+
+const driver = isPostgres
+  ? (await import('./db/postgres.js')).createPgDriver(process.env, { quiet })
+  : createSqliteDriver({ dbPath: DB_PATH, verbose: process.env.SQL_DEBUG === '1', quiet });
 
 // --- promise helpers ---------------------------------------------------------
 
-export const runQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(decorate(err, sql));
-      else resolve(this); // { lastID, changes }
-    });
+// In-flight operations, so closeDB() can let work that is already running
+// (a socket's disconnect handler marking its user offline, say) finish before
+// the connection goes away, instead of failing it half-way.
+// Every helper below is timed (app_db_query_duration_seconds) and, when
+// OpenTelemetry is on, traced with the statement text but never its parameters.
+const DRIVER = isPostgres ? 'postgres' : 'sqlite';
+let inflight = 0;
+let lastSettled = Date.now();
+let closed = false;
+function track(promise) {
+  inflight += 1;
+  return promise.finally(() => {
+    inflight -= 1;
+    lastSettled = Date.now();
   });
-
-export const getQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(decorate(err, sql));
-      else resolve(row);
-    });
-  });
-
-export const allQuery = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(decorate(err, sql));
-      else resolve(rows ?? []);
-    });
-  });
-
-export const execScript = (sql) =>
-  new Promise((resolve, reject) => {
-    db.exec(sql, (err) => (err ? reject(decorate(err, sql)) : resolve()));
-  });
-
-function decorate(err, sql) {
-  err.sql = String(sql).trim().slice(0, 200);
-  return err;
 }
+function guard() {
+  if (closed) {
+    const err = new Error('Database is closed (the server is shutting down)');
+    err.code = 'DB_CLOSED';
+    throw err;
+  }
+}
+
+/** Execute a statement. Resolves to { changes, lastID } (plus `rows` on Postgres). */
+export const runQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'run', text, () => driver.run(text, params))); };
+
+/** First row, or undefined. */
+export const getQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'get', text, () => driver.get(text, params))); };
+
+/** All rows (never null). */
+export const allQuery = async (text, params = []) => { guard(); return track(traceDb(DRIVER, 'all', text, () => driver.all(text, params))); };
+
+/** Several statements, no parameters (schema scripts). */
+export const execScript = async (text) => { guard(); return track(traceDb(DRIVER, 'exec', null, () => driver.exec(text))); };
 
 /**
  * Run `fn` inside a transaction, rolling back on any throw.
  *
- * There is one connection and SQLite has no nested transactions, so concurrent
- * callers are *serialised* rather than interleaved. A plain boolean guard is
- * not enough: it cannot tell a nested call from a concurrent one, so a second
- * request arriving mid-transaction would run its writes inside — and be
- * committed or rolled back by — the first one's transaction.
+ * Every query on fn's async call stack joins the transaction — including ones
+ * made deep inside helpers — and no query from any other request does. A
+ * nested transaction() is a SAVEPOINT: if it throws, only its own writes are
+ * undone and the error propagates to the enclosing fn.
  *
- * Nesting is detected with AsyncLocalStorage (a nested call really does join
- * the outer transaction, which is what callers expect); everything else queues
- * behind a promise chain and gets a transaction of its own.
+ * SQLite runs transactions one at a time (and queues writes made outside one
+ * behind it). Postgres runs them concurrently at SERIALIZABLE isolation and
+ * re-runs fn after a serialization failure or deadlock, so fn may execute
+ * more than once: keep socket emits and other side effects outside it.
+ *
+ * `opts` (Postgres only): { isolation: 'read committed' | 'repeatable read' |
+ * 'serializable', retries }.
  */
-const transactionContext = new AsyncLocalStorage();
-let transactionQueue = Promise.resolve();
+export const transaction = async (fn, opts) => { guard(); return track(traceDb(DRIVER, 'transaction', null, () => driver.transaction(fn, opts))); };
 
-export function transaction(fn) {
-  // Already inside one on this async call stack: join it.
-  if (transactionContext.getStore()) return fn();
+/** True when the caller is inside a transaction(). */
+export const inTransaction = () => driver.inTransaction();
 
-  const run = async () => {
-    await runQuery('BEGIN IMMEDIATE');
-    try {
-      const result = await transactionContext.run({ depth: 1 }, fn);
-      await runQuery('COMMIT');
-      return result;
-    } catch (err) {
-      try { await runQuery('ROLLBACK'); } catch { /* already rolled back */ }
-      throw err;
-    }
-  };
+// --- error classification ----------------------------------------------------
 
-  // Queue behind whatever is already running, but never let one caller's
-  // failure break the chain for the next.
-  const result = transactionQueue.then(run, run);
-  transactionQueue = result.then(() => {}, () => {});
-  return result;
+export {
+  isUniqueViolation, isForeignKeyViolation, isConstraintViolation, classifyDatabaseError
+} from './db/dialect.js';
+
+// --- health ------------------------------------------------------------------
+
+/** Driver details for logs and /api/health. Never includes credentials. */
+export const dbInfo = () => driver.info();
+
+/** Live load figures for metrics: in-flight calls and (Postgres) pool usage. */
+export const dbStats = () => ({ driver: DRIVER, inflight, pool: driver.poolStats?.() ?? null });
+
+/** Round-trip the database, bounded by `timeoutMs`. Never throws. */
+export async function dbHealth({ timeoutMs = 3000 } = {}) {
+  let timer;
+  try {
+    const result = await Promise.race([
+      driver.ping(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no response within ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+    return { ...dbInfo(), reachable: true, ...result };
+  } catch (err) {
+    return { ...dbInfo(), reachable: false, ok: false, error: err.message };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- schema management -------------------------------------------------------
 
 async function tableExists(name) {
-  const row = await getQuery(
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, [name]
-  );
-  return Boolean(row);
+  const row = isPostgres
+    ? await getQuery(`SELECT to_regclass(?) IS NOT NULL AS present`, [name])
+    : await getQuery(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`, [name]);
+  return Boolean(row?.present);
 }
 
 /**
  * The prototype schema had no schema_migrations table and a much thinner shape
  * (no roles, no files registry, reactions as a JSON blob). There is no sensible
  * column-by-column upgrade path and the only data in it is seed data, so back
- * the file up and rebuild.
+ * the file up and rebuild. SQLite only: Postgres support postdates it.
  */
 async function rebuildLegacySchema() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backup = `${DB_PATH}.legacy-${stamp}.bak`;
   if (fs.existsSync(DB_PATH)) {
     fs.copyFileSync(DB_PATH, backup);
-    console.warn(`⚠️  Legacy schema detected. Backed up to ${path.basename(backup)}`);
+    log.warn({ backup: path.basename(backup) }, 'legacy schema detected; database backed up');
   }
 
   const tables = await allQuery(
@@ -517,10 +872,27 @@ async function rebuildLegacySchema() {
     await runQuery(`DROP TABLE IF EXISTS "${name}"`);
   }
   await runQuery('PRAGMA foreign_keys = ON');
-  console.warn('♻️  Legacy tables dropped; rebuilding with schema v1.');
+  log.warn('legacy tables dropped; rebuilding with schema v1');
 }
 
-export async function initDB({ seed = true } = {}) {
+/**
+ * Seed accounts share a published password (db/seed.js SEED_PASSWORD) and own
+ * the seeded servers, so seeding a production database would hand out an
+ * owner login to anyone who has read this repository. Production therefore
+ * never seeds unless SEED_DATABASE=1 is set explicitly.
+ */
+export function shouldSeed(env = process.env) {
+  if (env.SEED_DATABASE !== undefined && env.SEED_DATABASE !== '') {
+    return ['1', 'true', 'yes', 'on'].includes(String(env.SEED_DATABASE).toLowerCase());
+  }
+  return env.NODE_ENV !== 'production';
+}
+
+const logMigration = (migration) => {
+  if (!quiet) log.info({ version: migration.version, name: migration.name }, `applied migration v${migration.version}`);
+};
+
+async function initSqlite({ seed }) {
   // WAL keeps readers unblocked while a write transaction is open — needed once
   // socket handlers and HTTP routes write concurrently.
   await runQuery('PRAGMA journal_mode = WAL');
@@ -553,22 +925,91 @@ export async function initDB({ seed = true } = {}) {
     };
     if (migration.unsafeOutsideTransaction) await runIt();
     else await transaction(runIt);
-    if (!process.env.NODE_TEST_CONTEXT) {
-      console.log(`📐 Applied migration v${migration.version} — ${migration.name}`);
-    }
+    logMigration(migration);
   }
 
   if (seed) await seedDatabase({ runQuery, getQuery, transaction });
 
   await runQuery('PRAGMA optimize');
-  return db;
 }
 
-/** Flush WAL and close cleanly. */
-export function closeDB() {
-  return new Promise((resolve) => {
-    db.run('PRAGMA wal_checkpoint(TRUNCATE)', () => db.close(() => resolve()));
+/**
+ * Postgres: create the baseline on an empty database, then apply versioned
+ * migrations — each in its own transaction together with the row recording
+ * it — all while holding a session advisory lock, so several instances
+ * starting at once apply every migration exactly once.
+ */
+async function initPostgres({ seed }) {
+  await driver.withAdvisoryLock(MIGRATION_LOCK_KEY, async () => {
+    if (!(await tableExists('schema_migrations'))) {
+      if (await tableExists('users')) {
+        throw new Error(
+          'The Postgres database has application tables but no schema_migrations table. ' +
+          'Refusing to guess its schema version; point DATABASE_URL at an empty database.'
+        );
+      }
+      await transaction(async () => {
+        await execScript(fs.readFileSync(PG_SCHEMA_PATH, 'utf8'));
+        for (const migration of MIGRATIONS) {
+          if (migration.version > PG_BASELINE_VERSION) break;
+          await runQuery(
+            `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`,
+            [migration.version, migration.name]
+          );
+        }
+      });
+      if (!quiet) log.info({ baseline: PG_BASELINE_VERSION }, 'created PostgreSQL schema');
+    }
+
+    const appliedRows = await allQuery(`SELECT version FROM schema_migrations`);
+    const applied = new Set(appliedRows.map((r) => r.version));
+    const newest = Math.max(0, ...applied);
+    if (newest > SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema is v${newest} but this build only knows v${SCHEMA_VERSION}. ` +
+        'Deploy the newer build (or restore a matching backup) instead of downgrading.'
+      );
+    }
+
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.version) || migration.version <= PG_BASELINE_VERSION) continue;
+      await transaction(async () => {
+        await migration.postgres();
+        await runQuery(
+          `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`,
+          [migration.version, migration.name]
+        );
+      }, { isolation: 'read committed', retries: 0 });
+      logMigration(migration);
+    }
+
+    if (seed) await seedDatabase({ runQuery, getQuery, transaction });
   });
 }
 
-export default db;
+export async function initDB({ seed = shouldSeed() } = {}) {
+  if (isPostgres) await initPostgres({ seed });
+  else await initSqlite({ seed });
+  return driver.handle;
+}
+
+/**
+ * Drain and close: waits (up to `drainMs`) until nothing has touched the
+ * database for `quietMs` — so a chain of queries is not cut between two
+ * statements — then flushes the SQLite WAL or ends the Postgres pool. Later
+ * calls fail fast with code DB_CLOSED.
+ */
+let closing = null;
+export function closeDB({ drainMs = 5000, quietMs = 150 } = {}) {
+  closing ??= (async () => {
+    const deadline = Date.now() + drainMs;
+    while (Date.now() < deadline && (inflight > 0 || Date.now() - lastSettled < quietMs)) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    closed = true;
+    await driver.close();
+  })();
+  return closing;
+}
+
+export default driver.handle;

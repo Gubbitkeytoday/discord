@@ -1,122 +1,210 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bell, BellOff, Check } from 'lucide-react';
+import { useDismiss } from '../hooks/useFocusTrap';
+import { Bell, BellOff, Check, ArrowUp, ArrowDown } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
+import useRestoreFocus from './ui/useRestoreFocus.js';
+import { get, put } from '../api';
+import { ToggleRow } from './ui/Toggle.jsx';
+import { menuItem, menuSeparator, menuHeading, menuSurface, MENU_ICON } from './ui/menu.js';
+import { moveServerInRail, canMoveServerInRail } from './ServerRail.jsx';
 
 const MUTE_DURATIONS = () => [
-  { minutes: 15,   label: t('notif.mute15m') },
-  { minutes: 60,   label: t('notif.mute1h') },
-  { minutes: 180,  label: t('notif.mute3h') },
-  { minutes: 480,  label: t('notif.mute8h') },
-  { minutes: 1440, label: t('notif.mute24h') },
-  { minutes: 0,    label: t('notif.muteForever') }
+  { minutes: 15,    label: t('notif.mute15m') },
+  { minutes: 60,    label: t('notif.mute1h') },
+  { minutes: 180,   label: t('notif.mute3h') },
+  { minutes: 480,   label: t('notif.mute8h') },
+  { minutes: 1440,  label: t('notif.mute24h') },
+  { minutes: 10080, label: t('notif.mute1w') },
+  { minutes: 0,     label: t('notif.muteForever') }
 ];
 
-const CHANNEL_LEVELS = () => [
-  { value: 'inherit',        label: t('notif.useServerDefault') },
-  { value: 'all_messages',   label: t('notif.allMessages') },
-  { value: 'only_mentions',  label: t('notif.onlyMentions') },
-  { value: 'nothing',        label: t('notif.nothing') }
-];
+const LEVEL_LABEL = () => ({
+  all_messages: t('notif.allMessages'),
+  only_mentions: t('notif.onlyMentions'),
+  nothing: t('notif.nothing')
+});
 
-const SERVER_LEVELS = () => [
-  { value: 'all_messages',   label: t('notif.allMessages') },
-  { value: 'only_mentions',  label: t('notif.onlyMentions') },
-  { value: 'nothing',        label: t('notif.nothing') }
-];
+const isMuteActive = (s) => Boolean(s?.muted)
+  && (!s?.muted_until || Date.parse(s.muted_until) > Date.now());
+
+/** The radio "dot" and checkbox "tick" drawn at the end of a row. */
+function RadioMark({ on }) {
+  return (
+    <span aria-hidden="true" className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${on ? 'border-current' : 'border-d-text3'}`}>
+      {on && <span className="h-2.5 w-2.5 rounded-full bg-current" />}
+    </span>
+  );
+}
+function CheckMark({ on }) {
+  return (
+    <span aria-hidden="true" className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 ${on ? 'border-d-brand bg-d-brand' : 'border-d-text3'}`}>
+      {on && <Check className="h-3.5 w-3.5 text-white" strokeWidth={3} />}
+    </span>
+  );
+}
 
 /**
- * Discord's per-channel / per-server notification menu: a mute switch with
- * durations, plus the notification level. Both persist per user.
+ * Discord's per-channel / per-server notification menu: mute with a duration,
+ * the notification level (a channel or thread can follow its parent/server),
+ * and, for a server, suppressing @everyone/@here and role mentions, plus
+ * Move up / Move down (the keyboard alternative to dragging it in the rail).
+ *
+ * Every row is one target at least 32px tall (40px for the mute switch), the
+ * whole row is clickable, and focus moves with ↑/↓ like a native menu.
+ *
+ * Reads and writes /api/notification-settings (the server's source of truth
+ * for what notifies), and reports each change through `onChange` so the app's
+ * own settings state stays in step.
  */
 export default function NotificationSettingsPopover({
   kind, target, settings, x, y, onChange, onMarkRead, onClose
 }) {
   const ref = useRef(null);
   const [showDurations, setShowDurations] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState(null);
+  const endpoint = target?.id
+    ? `/api/notification-settings/${kind === 'channel' ? 'channels' : 'servers'}/${encodeURIComponent(target.id)}`
+    : null;
+
+  useDismiss(ref, onClose);
+  useRestoreFocus(ref);
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+    if (!endpoint) return undefined;
+    let cancelled = false;
+    get(endpoint).then((value) => { if (!cancelled) setDetail(value); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [endpoint]);
 
-  const muted = Boolean(settings?.muted);
-  const level = settings?.notification_level ?? (kind === 'channel' ? 'inherit' : 'all_messages');
-  const levels = kind === 'channel' ? CHANNEL_LEVELS() : SERVER_LEVELS();
+  // Focus the first item so the menu is usable from the keyboard at once.
+  useEffect(() => {
+    ref.current?.querySelector('[role^="menuitem"]')?.focus();
+  }, []);
+
+  const onKeyDown = (event) => {
+    const items = [...(ref.current?.querySelectorAll('[role^="menuitem"]:not([disabled])') ?? [])];
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === 'ArrowDown') next = items[(index + 1) % items.length];
+    else if (event.key === 'ArrowUp') next = items[(index - 1 + items.length) % items.length];
+    else if (event.key === 'Home') next = items[0];
+    else if (event.key === 'End') next = items[items.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  };
+
+  const muted = detail ? Boolean(detail.muted) : isMuteActive(settings);
+  const mutedUntil = detail ? detail.muted_until : (isMuteActive(settings) ? settings?.muted_until : null);
+  // Channel: 'inherit' | level. Server: null (server default) | level.
+  const level = kind === 'channel'
+    ? (detail?.level ?? settings?.notification_level ?? 'inherit')
+    : (detail ? (detail.level ?? 'inherit') : (settings?.level_override ?? 'inherit'));
+  const labels = LEVEL_LABEL();
+  const inheritedLabel = kind === 'channel'
+    ? (detail && level === 'inherit' ? labels[detail.effective_level] : null)
+    : (detail ? labels[detail.server_default] : null);
+
+  const save = async (body, appPatch) => {
+    setError(null);
+    try {
+      if (endpoint) setDetail(await put(endpoint, body));
+      if (appPatch) onChange?.(appPatch);
+    } catch (err) {
+      setError(err?.message ?? String(err));
+    }
+  };
 
   const mute = (minutes) => {
-    onChange({
-      muted: true,
-      muted_until: minutes ? new Date(Date.now() + minutes * 60_000).toISOString() : null
-    });
+    const until = minutes ? new Date(Date.now() + minutes * 60_000).toISOString() : null;
+    save({ mute_minutes: minutes }, { muted: true, muted_until: until });
     setShowDurations(false);
     onClose();
   };
 
+  const setLevel = (value) => {
+    if (kind === 'channel') {
+      save({ level: value }, { notification_level: value });
+    } else {
+      save({ level: value === 'inherit' ? null : value },
+        { notification_level: value === 'inherit' ? 'all_messages' : value, level_override: value === 'inherit' ? null : value });
+    }
+  };
+
+  const options = [
+    {
+      value: 'inherit',
+      label: kind === 'channel' ? t('notif.useDefault') : t('notif.useServerDefault'),
+      hint: inheritedLabel
+    },
+    { value: 'all_messages', label: labels.all_messages },
+    { value: 'only_mentions', label: labels.only_mentions },
+    { value: 'nothing', label: labels.nothing }
+  ];
+
+  const width = 300;
   const style = {
-    left: Math.min(x, window.innerWidth - 280),
-    top: Math.min(y, window.innerHeight - 340)
+    left: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+    top: Math.max(8, Math.min(y, window.innerHeight - (kind === 'server' ? 560 : 440)))
+  };
+
+  const muteLabel = kind === 'channel' ? t('notif.muteChannel') : t('notif.muteServer');
+  const move = (delta) => {
+    moveServerInRail(target.id, delta);
+    onClose();
   };
 
   return (
     <div
       ref={ref}
       role="menu"
-      style={style}
-      className="fixed z-[60] w-64 bg-d-sunken border border-d-surface rounded-md shadow-2xl py-2 text-sm"
+      aria-label={t('notif.notificationSettings')}
+      onKeyDown={onKeyDown}
+      style={{ ...style, width: `min(${width}px, calc(100vw - 16px))` }}
+      className={`fixed z-[60] max-h-[calc(100dvh-16px)] overflow-y-auto overscroll-contain text-sm ${menuSurface}`}
     >
-      <p className="px-3 pb-2 text-[11px] font-bold text-d-text3 uppercase truncate">
+      <p className={`${menuHeading} truncate`} title={target?.name ?? ''}>
         {kind === 'channel' ? `#${target?.name ?? ''}` : target?.name ?? ''}
       </p>
 
       {onMarkRead && (
         <>
-          <button
-            role="menuitem"
-            onClick={() => { onMarkRead(); onClose(); }}
-            className="w-[calc(100%-12px)] mx-1.5 flex items-center gap-2 px-2 py-1.5 rounded text-d-text2 hover:bg-d-brand hover:text-white transition-colors"
-          >
-            <Check className="w-4 h-4" /> {t('notif.markRead')}
+          <button type="button" role="menuitem" onClick={() => { onMarkRead(); onClose(); }} className={menuItem}>
+            <Check size={MENU_ICON} aria-hidden="true" /> {t('notif.markRead')}
           </button>
-          <div className="h-[1px] bg-d-surface my-1.5 mx-2" />
+          <div className={menuSeparator} role="separator" />
         </>
       )}
 
-      <div className="px-3 py-1.5 flex items-center justify-between gap-2">
-        <span className="flex items-center gap-2 text-d-text2">
-          {muted ? <BellOff className="w-4 h-4" /> : <Bell className="w-4 h-4" />}
-          {kind === 'channel' ? t('notif.muteChannel') : t('notif.muteServer')}
-        </span>
-        <button
-          role="switch"
-          aria-checked={muted}
-          aria-label={kind === 'channel' ? t('notif.muteChannel') : t('notif.muteServer')}
-          onClick={() => (muted ? onChange({ muted: false, muted_until: null }) : setShowDurations((v) => !v))}
-          className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${muted ? 'bg-d-brand' : 'bg-d-text4'}`}
-        >
-          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${muted ? 'left-[22px]' : 'left-0.5'}`} />
-        </button>
+      {/* The whole row is the switch: label, hint and pill. Turning mute ON
+          first asks for how long, like Discord. */}
+      <div className="px-1.5">
+        <ToggleRow
+          role="menuitemcheckbox"
+          icon={muted ? BellOff : Bell}
+          label={muteLabel}
+          hint={muted && mutedUntil
+            ? t('notif.mutedUntil', { time: new Date(mutedUntil).toLocaleString() })
+            : t(kind === 'channel' ? 'notif.muteChannelHint' : 'notif.muteServerHint')}
+          checked={muted}
+          onChange={() => (muted
+            ? save({ muted: false }, { muted: false, muted_until: null })
+            : setShowDurations((v) => !v))}
+        />
       </div>
 
-      {settings?.muted_until && muted && (
-        <p className="px-3 pb-1 text-[10px] text-d-text4">
-          {t('notif.mutedUntil', { time: new Date(settings.muted_until).toLocaleString() })}
-        </p>
-      )}
-
       {showDurations && !muted && (
-        <div className="mx-1.5 mb-1 rounded bg-d-base/60 py-1">
+        <div role="group" aria-label={t('notif.muteFor')} className="mx-1.5 mb-1 rounded-[var(--radius-d-sm)] bg-d-base/60 py-1">
+          <p className="px-3 pt-1 pb-1 text-xs font-semibold text-d-text3">{t('notif.muteFor')}</p>
           {MUTE_DURATIONS().map((d) => (
             <button
               key={d.minutes}
+              type="button"
+              role="menuitem"
               onClick={() => mute(d.minutes)}
-              className="w-full text-left px-3 py-1.5 text-xs text-d-text2 hover:bg-d-brand hover:text-white rounded transition-colors"
+              className={menuItem}
             >
               {d.label}
             </button>
@@ -124,20 +212,73 @@ export default function NotificationSettingsPopover({
         </div>
       )}
 
-      <div className="h-[1px] bg-d-surface my-1.5 mx-2" />
-      <p className="px-3 pb-1 text-[11px] font-bold text-d-text3 uppercase">{t('notif.level')}</p>
-      {levels.map((option) => (
-        <button
-          key={option.value}
-          role="menuitemradio"
-          aria-checked={level === option.value}
-          onClick={() => onChange({ notification_level: option.value })}
-          className="w-[calc(100%-12px)] mx-1.5 flex items-center justify-between gap-2 px-2 py-1.5 rounded text-d-text2 hover:bg-d-brand hover:text-white transition-colors"
-        >
-          <span className="truncate">{option.label}</span>
-          <span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${level === option.value ? 'border-d-brand bg-d-brand' : 'border-d-text4'}`} />
-        </button>
-      ))}
+      <div className={menuSeparator} role="separator" />
+      <p className={menuHeading} id="notif-level-heading">{t('notif.level')}</p>
+      <div role="group" aria-labelledby="notif-level-heading">
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="menuitemradio"
+            aria-checked={level === option.value}
+            onClick={() => setLevel(option.value)}
+            className={`${menuItem} justify-between`}
+          >
+            <span className="min-w-0 text-left">
+              <span className="block">{option.label}</span>
+              {option.hint && <span className="block truncate text-xs opacity-80">{option.hint}</span>}
+            </span>
+            <RadioMark on={level === option.value} />
+          </button>
+        ))}
+      </div>
+
+      {kind === 'server' && (
+        <>
+          <div className={menuSeparator} role="separator" />
+          {[
+            ['suppress_everyone', t('notif.suppressEveryone')],
+            ['suppress_roles', t('notif.suppressRoles')]
+          ].map(([key, label]) => {
+            const on = Boolean(detail?.[key] ?? settings?.[key]);
+            return (
+              <button
+                key={key}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={on}
+                onClick={() => save({ [key]: !on }, null)}
+                className={`${menuItem} justify-between`}
+              >
+                <span className="text-left leading-snug">{label}</span>
+                <CheckMark on={on} />
+              </button>
+            );
+          })}
+
+          <div className={menuSeparator} role="separator" />
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!canMoveServerInRail(target?.id, -1)}
+            onClick={() => move(-1)}
+            className={`${menuItem} disabled:opacity-50 disabled:pointer-events-none`}
+          >
+            <ArrowUp size={MENU_ICON} aria-hidden="true" /> {t('rail.moveUp')}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!canMoveServerInRail(target?.id, 1)}
+            onClick={() => move(1)}
+            className={`${menuItem} disabled:opacity-50 disabled:pointer-events-none`}
+          >
+            <ArrowDown size={MENU_ICON} aria-hidden="true" /> {t('rail.moveDown')}
+          </button>
+        </>
+      )}
+
+      {error && <p role="alert" className="px-3 pt-1 text-xs text-d-danger">{error}</p>}
     </div>
   );
 }

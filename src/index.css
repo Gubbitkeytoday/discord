@@ -1,148 +1,580 @@
 @import "tailwindcss";
 
 /* ============================================================================
-   Theme tokens
+   Design tokens
    ---------------------------------------------------------------------------
-   The neutral palette is declared through Tailwind's @theme so it generates
-   real utilities (bg-d-surface, text-d-text3, border-d-edge/40 …). That matters
-   because a Tailwind arbitrary colour value is baked into the stylesheet and
-   can never respond to a theme switch, while a token resolves through a CSS
-   variable that [data-theme="light"] can override.
+   Three layers (docs/research/DISCORD-THEMES.md §3):
 
-   Brand and status colours are deliberately identical in both themes — that is
-   what Discord does, and it keeps the accent recognisable.
+   1. RAW values, `--base-*`, set per theme on :root[data-theme=…] (and
+      :root[data-contrast="high"]). Dark is the default. The palette is the
+      contrast-checked one from the research doc: every text token reaches
+      4.5:1 on every surface of its theme (text-faint excepted on
+      bg-selected in Light/Ash — never pair those).
+   2. SEMANTIC tokens in @theme, `--color-bg-*`, `--color-text-*`,
+      `--color-border-*`, `--color-focus-ring`, `--color-fill-*`. These are
+      what Tailwind turns into utilities (bg-bg-chat, text-text-muted …) and
+      what new code should use. By default each one is simply its raw value.
+   3. LEGACY aliases, `--color-d-*`, so the ~2 000 existing `bg-d-surface`,
+      `text-d-text3` … classes keep working unchanged. They point at layer 2.
+
+   Theme layers on top (src/theme/, applied by theme/engine.js):
+   - Gradient / custom themes: `data-tint="gradient"` + `--tint-*` variables
+     (section "Gradient themes" below). Every surface stays opaque and shows
+     the viewport-wide gradient through a scrim thick enough for 4.5:1.
+   - Seasons (`data-season`), UI font (`data-ui-font`), density
+     (`data-ui-density` scales Tailwind's `--spacing`), corner radius
+     (`data-radius`) and text spacing (`data-text-spacing`).
+   - Accessibility › Saturation multiplies the chroma of every accent (brand,
+     status, link, danger …) through `--sat` (OKLCH). Unlike a CSS filter it
+     leaves avatars, images and video alone, and it does not turn :root into
+     a containing block for position:fixed.
+   Accents keep their hue across themes, as Discord's do; their TEXT forms are
+   separate tokens because a fill that works behind white text is unreadable
+   as text on a dark surface (Tailwind v4 resolves `text-*` through
+   `--text-color-*` first, which re-points text-d-danger & co. below).
    ========================================================================= */
-@theme {
-  /* surfaces */
-  --color-d-base:      #1e1f22;
-  --color-d-base2:     #1a1b1e;
-  --color-d-base3:     #090a0c;
-  --color-d-sunken:    #111214;
-  --color-d-panel:     #232428;
-  --color-d-surface:   #2b2d31;
-  --color-d-canvas:    #313338;
-  --color-d-input:     #383a40;
-  --color-d-active:    #404249;
-  --color-d-hover:     #35373c;
-  --color-d-hover2:    #35363c;
-  --color-d-rowhover:  #2e3035;
-  --color-d-divider:   #3f4147;
-  --color-d-edge:      #1f2023;
-  --color-d-control:   #4e5058;
-  --color-d-control2:  #3b3e45;
-  --color-d-invert:    #f2f3f5;
 
-  /* text */
-  --color-d-text:      #dbdee1;
-  --color-d-text2:     #b5bac1;
-  --color-d-text3:     #949ba4;
-  --color-d-text4:     #80848e;
-  --color-d-mention:   #c9cdfb;
-  --color-d-strong:    #ffffff;
-
-  /* brand + status (theme-invariant) */
-  --color-d-brand:       #5865f2;
-  --color-d-brandhover:  #4752c4;
-  --color-d-brandactive: #3c45a5;
-  --color-d-online:      #23a55a;
-  --color-d-idle:        #f0b232;
-  --color-d-danger:      #f23f43;
-  --color-d-link:        #00a8fc;
-  --color-d-success:     #248046;
-  --color-d-successhover:#1a6334;
-  --color-d-dangerhover: #da373c;
-  --color-d-mint:        #4fddab;
+/* ---- 1. raw values per theme ------------------------------------------- */
+:root {
+  --sat: 1;
+  --tint-color: #000;
+  --tint-amount: 0%;
+  --tint-text-color: #000;
+  --tint-text-amount: 0%;
+  --base-bg-app: #121214;
+  --base-bg-sidebar: #18181b;
+  --base-bg-chat: #1c1c20;
+  --base-bg-surface: #232328;
+  --base-bg-raised: #28282e;
+  --base-bg-input: #26262b;
+  --base-bg-hover: #222226;
+  --base-bg-selected: #2c2c32;
+  --base-bg-floating: #0c0c0e;
+  --base-bg-panel: #151517;
+  --base-bg-rowhover: #1f1f23;
+  --base-bg-deep: #0e0e10;
+  --base-bg-deepest: #070708;
+  --base-text-strong: #ffffff;
+  --base-text-default: #dcdcdf;
+  --base-text-subtle: #bfc0c5;
+  --base-text-muted: #a3a4ab;
+  --base-text-faint: #97989f;
+  --base-border-subtle: #3a3a41;
+  --base-border-strong: #6e6f78;
+  --base-control: #4a4b53;
+  --base-control2: #35363d;
+  --base-invert: #f2f3f5;
+  --base-mention: #c9cdfb;
+  --base-text-link: oklch(74.36% calc(0.1195 * var(--sat)) 254.52) /* #76aff6 */;
+  --base-text-brand: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+  --base-text-danger: oklch(73.51% calc(0.1621 * var(--sat)) 24.48) /* #ff7b75 */;
+  --base-text-positive: oklch(74.14% calc(0.1400 * var(--sat)) 151.29) /* #5fc47d */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
 }
-
-/* Light theme: surfaces invert, text darkens, accents stay put. */
 :root[data-theme="light"] {
-  --color-d-base:      #e3e5e8;
-  --color-d-base2:     #d7d9dd;
-  --color-d-base3:     #c9ccd1;
-  --color-d-sunken:    #f2f3f5;
-  --color-d-panel:     #ebedef;
-  --color-d-surface:   #f2f3f5;
-  --color-d-canvas:    #ffffff;
-  --color-d-input:     #ebedef;
-  --color-d-active:    #d4d7dc;
-  --color-d-hover:     #e0e1e5;
-  --color-d-hover2:    #e0e1e5;
-  --color-d-rowhover:  #f5f6f7;
-  --color-d-divider:   #d3d5d8;
-  --color-d-edge:      #e0e1e5;
-  --color-d-control:   #b5bac1;
-  --color-d-control2:  #c4c9ce;
-  --color-d-invert:    #313338;
-
-  --color-d-text:      #2e3338;
-  --color-d-text2:     #4e5058;
-  --color-d-text3:     #5c5e66;
-  --color-d-text4:     #80848e;
-  --color-d-mention:   #3c45a5;
-  --color-d-strong:    #060607;
-  /* #00a8fc reaches only 2.62:1 on white; darken it for the light theme. */
-  --color-d-link:      #0068a8;
+  --base-bg-app: #e3e4e8;
+  --base-bg-sidebar: #f0f1f4;
+  --base-bg-chat: #fbfbfc;
+  --base-bg-surface: #ffffff;
+  --base-bg-raised: #ffffff;
+  --base-bg-input: #e8e9ec;
+  --base-bg-hover: #e6e7ea;
+  --base-bg-selected: #d9dade;
+  --base-bg-floating: #ffffff;
+  --base-bg-panel: #e9eaee;
+  --base-bg-rowhover: #f3f3f5;
+  --base-bg-deep: #d7d9dd;
+  --base-bg-deepest: #c9ccd1;
+  --base-text-strong: #060607;
+  --base-text-default: #2e3035;
+  --base-text-subtle: #44464e;
+  --base-text-muted: #5b5d66;
+  --base-text-faint: #62646d;
+  --base-border-subtle: #c9cbd1;
+  --base-border-strong: #7d7f88;
+  --base-control: #b5bac1;
+  --base-control2: #c4c9ce;
+  --base-invert: #313338;
+  --base-mention: #3c45a5;
+  --base-text-link: oklch(48.82% calc(0.1318 * var(--sat)) 248.13) /* #0063a6 */;
+  --base-text-brand: oklch(49.53% calc(0.1860 * var(--sat)) 273.19) /* #4450c9 */;
+  --base-text-danger: oklch(50.13% calc(0.1783 * var(--sat)) 28.70) /* #b3261e */;
+  --base-text-positive: oklch(46.12% calc(0.1073 * var(--sat)) 152.91) /* #18693a */;
+  --base-text-warning: oklch(48.86% calc(0.1040 * var(--sat)) 73.09) /* #835500 */;
+  --base-text-mint: oklch(48.04% calc(0.0915 * var(--sat)) 170.28) /* #0c6e56 */;
+  --base-focus-ring: oklch(49.53% calc(0.1860 * var(--sat)) 273.19) /* #4450c9 */;
+  color-scheme: light;
 }
-
-/* Ash: a mid-grey theme that sits between Dark and Light. */
 :root[data-theme="ash"] {
-  --color-d-base:      #2b2d31;
-  --color-d-base2:     #26282c;
-  --color-d-base3:     #1e1f22;
-  --color-d-sunken:    #232529;
-  --color-d-panel:     #313338;
-  --color-d-surface:   #35373c;
-  --color-d-canvas:    #3b3d42;
-  --color-d-input:     #43454b;
-  --color-d-active:    #4a4c53;
-  --color-d-hover:     #41434a;
-  --color-d-hover2:    #41434a;
-  --color-d-rowhover:  #3f4147;
-  --color-d-divider:   #4a4c53;
-  --color-d-edge:      #2b2d31;
-  --color-d-control:   #5c5e66;
-  --color-d-control2:  #494c53;
+  --base-bg-app: #2a2b30;
+  --base-bg-sidebar: #303137;
+  --base-bg-chat: #35363c;
+  --base-bg-surface: #3b3c43;
+  --base-bg-raised: #3f4048;
+  --base-bg-input: #40414a;
+  --base-bg-hover: #3a3b41;
+  --base-bg-selected: #44454d;
+  --base-bg-floating: #222327;
+  --base-bg-panel: #2d2e33;
+  --base-bg-rowhover: #38393f;
+  --base-bg-deep: #25262b;
+  --base-bg-deepest: #1f2024;
+  --base-text-strong: #ffffff;
+  --base-text-default: #e0e0e3;
+  --base-text-subtle: #c9cacf;
+  --base-text-muted: #b1b2b8;
+  --base-text-faint: #aeafb5;
+  --base-border-subtle: #56575f;
+  --base-border-strong: #8a8b93;
+  --base-control: #5c5e66;
+  --base-control2: #4a4c53;
+  --base-invert: #f2f3f5;
+  --base-mention: #d3d6fc;
+  --base-text-link: oklch(78.61% calc(0.0994 * var(--sat)) 253.55) /* #8cbdf8 */;
+  --base-text-brand: oklch(78.00% calc(0.1123 * var(--sat)) 276.22) /* #a4b1ff */;
+  --base-text-danger: oklch(79.47% calc(0.1180 * var(--sat)) 23.20) /* #ff9d98 */;
+  --base-text-positive: oklch(77.79% calc(0.1338 * var(--sat)) 151.64) /* #6fcf8b */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(78.00% calc(0.1123 * var(--sat)) 276.22) /* #a4b1ff */;
 }
-
-/* Onyx: darker than Dark, near-black surfaces. */
 :root[data-theme="onyx"] {
-  --color-d-base:      #000000;
-  --color-d-base2:     #050506;
-  --color-d-base3:     #000000;
-  --color-d-sunken:    #060607;
-  --color-d-panel:     #101114;
-  --color-d-surface:   #131417;
-  --color-d-canvas:    #181A1E;
-  --color-d-input:     #202227;
-  --color-d-active:    #26282e;
-  --color-d-hover:     #1f2126;
-  --color-d-hover2:    #1f2126;
-  --color-d-rowhover:  #1b1d21;
-  --color-d-divider:   #26282e;
-  --color-d-edge:      #0a0b0d;
-  --color-d-control:   #3b3e45;
-  --color-d-control2:  #26282e;
+  --base-bg-app: #000000;
+  --base-bg-sidebar: #08080a;
+  --base-bg-chat: #000000;
+  --base-bg-surface: #131316;
+  --base-bg-raised: #18181c;
+  --base-bg-input: #141417;
+  --base-bg-hover: #111114;
+  --base-bg-selected: #1d1d22;
+  --base-bg-floating: #18181c;
+  --base-bg-panel: #050506;
+  --base-bg-rowhover: #0b0b0d;
+  --base-bg-deep: #000000;
+  --base-bg-deepest: #000000;
+  --base-text-strong: #ffffff;
+  --base-text-default: #d6d6da;
+  --base-text-subtle: #b9bac0;
+  --base-text-muted: #9c9da4;
+  --base-text-faint: #8a8b93;
+  --base-border-subtle: #2c2c31;
+  --base-border-strong: #65666e;
+  --base-control: #3b3e45;
+  --base-control2: #26282e;
+  --base-invert: #f2f3f5;
+  --base-mention: #c9cdfb;
+  --base-text-link: oklch(74.36% calc(0.1195 * var(--sat)) 254.52) /* #76aff6 */;
+  --base-text-brand: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
+  --base-text-danger: oklch(73.51% calc(0.1621 * var(--sat)) 24.48) /* #ff7b75 */;
+  --base-text-positive: oklch(74.14% calc(0.1400 * var(--sat)) 151.29) /* #5fc47d */;
+  --base-text-warning: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --base-text-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --base-focus-ring: oklch(75.15% calc(0.1286 * var(--sat)) 276.98) /* #9aa6ff */;
 }
-
-/* High contrast: stronger separation on top of whichever theme is active. */
 :root[data-contrast="high"] {
-  --color-d-text:    #ffffff;
-  --color-d-text2:   #f2f3f5;
-  --color-d-text3:   #dbdee1;
-  --color-d-text4:   #b5bac1;
-  --color-d-divider: #ffffff;
-  --color-d-edge:    #ffffff;
-  --color-d-link:    #7ec8ff;
+  --base-text-default: #ffffff;
+  --base-text-subtle: #f2f3f5;
+  --base-text-muted: #dbdee1;
+  --base-text-faint: #c4c7cc;
+  --base-border-subtle: #ffffff;
+  --base-border-strong: #ffffff;
+  --base-text-link: oklch(83.99% calc(0.0838 * var(--sat)) 247.80) /* #9fd0ff */;
+  --base-text-danger: oklch(83.18% calc(0.0932 * var(--sat)) 21.67) /* #ffb0ad */;
+  --base-text-positive: oklch(85.31% calc(0.1218 * var(--sat)) 152.56) /* #8ee6a8 */;
+  --base-text-brand: oklch(86.04% calc(0.0639 * var(--sat)) 281.06) /* #c9cdfb */;
+  --base-focus-ring: oklch(100.00% calc(0.0000 * var(--sat)) 89.88) /* #ffffff */;
 }
 :root[data-contrast="high"][data-theme="light"] {
-  --color-d-text:    #000000;
-  --color-d-text2:   #16181b;
-  --color-d-text3:   #2e3338;
-  --color-d-text4:   #4e5058;
-  --color-d-divider: #000000;
-  --color-d-edge:    #000000;
-  --color-d-link:    #004a7c;
+  --base-text-default: #000000;
+  --base-text-subtle: #16181b;
+  --base-text-muted: #2e3035;
+  --base-text-faint: #44464e;
+  --base-border-subtle: #000000;
+  --base-border-strong: #000000;
+  --base-text-link: oklch(39.82% calc(0.1051 * var(--sat)) 247.15) /* #004a7c */;
+  --base-text-danger: oklch(41.91% calc(0.1566 * var(--sat)) 26.16) /* #8f1418 */;
+  --base-text-positive: oklch(41.22% calc(0.1013 * var(--sat)) 152.23) /* #0d5a2e */;
+  --base-text-brand: oklch(38.35% calc(0.1554 * var(--sat)) 272.89) /* #2c3494 */;
+  --base-focus-ring: oklch(0.00% calc(0.0000 * var(--sat)) 0.00) /* #000000 */;
 }
+
+/* ---- 2 + 3. semantic tokens and legacy aliases -------------------------- */
+@theme {
+  /* Typography. Tailwind's `font-sans` (on the app root) resolves through this
+     token, so it is the one place the UI typeface is chosen. Inter first for
+     Latin/Cyrillic/Greek, Kanit for Thai (it only downloads when Thai text is
+     on screen — the @font-face rules carry a unicode-range), then the OS UI
+     font. CJK faces are deliberately NOT in the generic stack: Han characters
+     must be drawn with the Japanese, Korean, Simplified or Traditional forms
+     of the text's own language, which the :lang() rules below select. */
+  --font-sans: var(--font-ui-lead, 'Inter'), 'Kanit', system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Noto Sans', 'Noto Sans Thai', 'Helvetica Neue', Arial, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono',
+    'Noto Sans Mono', monospace;
+
+  /* semantic: surfaces (app frame < sidebar < chat < surface < raised) */
+  --color-bg-app: var(--base-bg-app);
+  --color-bg-sidebar: var(--base-bg-sidebar);
+  --color-bg-chat: var(--base-bg-chat);
+  --color-bg-surface: var(--base-bg-surface);
+  --color-bg-raised: var(--base-bg-raised);
+  --color-bg-input: var(--base-bg-input);
+  --color-bg-hover: var(--base-bg-hover);
+  --color-bg-selected: var(--base-bg-selected);
+  --color-bg-floating: var(--base-bg-floating);
+  --color-bg-panel: var(--base-bg-panel);
+  --color-bg-rowhover: var(--base-bg-rowhover);
+  --color-bg-deep: var(--base-bg-deep);
+  --color-bg-deepest: var(--base-bg-deepest);
+  --color-text-strong: var(--base-text-strong);
+  --color-text-default: var(--base-text-default);
+  --color-text-subtle: var(--base-text-subtle);
+  --color-text-muted: var(--base-text-muted);
+  --color-text-faint: var(--base-text-faint);
+  --color-border-subtle: var(--base-border-subtle);
+  --color-border-strong: var(--base-border-strong);
+  --color-control: var(--base-control);
+  --color-control2: var(--base-control2);
+  --color-invert: var(--base-invert);
+  --color-mention: var(--base-mention);
+  --color-text-link: var(--base-text-link);
+  --color-text-brand: var(--base-text-brand);
+  --color-text-danger: var(--base-text-danger);
+  --color-text-positive: var(--base-text-positive);
+  --color-text-warning: var(--base-text-warning);
+  --color-text-mint: var(--base-text-mint);
+  --color-focus-ring: var(--base-focus-ring);
+
+  /* semantic: accent fills (follow Saturation through --sat) */
+  --color-fill-brand: oklch(57.74% calc(0.2091 * var(--sat)) 273.85) /* #5865f2 */;
+  --color-fill-brandhover: oklch(49.67% calc(0.1760 * var(--sat)) 273.91) /* #4752c4 */;
+  --color-fill-brandactive: oklch(44.04% calc(0.1530 * var(--sat)) 274.22) /* #3c45a5 */;
+  --color-fill-online: oklch(63.70% calc(0.1551 * var(--sat)) 152.26) /* #23a55a */;
+  --color-fill-idle: oklch(80.11% calc(0.1515 * var(--sat)) 80.55) /* #f0b232 */;
+  --color-fill-danger: oklch(63.73% calc(0.2150 * var(--sat)) 24.73) /* #f23f43 */;
+  --color-fill-dangerhover: oklch(58.84% calc(0.1993 * var(--sat)) 24.39) /* #da373c */;
+  --color-fill-success: oklch(53.20% calc(0.1238 * var(--sat)) 151.57) /* #248046 */;
+  --color-fill-successhover: oklch(44.31% calc(0.1039 * var(--sat)) 151.13) /* #1a6334 */;
+  --color-fill-mint: oklch(80.82% calc(0.1419 * var(--sat)) 165.90) /* #4fddab */;
+  --color-fill-streaming: oklch(42.68% calc(0.1490 * var(--sat)) 296.51) /* #593695 */;
+  --color-on-brand: #ffffff;
+
+  /* legacy aliases: surfaces */
+  --color-d-base:      var(--color-bg-app);
+  --color-d-base2:     var(--color-bg-deep);
+  --color-d-base3:     var(--color-bg-deepest);
+  --color-d-sunken:    var(--color-bg-floating);
+  --color-d-panel:     var(--color-bg-panel);
+  --color-d-surface:   var(--color-bg-sidebar);
+  --color-d-canvas:    var(--color-bg-chat);
+  --color-d-input:     var(--color-bg-input);
+  --color-d-active:    var(--color-bg-selected);
+  --color-d-hover:     var(--color-bg-hover);
+  --color-d-hover2:    var(--color-bg-hover);
+  --color-d-rowhover:  var(--color-bg-rowhover);
+  --color-d-divider:   var(--color-border-subtle);
+  --color-d-edge:      var(--color-bg-app);
+  --color-d-control:   var(--color-control);
+  --color-d-control2:  var(--color-control2);
+  --color-d-invert:    var(--color-invert);
+
+  /* legacy aliases: text */
+  --color-d-text:      var(--color-text-default);
+  --color-d-text2:     var(--color-text-subtle);
+  --color-d-text3:     var(--color-text-muted);
+  --color-d-text4:     var(--color-text-faint);
+  --color-d-mention:   var(--color-mention);
+  --color-d-strong:    var(--color-text-strong);
+  --color-d-link:      var(--color-text-link);
+
+  /* legacy aliases: accent fills */
+  --color-d-brand:       var(--color-fill-brand);
+  --color-d-brandhover:  var(--color-fill-brandhover);
+  --color-d-brandactive: var(--color-fill-brandactive);
+  --color-d-online:      var(--color-fill-online);
+  --color-d-idle:        var(--color-fill-idle);
+  --color-d-danger:      var(--color-fill-danger);
+  --color-d-dangerhover: var(--color-fill-dangerhover);
+  --color-d-success:     var(--color-fill-success);
+  --color-d-successhover:var(--color-fill-successhover);
+  --color-d-mint:        var(--color-fill-mint);
+  --color-d-streaming:   var(--color-fill-streaming);
+
+  /* Accent colours used AS TEXT, and the legacy utilities re-pointed at them
+     (`text-d-danger` = readable danger text, `bg-d-danger` = the true fill). */
+  --color-d-dangertext:  var(--color-text-danger);
+  --color-d-onlinetext:  var(--color-text-positive);
+  --color-d-brandtext:   var(--color-text-brand);
+  --color-d-idletext:    var(--color-text-warning);
+  --color-d-minttext:    var(--color-text-mint);
+  --text-color-d-danger: var(--color-text-danger);
+  --text-color-d-online: var(--color-text-positive);
+  --text-color-d-success: var(--color-text-positive);
+  --text-color-d-brand:  var(--color-text-brand);
+  --text-color-d-idle:   var(--color-text-warning);
+  --text-color-d-mint:   var(--color-text-mint);
+
+  /* Keyboard focus indicator: ≥3:1 against every surface (2.4.11/1.4.11).
+     Brand blurple itself is only 2.6–2.7:1 on the dark surfaces. */
+  --color-d-focus:       var(--color-focus-ring);
+
+  /* Shape and depth scale, shared by the ui/ primitives. */
+  --radius-d-sm: 4px;
+  --radius-d-md: 8px;
+  --radius-d-lg: 12px;
+  --shadow-d-pop: 0 8px 16px rgb(0 0 0 / 0.24), 0 0 0 1px rgb(0 0 0 / 0.08);
+  --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.36), 0 0 0 1px rgb(0 0 0 / 0.12);
+}
+
+:root[data-theme="light"] {
+  --shadow-d-pop: 0 8px 16px rgb(0 0 0 / 0.12), 0 0 0 1px rgb(0 0 0 / 0.06);
+  --shadow-d-float: 0 12px 32px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.08);
+}
+
+/* ---------------------------------------------------------------------------
+   Gradient themes (12 free presets + custom themes) — src/theme/gradient.js.
+
+   theme/engine.js sets `data-tint="gradient"` and, computed from validated
+   hex stops and numbers only (never user CSS):
+     --tint-gradient        linear-gradient(<angle>deg, <stops>)
+     --tint-scrim-<layer>   the base theme's scrim colour at the layer's opacity
+     --tint-bg-<layer>      the flat equivalent at the gradient's average
+     --tint-overlay         white (dark base) / black (light base) row wash
+   The contrast guard picks the scrim so every text token keeps 4.5:1 at the
+   worst point of the gradient (scripts/test-themes-71.mjs proves it for all
+   presets). Each surface below is OPAQUE — scrim over the fixed, viewport-
+   wide gradient — so dialogs never show text through, yet the whole app
+   reads as one tinted sheet. High contrast and forced colours turn it off.
+   --------------------------------------------------------------------------- */
+:root[data-tint="gradient"] {
+  --color-bg-app: var(--tint-bg-app);
+  --color-bg-sidebar: var(--tint-bg-sidebar);
+  --color-bg-chat: var(--tint-bg-chat);
+  --color-bg-surface: var(--tint-bg-surface);
+  --color-bg-raised: var(--tint-bg-raised);
+  --color-bg-input: var(--tint-bg-input);
+  --color-bg-floating: var(--tint-bg-floating);
+  --color-bg-panel: var(--tint-bg-panel);
+  --color-bg-deep: var(--tint-bg-deep);
+  --color-bg-deepest: var(--tint-bg-deepest);
+  /* Row states wash whatever surface they sit on (guarded as overlays). */
+  --color-bg-rowhover: color-mix(in srgb, var(--tint-overlay) 3%, transparent);
+  --color-bg-hover: color-mix(in srgb, var(--tint-overlay) 5%, transparent);
+  --color-bg-selected: color-mix(in srgb, var(--tint-overlay) 9%, transparent);
+  --color-border-subtle: color-mix(in srgb, var(--tint-overlay) 14%, transparent);
+}
+/* Text on a gradient is a notch stronger than on the flat theme (as Discord
+   tints its text), so the scrim can stay thin and the colours show. The
+   values are src/theme/palettes.js GRADIENT_TEXT (the test checks). */
+:root[data-tint="gradient"][data-theme="dark"] {
+  --color-text-default: #e4e4e7;
+  --color-text-subtle: #cdced3;
+  --color-text-muted: #b8b9bf;
+  --color-text-faint: #adaeb4;
+  --color-text-link: #94c4fa;
+  --color-text-brand: #b0b9ff;
+  --color-text-danger: #ff9893;
+  --color-text-positive: #78d493;
+  --color-text-warning: #f3bf52;
+}
+:root[data-tint="gradient"][data-theme="light"] {
+  --color-text-default: #232428;
+  --color-text-subtle: #35373d;
+  --color-text-muted: #45474f;
+  --color-text-faint: #4c4e56;
+  --color-text-link: #004c80;
+  --color-text-brand: #343fae;
+  --color-text-danger: #951c16;
+  --color-text-positive: #11552d;
+  --color-text-warning: #664200;
+}
+:root[data-tint="gradient"] :is(.bg-d-base, .bg-d-edge, .bg-bg-app) {
+  --tint-layer: var(--tint-scrim-app);
+}
+:root[data-tint="gradient"] :is(.bg-d-surface, .bg-bg-sidebar) { --tint-layer: var(--tint-scrim-sidebar); }
+:root[data-tint="gradient"] :is(.bg-d-canvas, .bg-bg-chat) { --tint-layer: var(--tint-scrim-chat); }
+:root[data-tint="gradient"] .bg-bg-surface { --tint-layer: var(--tint-scrim-surface); }
+:root[data-tint="gradient"] .bg-bg-raised { --tint-layer: var(--tint-scrim-raised); }
+:root[data-tint="gradient"] :is(.bg-d-input, .bg-bg-input) { --tint-layer: var(--tint-scrim-input); }
+:root[data-tint="gradient"] :is(.bg-d-sunken, .bg-bg-floating) { --tint-layer: var(--tint-scrim-floating); }
+:root[data-tint="gradient"] :is(.bg-d-panel, .bg-bg-panel) { --tint-layer: var(--tint-scrim-panel); }
+:root[data-tint="gradient"] :is(.bg-d-base2, .bg-bg-deep) { --tint-layer: var(--tint-scrim-deep); }
+:root[data-tint="gradient"] :is(.bg-d-base3, .bg-bg-deepest) { --tint-layer: var(--tint-scrim-deepest); }
+:root[data-tint="gradient"] :is(
+  .bg-d-base, .bg-d-edge, .bg-d-surface, .bg-d-canvas, .bg-d-input, .bg-d-sunken, .bg-d-panel,
+  .bg-d-base2, .bg-d-base3, .bg-bg-app, .bg-bg-sidebar, .bg-bg-chat, .bg-bg-surface, .bg-bg-raised,
+  .bg-bg-input, .bg-bg-floating, .bg-bg-panel, .bg-bg-deep, .bg-bg-deepest
+) {
+  background-image: linear-gradient(var(--tint-layer), var(--tint-layer)), var(--tint-gradient);
+  background-attachment: fixed;
+}
+/* The settings surface paints its rail/content split itself. */
+:root[data-tint="gradient"] .settings-surface {
+  background-image:
+    linear-gradient(to right,
+      var(--tint-scrim-sidebar) 0 var(--settings-split),
+      var(--tint-scrim-chat) var(--settings-split) 100%),
+    var(--tint-gradient);
+  background-attachment: fixed;
+}
+@media (forced-colors: active) {
+  :root[data-tint="gradient"] * { background-image: none !important; }
+}
+
+/* ---------------------------------------------------------------------------
+   UI density (Appearance › UI density). Tailwind v4 derives every p-*, m-*,
+   gap-*, w-* and h-* step from `--spacing`, so one variable scales rows, icons
+   and bars across the whole app — Discord's Compact / Default / Spacious.
+   Compact never takes a control under 24×24 px (WCAG 2.2 SC 2.5.8).
+   `--density-*` are the named sizes for components that want them.
+   --------------------------------------------------------------------------- */
+:root {
+  --density-row: 32px;       /* channel / member row */
+  --density-icon: 48px;      /* server icon */
+  --density-bar: 48px;       /* header / title bar */
+  --density-panel: 52px;     /* user panel */
+}
+:root[data-ui-density="compact"] {
+  --spacing: 0.21875rem;
+  --density-row: 28px;
+  --density-icon: 40px;
+  --density-bar: 40px;
+  --density-panel: 46px;
+}
+:root[data-ui-density="spacious"] {
+  --spacing: 0.28125rem;
+  --density-row: 36px;
+  --density-icon: 52px;
+  --density-bar: 54px;
+  --density-panel: 58px;
+}
+:root[data-ui-density="compact"]:not([data-large-targets="true"]) :is(
+  button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"],
+  [role="option"], [role="tab"], [role="switch"], [role="radio"], [role="checkbox"], select
+):not(.message-body *) {
+  min-height: 24px;
+  min-width: 24px;
+}
+
+/* ---------------------------------------------------------------------------
+   Corner radius (Appearance › Corners). Re-points Tailwind's radius scale
+   and our own, so rounded-md, rounded-lg … follow. Avatars (rounded-full)
+   stay circles: people are circles, things follow the setting.
+   --------------------------------------------------------------------------- */
+:root[data-radius="sharp"] {
+  --radius: 0.125rem;
+  --radius-xs: 0.0625rem;
+  --radius-sm: 0.125rem;
+  --radius-md: 0.1875rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.375rem;
+  --radius-2xl: 0.5rem;
+  --radius-3xl: 0.625rem;
+  --radius-d-sm: 2px;
+  --radius-d-md: 3px;
+  --radius-d-lg: 4px;
+}
+:root[data-radius="round"] {
+  --radius: 0.375rem;
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --radius-2xl: 1.375rem;
+  --radius-3xl: 1.75rem;
+  --radius-d-sm: 6px;
+  --radius-d-md: 12px;
+  --radius-d-lg: 18px;
+}
+
+/* ---------------------------------------------------------------------------
+   UI font (Appearance › Font). Each face is self-hosted and downloaded only
+   when chosen (theme/engine.js); until then — and for Thai, which none of
+   them cover — the rest of the stack (Kanit, the OS font) is used.
+   --------------------------------------------------------------------------- */
+:root[data-ui-font="system"] { --font-ui-lead: system-ui; }
+:root[data-ui-font="atkinson"] { --font-ui-lead: 'Atkinson Hyperlegible'; }
+:root[data-ui-font="opendyslexic"] { --font-ui-lead: 'OpenDyslexic'; }
+
+/* Text spacing (WCAG 1.4.12). Line height applies to messages always; letter
+   and word spacing, when set, override every tracking class so nothing in
+   the UI is left tighter than the user asked for. */
+.message-body { line-height: var(--message-line-height, 1.375); }
+:root[data-text-spacing="custom"] body,
+:root[data-text-spacing="custom"] body *:not(svg, svg *) {
+  letter-spacing: var(--ui-letter-spacing, 0) !important;
+  word-spacing: var(--ui-word-spacing, 0) !important;
+}
+:root[data-text-spacing="custom"] :is(p, li, .message-body) {
+  line-height: max(var(--message-line-height, 1.375), 1.375) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Seasonal themes (src/theme/seasonal.js). A subtle accent (the brand fill,
+   still ≥4.5:1 behind white labels) and one small original decoration at the
+   foot of the server rail. Off with Appearance › Seasonal themes, under high
+   contrast, and — for the accent — when Saturation is turned down. The
+   decoration only sways when motion is allowed (the reduced-motion blocks
+   above stop it).
+   --------------------------------------------------------------------------- */
+:root[data-season="songkran"] {
+  --season-accent: #0a6aa1;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 5c4 6 7 10 7 14a7 7 0 0 1-14 0c0-4 3-8 7-14z' fill='%233aa8e0'/%3E%3Cpath d='M9 22c2 3 3 5 3 6.5a3 3 0 0 1-6 0C6 27 7 25 9 22zM31 20c2 3 3 5 3 6.5a3 3 0 0 1-6 0c0-1.5 1-3.5 3-6.5z' fill='%2378c6f0'/%3E%3Cpath d='M8 33c4 2 8 2 12 0s8-2 12 0' stroke='%233aa8e0' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='17.5' cy='18' r='1.6' fill='%23fff' opacity='.7'/%3E%3C/svg%3E");
+}
+:root[data-season="loykrathong"] {
+  --season-accent: #8a5300;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 8c1.6 2 2 3.4 2 4.4a2 2 0 0 1-4 0c0-1 .4-2.4 2-4.4z' fill='%23ffc24a'/%3E%3Crect x='19' y='14' width='2' height='7' rx='1' fill='%23f3e6c4'/%3E%3Cpath d='M8 25c3-1 6 0 8 2 1-4 3-6 4-7 1 1 3 3 4 7 2-2 5-3 8-2-1 4-5 7-12 7s-11-3-12-7z' fill='%23e98bb0'/%3E%3Cpath d='M8 25c2 3 6 4 12 4s10-1 12-4' fill='none' stroke='%23c05a86' stroke-width='1.2'/%3E%3Cpath d='M5 34c3 1.5 6 1.5 9 0s6-1.5 9 0 6 1.5 9 0 4-1 5-.5' stroke='%235aa9d6' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+:root[data-season="lunarnewyear"] {
+  --season-accent: #b8232b;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 3v4' stroke='%23d4a017' stroke-width='2'/%3E%3Crect x='15' y='7' width='10' height='3' rx='1' fill='%23d4a017'/%3E%3Cellipse cx='20' cy='19' rx='11' ry='9.5' fill='%23d6312f'/%3E%3Cpath d='M20 9.5v19M14 11c-2 5-2 11 0 16M26 11c2 5 2 11 0 16' stroke='%23a51f1f' stroke-width='1.2' fill='none'/%3E%3Crect x='15' y='28' width='10' height='3' rx='1' fill='%23d4a017'/%3E%3Cpath d='M18 31v6M20 31v7M22 31v6' stroke='%23e8b923' stroke-width='1.4'/%3E%3C/svg%3E");
+}
+:root[data-season="halloween"] {
+  --season-accent: #a94400;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cpath d='M20 10c0-3 2-5 4-5' stroke='%234e7a2e' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3Cellipse cx='13' cy='23' rx='8' ry='11' fill='%23e6781e'/%3E%3Cellipse cx='27' cy='23' rx='8' ry='11' fill='%23e6781e'/%3E%3Cellipse cx='20' cy='23' rx='8' ry='12' fill='%23f28c28'/%3E%3Cpath d='M14 20l3 3h-5zM26 20l-3 3h5zM13 28c3 2.5 11 2.5 14 0l-2.5 1.5-2-1.5-2.5 1.5-2.5-1.5-2 1.5z' fill='%23592d0a'/%3E%3C/svg%3E");
+}
+:root[data-season="winter"] {
+  --season-accent: #2a64a8;
+  --season-art: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cg stroke='%238fc6f2' stroke-width='2.4' stroke-linecap='round' fill='none'%3E%3Cpath d='M20 4v32M6.1 12l27.8 16M6.1 28l27.8-16'/%3E%3Cpath d='M16 7l4 4 4-4M16 33l4-4 4 4M7 17l5.5-1.5L11 10M33 23l-5.5 1.5L29 30M7 23l5.5 1.5L11 30M33 17l-5.5-1.5L29 10'/%3E%3C/g%3E%3C/svg%3E");
+}
+:root[data-season][data-saturation="100"]:not([data-contrast="high"]):not([data-tint]) {
+  --color-fill-brand: var(--season-accent);
+  --color-fill-brandhover: color-mix(in srgb, var(--season-accent) 84%, #000);
+  --color-fill-brandactive: color-mix(in srgb, var(--season-accent) 72%, #000);
+}
+@keyframes season-sway {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+/* The server rail (components/ServerRail.jsx) ends with the decoration; any
+   element can show it with the `season-art` class (theme/SeasonalArt). */
+:root[data-season]:not([data-contrast="high"]) nav[aria-describedby="rail-keyboard-hint"]::after,
+:root[data-season]:not([data-contrast="high"]) .season-art {
+  content: "";
+  display: block;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin: 4px auto 12px;
+  background: var(--season-art) center / contain no-repeat;
+  animation: season-sway 6s ease-in-out infinite;
+  pointer-events: none;
+}
+:root:not([data-season]) .season-art,
+:root[data-contrast="high"] .season-art { display: none; }
+@media (forced-colors: active) {
+  nav[aria-describedby="rail-keyboard-hint"]::after, .season-art { display: none !important; }
+}
+
+/* High contrast: brand fills darken so white labels reach 6.5:1. */
+:root[data-contrast="high"] {
+  --color-fill-brand: oklch(49.53% calc(0.1860 * var(--sat)) 273.19);
+}
+
 :root[data-contrast="high"] :focus-visible {
   outline-width: 3px;
 }
@@ -172,23 +604,14 @@
   html { font-size: calc(16px * var(--app-zoom, 1)); }
 
   /*
-   * Saturation is applied to the ROOT element, never to `body` or `#root`.
-   *
-   * This is not a style preference — it is load-bearing. Per CSS Filter
-   * Effects, any `filter` other than `none` makes the element a containing
-   * block for its `position: fixed` descendants, *unless that element is the
-   * document root*. Putting the filter on `body` therefore turned every fixed
-   * overlay in the app into an absolutely-positioned one: the login screen was
-   * clipped off the top of the window, and modals, toasts and the settings
-   * surface all anchored to the page instead of the viewport.
-   *
-   * The `:not([data-saturation="100"])` guard means the default setting emits
-   * no filter at all, so the common case carries neither the bug's blast
-   * radius nor its compositing cost.
+   * Saturation is NOT a filter. It used to be `filter: saturate()` on :root,
+   * which greyed out avatars, images and video along with the UI, and a filter
+   * on any element but the root turns it into a containing block for every
+   * position:fixed overlay (modals, toasts, the login screen). Now
+   * useUserSettings sets `--sat` (0…1) and every accent token multiplies its
+   * OKLCH chroma by it — see the token section at the top of this file.
+   * Never put a `filter` on body or #root (scripts/a11y-audit.mjs checks).
    */
-  :root[data-saturation]:not([data-saturation="100"]) {
-    filter: saturate(var(--app-saturation, 1));
-  }
 
   :root[data-reduced-motion="true"] *,
   :root[data-reduced-motion="true"] *::before,
@@ -199,29 +622,163 @@
     scroll-behavior: auto !important;
   }
 
+  html, body {
+    /* A sideways swipe must not become the browser's Back gesture and drop
+       the user out of the app (it went to about:blank on Android). */
+    overscroll-behavior-x: none;
+  }
+
   body {
-    font-family: 'Inter', 'Kanit', sans-serif;
+    font-family: var(--font-sans);
     margin: 0;
     padding: 0;
     background-color: var(--color-d-base);
     color: var(--color-d-text);
   }
 
-  /* Visible keyboard focus, without adding a ring on mouse clicks. */
+  /* An element that declares its own language (a message body, a name) gets
+     that language's font stack instead of inheriting the UI's. */
+  [lang] { font-family: var(--font-sans); }
+
+  /* Han unification: the same code point is drawn differently in Japanese,
+     Korean, Simplified and Traditional Chinese. Pick a face per language so
+     Japanese is never shown with Chinese glyph forms (and vice versa). Inter
+     stays first for any Latin mixed into the text. */
+  :lang(ja) {
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI',
+      'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', 'Source Han Sans JP',
+      'IPAGothic', 'IPAPGothic', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(ko) {
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR',
+      'Noto Sans CJK KR', 'Source Han Sans KR', 'NanumGothic', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(zh), :lang(zh-CN), :lang(zh-SG), :lang(zh-Hans) {
+    --font-sans: var(--font-ui-lead, 'Inter'), 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC',
+      'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(zh-TW), :lang(zh-HK), :lang(zh-MO), :lang(zh-Hant) {
+    --font-sans: var(--font-ui-lead, 'Inter'), 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC',
+      'Noto Sans CJK TC', 'Source Han Sans TC', 'WenQuanYi Zen Hei', 'Kanit', system-ui, sans-serif;
+  }
+  :lang(th) {
+    --font-sans: var(--font-ui-lead, 'Inter'), 'Kanit', 'Noto Sans Thai', 'Leelawadee UI', 'Thonburi',
+      system-ui, sans-serif;
+  }
+
+  /* CJK line breaking: no break inside a Korean word in short UI labels, and
+     the strict Japanese/Chinese rules for small kana and closing punctuation. */
+  :lang(ja), :lang(zh) { line-break: strict; }
+  :lang(ko) :is(h1, h2, h3, h4, label, button, th) { word-break: keep-all; overflow-wrap: anywhere; }
+
+  /* Visible keyboard focus, without adding a ring on mouse clicks. The colour
+     is a token that reaches 3:1 on every surface in every theme. */
   :focus-visible {
-    outline: 2px solid var(--color-d-brand);
+    outline: 2px solid var(--color-d-focus);
     outline-offset: 2px;
     border-radius: 3px;
   }
 
-  /* Respect the OS "reduce motion" preference. */
+  /* Text fields: most use `focus:outline-none` and signal focus with a 1px
+     border tint (about 2:1). Focus on a field must be unmistakable, so this
+     wins over that utility. A field inside a `.focus-ring` wrapper (the
+     composer, a search box with an icon) lets the wrapper draw it instead. */
+  :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"]),
+      textarea, select, [contenteditable="true"]):focus-visible {
+    outline: 2px solid var(--color-d-focus) !important;
+    outline-offset: 0 !important;
+  }
+  .focus-ring :is(input, textarea, select, [contenteditable="true"]):focus-visible {
+    outline: none !important;
+  }
+
+  /* Follow the OS "reduce motion" preference unless the user turned
+     Accessibility › "Sync with computer" off (data-reduced-motion="false"). */
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
+    :root:not([data-reduced-motion="false"]) *,
+    :root:not([data-reduced-motion="false"]) *::before,
+    :root:not([data-reduced-motion="false"]) *::after {
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive breakpoints that understand the app's own zoom.
+
+   Appearance › Zoom scales rem (html font-size), but media queries measure
+   the window, so 200% zoom on a 1366px laptop kept the desktop layout and
+   clipped the header. useUserSettings writes `data-below="sm md …"` on <html>
+   listing every breakpoint the *effective* width (window ÷ zoom) is under.
+   These overrides make every `max-*:` variant apply when the window OR the
+   effective width is narrow, and every min-width variant require both.
+   Selectors are wrapped in :where() so specificity is unchanged.
+   --------------------------------------------------------------------------- */
+@custom-variant max-2xl {
+  @media (width < 96rem) { @slot; }
+  &:where([data-below~="2xl"] *) { @slot; }
+}
+@custom-variant max-xl {
+  @media (width < 80rem) { @slot; }
+  &:where([data-below~="xl"] *) { @slot; }
+}
+@custom-variant max-lg {
+  @media (width < 64rem) { @slot; }
+  &:where([data-below~="lg"] *) { @slot; }
+}
+@custom-variant max-md {
+  @media (width < 48rem) { @slot; }
+  &:where([data-below~="md"] *) { @slot; }
+}
+@custom-variant max-sm {
+  @media (width < 40rem) { @slot; }
+  &:where([data-below~="sm"] *) { @slot; }
+}
+@custom-variant sm {
+  @media (width >= 40rem) { &:where(:root:not([data-below~="sm"]) *) { @slot; } }
+}
+@custom-variant md {
+  @media (width >= 48rem) { &:where(:root:not([data-below~="md"]) *) { @slot; } }
+}
+@custom-variant lg {
+  @media (width >= 64rem) { &:where(:root:not([data-below~="lg"]) *) { @slot; } }
+}
+@custom-variant xl {
+  @media (width >= 80rem) { &:where(:root:not([data-below~="xl"]) *) { @slot; } }
+}
+@custom-variant 2xl {
+  @media (width >= 96rem) { &:where(:root:not([data-below~="2xl"]) *) { @slot; } }
+}
+
+/* ---------------------------------------------------------------------------
+   Layout utilities for phones: dynamic viewport height (the URL bar and the
+   soft keyboard change it) and the notch / home-indicator safe areas.
+   `h-dvh`, `min-h-dvh` and friends ship with Tailwind v4.
+   --------------------------------------------------------------------------- */
+@utility pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+@utility pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+@utility pl-safe { padding-left: env(safe-area-inset-left, 0px); }
+@utility pr-safe { padding-right: env(safe-area-inset-right, 0px); }
+@utility px-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+@utility mb-safe { margin-bottom: env(safe-area-inset-bottom, 0px); }
+@utility bottom-safe { bottom: env(safe-area-inset-bottom, 0px); }
+@utility h-screen-safe {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* A wrapper that draws the focus indicator for the field inside it (composer,
+   search with an icon). Pairs with the base rule that yields to it. */
+@utility focus-ring {
+  &:has(:focus-visible) {
+    outline: 2px solid var(--color-d-focus);
+    outline-offset: 0;
   }
 }
 
@@ -304,6 +861,52 @@
 :root[data-role-colors="off"] .role-colored { color: var(--color-d-strong) !important; }
 :root[data-role-colors="off"] .role-dot { display: none; }
 :root:not([data-role-colors="dots"]) .role-dot { display: none; }
+
+/* Accessibility › "Always underline links" (WCAG 1.4.1: a link must not be
+   told apart from text by colour alone). On by default. */
+:root:not([data-underline-links="false"]) :is(.message-body a[href], a.text-d-link, .text-d-link a[href], a[href].inline-link) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* Accessibility › Saturation for colours the tokens cannot reach: role
+   colours, role dots and anything marked [data-custom-color] carry an inline
+   colour chosen by a server owner. With "Apply saturation to custom colours"
+   on (the default) they are desaturated with a filter on the small element
+   itself, never on an ancestor; with it off they keep their real hue. */
+:root[data-saturate-custom="true"]:not([data-saturation="100"]) :is(.role-colored, .role-dot, [data-custom-color]) {
+  filter: saturate(var(--sat, 1));
+}
+
+/* Accessibility › "Larger click targets": every control is at least 44×44
+   CSS px (WCAG 2.5.5 AAA), for tremor and switch users. */
+:root { --hit-min: 24px; }
+:root[data-large-targets="true"] { --hit-min: 44px; }
+:root[data-large-targets="true"] :is(
+  button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"],
+  [role="option"], [role="tab"], [role="switch"], [role="radio"], [role="checkbox"], select, summary
+):not(.message-body *) {
+  min-height: var(--hit-min);
+  min-width: var(--hit-min);
+}
+:root[data-large-targets="true"] :is(input[type="checkbox"], input[type="radio"]) {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* Accessibility › "Always show message actions": the Reply/React/More bar is
+   part of every message instead of appearing on hover, so a switch or
+   keyboard user can reach it with Tab alone. It sits in the row's flow at the
+   right instead of floating over the previous message. */
+:root[data-message-actions="always"] .message-row .message-actions {
+  display: flex;
+  position: static;
+  align-self: flex-start;
+  flex-shrink: 0;
+  margin-left: auto;
+  box-shadow: none;
+}
 
 /* Accessibility › animated emoji and GIF autoplay. */
 :root[data-animate-emoji="false"] .animated-emoji { animation-play-state: paused; }
@@ -412,3 +1015,85 @@ input[type="range"] { height: 1.25rem; }
   animation-fill-mode: both;
   will-change: transform, opacity;
 }
+
+/* ---------------------------------------------------------------------------
+   Chat ergonomics.
+   --------------------------------------------------------------------------- */
+
+/* `scrollbar-none` is used by the rail and the friends tabs but Tailwind v4
+   ships no such utility — without this the rail grew a scrollbar gutter. */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+/* The message action bar is revealed by hover, by keyboard focus inside the
+   row, and — on touch screens, which have no hover — by the row a long-press
+   selected. Without the last two it was unreachable from a keyboard or phone. */
+.message-row:focus-within .message-actions,
+.message-row[data-actions-open="true"] .message-actions { display: flex; }
+
+/* A message that pings you: Discord's gold tint and left bar. The hover
+   state keeps the tint rather than replacing it. */
+.message-row.mention-row {
+  background-color: color-mix(in srgb, var(--color-d-idle) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-d-idle);
+}
+.message-row.mention-row:hover {
+  background-color: color-mix(in srgb, var(--color-d-idle) 16%, transparent);
+}
+
+/* A jumped-to message flashes, like Discord's highlight. */
+@keyframes messageFlash {
+  0%, 60% { background-color: color-mix(in srgb, var(--color-d-brand) 20%, transparent); }
+  100%    { background-color: transparent; }
+}
+.message-flash { animation: messageFlash 1.6s ease-out; }
+
+/* Loading skeletons. `.skeleton` pulses whatever it is on; `.skeleton-block`
+   is a ready-made placeholder bar/circle using the skeleton token, so every
+   loading state (channel list, members, messages) looks the same. */
+:root { --color-d-skeleton: color-mix(in srgb, var(--color-d-text) 12%, transparent); }
+@keyframes skeletonPulse { 50% { opacity: 0.45; } }
+.skeleton { animation: skeletonPulse 1.4s ease-in-out infinite; }
+.skeleton-block {
+  background-color: var(--color-d-skeleton);
+  border-radius: var(--radius-d-sm);
+  animation: skeletonPulse 1.4s ease-in-out infinite;
+}
+
+/* Thai has no letter case, and letter-spacing pulls apart clusters with
+   stacked vowels and tone marks. Small uppercase labels keep their size but
+   lose the tracking, and get room for the marks above and below. */
+:lang(th) .tracking-wide,
+:lang(th) .tracking-wider,
+:lang(th) .tracking-widest,
+:lang(th) [class*="tracking-["] {
+  letter-spacing: 0;
+}
+:lang(th) .uppercase.text-xs,
+:lang(th) .uppercase.text-\[11px\],
+:lang(th) .uppercase.text-\[10px\] {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+/* Skip links: invisible until focused, then pinned top-left above everything. */
+.skip-link {
+  position: fixed;
+  left: 8px;
+  top: -64px;
+  z-index: 200;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--color-d-brand);
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+}
+.skip-link:focus { top: 8px; }
+
+/* Tailwind's bare `rounded` is a literal 0.25rem, not a variable, so the
+   corner setting re-points it here (rounded-md/-lg/… follow --radius-*). */
+:root[data-radius="sharp"] .rounded { border-radius: 0.125rem; }
+:root[data-radius="round"] .rounded { border-radius: 0.375rem; }

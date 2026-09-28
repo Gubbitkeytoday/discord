@@ -18,8 +18,9 @@
 //    removed outright.
 // ============================================================================
 
-import { getQuery, allQuery, runQuery, transaction } from '../db.js';
+import { getQuery, allQuery, runQuery, transaction, sql } from '../db.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { announceRevoked } from '../lib/sessionEvents.js';
 
 // A guard against a runaway export on a very old account. Anything larger than
 // this is a support request, not a download.
@@ -33,13 +34,13 @@ export async function exportAccount(userId) {
   const user = await getQuery(
     `SELECT id, username, discriminator, display_name, email, bio, pronouns,
             accent_color, avatar_url, banner_url, locale, theme, status,
-            custom_status, created_at
+            custom_status, birth_year, birth_month, created_at
        FROM users WHERE id = ? AND deleted_at IS NULL`,
     [userId]
   );
   if (!user) throw ApiError.notFound('User');
 
-  const [servers, messages, friends, settings, sessions] = await Promise.all([
+  const [servers, messages, friends, settings, sessions, reportsFiled, blocked] = await Promise.all([
     allQuery(
       `SELECT s.id, s.name, sm.joined_at, sm.nickname
          FROM server_members sm JOIN servers s ON s.id = sm.server_id
@@ -66,6 +67,17 @@ export async function exportAccount(userId) {
       `SELECT device_name, platform, created_at, last_seen_at FROM sessions
         WHERE user_id = ? AND revoked_at IS NULL`,
       [userId]
+    ),
+    // Reports this person filed: theirs to know about (what, why, status).
+    allQuery(
+      `SELECT target_type, target_id, reason, details, status, created_at, resolved_at
+         FROM reports WHERE reporter_id = ? ORDER BY created_at`,
+      [userId]
+    ),
+    allQuery(
+      `SELECT u.username, b.created_at FROM blocks b JOIN users u ON u.id = b.blocked_id
+        WHERE b.user_id = ?`,
+      [userId]
     )
   ]);
 
@@ -84,7 +96,9 @@ export async function exportAccount(userId) {
       try { return [row.category, JSON.parse(row.data)]; }
       catch { return [row.category, row.data]; }
     })),
-    sessions
+    sessions,
+    reports_filed: reportsFiled,
+    blocked_users: blocked
   };
 }
 
@@ -112,18 +126,19 @@ export async function deleteAccount({ userId }) {
   await transaction(async () => {
     await runQuery(
       `UPDATE users
-          SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+          SET deleted_at = ${sql.now},
               display_name = 'Deleted User',
               username = 'deleted_' || id,
               email = NULL, password_hash = NULL, mfa_secret = NULL, mfa_enabled = 0,
               avatar_url = NULL, banner_url = NULL, bio = NULL, pronouns = NULL,
-              custom_status = NULL, custom_status_emoji = NULL, status = 'offline'
+              custom_status = NULL, custom_status_emoji = NULL, status = 'offline',
+              birth_year = NULL, birth_month = NULL
         WHERE id = ?`,
       [userId]
     );
     // Every way back in, closed.
     await runQuery(
-      `UPDATE sessions SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE sessions SET revoked_at = ${sql.now}
         WHERE user_id = ? AND revoked_at IS NULL`, [userId]
     );
     await runQuery(`DELETE FROM account_tokens WHERE user_id = ?`, [userId]);
@@ -132,14 +147,18 @@ export async function deleteAccount({ userId }) {
     await runQuery(`DELETE FROM friends WHERE user_id = ? OR friend_id = ?`, [userId, userId]);
     await runQuery(`DELETE FROM blocks WHERE user_id = ? OR blocked_id = ?`, [userId, userId]);
     await runQuery(`DELETE FROM user_settings WHERE user_id = ?`, [userId]);
+    await runQuery(`DELETE FROM dm_requests WHERE user_id = ?`, [userId]);
     // Leaving every server also removes the per-guild profiles.
     await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+      `UPDATE server_members SET left_at = ${sql.now},
               nickname = NULL, avatar_url = NULL, banner_url = NULL, bio = NULL, pronouns = NULL
         WHERE user_id = ? AND left_at IS NULL`,
       [userId]
     );
   });
+  // Cached sessions and live sockets go with the rows (lib/auth.js cache,
+  // realtime disconnect) — on every instance.
+  announceRevoked({ userId });
 
   return { deleted: true };
 }

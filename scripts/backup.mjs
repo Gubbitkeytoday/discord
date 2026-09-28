@@ -6,16 +6,27 @@
 //  a consistent snapshot while the server keeps serving. Uploaded files are
 //  content-addressed, so they only ever need to be added to, never rewritten.
 //
+//  With DATABASE_URL=postgres://… the database half uses pg_dump instead
+//  (custom format: compressed, restorable table by table, consistent without
+//  locking writers out), and restore uses pg_restore. Credentials are passed
+//  to those tools through PG* environment variables, never on the command
+//  line where `ps` would show them. PG_DUMP / PG_RESTORE override the binary
+//  paths; the client major version must be >= the server's.
+//
 //  Usage:
-//    node scripts/backup.mjs create [--out backups] [--files]
+//    node scripts/backup.mjs create [--out backups] [--files]   (default out: $BACKUP_DIR or ./backups)
 //    node scripts/backup.mjs list [--out backups]
 //    node scripts/backup.mjs prune --keep 7 [--out backups]
-//    node scripts/backup.mjs restore <snapshot.db> [--force]
-//    node scripts/backup.mjs verify <snapshot.db>
+//    node scripts/backup.mjs restore <snapshot.db|snapshot.dump> [--force]
+//    node scripts/backup.mjs verify <snapshot.db|snapshot.dump>
 // ============================================================================
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 import sqlite3 from 'sqlite3';
+import { resolveDialect } from '../db/dialect.js';
+
+const POSTGRES = resolveDialect() === 'postgres';
 
 const [, , command = 'create', ...rest] = process.argv;
 
@@ -36,7 +47,9 @@ const positional = rest.filter((arg, index) => {
 
 const DB_PATH = process.env.DB_PATH || './discord.db';
 const STORAGE_ROOT = process.env.STORAGE_ROOT || './public/uploads';
-const OUT_DIR = flag('out', 'backups');
+// BACKUP_DIR lets the container point this at its own volume (/backups), so a
+// snapshot survives the container being recreated.
+const OUT_DIR = flag('out', process.env.BACKUP_DIR || 'backups');
 
 /** Local time, filename-safe, sorts chronologically. */
 function stamp() {
@@ -87,7 +100,100 @@ function copyNew(from, to) {
   return { copied, skipped };
 }
 
+// --- PostgreSQL ----------------------------------------------------------------
+
+/** libpq environment for DATABASE_URL, so no secret appears in argv. */
+function pgEnv() {
+  const url = new URL(process.env.DATABASE_URL);
+  const env = { ...process.env };
+  delete env.DATABASE_URL;
+  if (url.hostname) env.PGHOST = decodeURIComponent(url.hostname);
+  if (url.searchParams.get('host')) env.PGHOST = url.searchParams.get('host');
+  if (url.port) env.PGPORT = url.port;
+  if (url.username) env.PGUSER = decodeURIComponent(url.username);
+  if (url.password) env.PGPASSWORD = decodeURIComponent(url.password);
+  env.PGDATABASE = decodeURIComponent(url.pathname.replace(/^\//, '')) || 'postgres';
+  const sslmode = url.searchParams.get('sslmode') ?? process.env.PGSSLMODE ?? process.env.DATABASE_SSL;
+  if (sslmode && !['true', '1', 'on'].includes(sslmode)) env.PGSSLMODE = sslmode;
+  else if (sslmode) env.PGSSLMODE = 'require';
+  return env;
+}
+
+/** Run a PG client tool; resolves with stdout, rejects with its stderr. */
+function pgTool(binary, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { env: pgEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => reject(new Error(
+      e.code === 'ENOENT'
+        ? `${binary} not found — install the PostgreSQL client (same major version as the server or newer), or set ${binary === PG_DUMP ? 'PG_DUMP' : 'PG_RESTORE'}`
+        : e.message
+    )));
+    child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`${path.basename(binary)} exited ${code}: ${err.trim()}`))));
+  });
+}
+const PG_DUMP = process.env.PG_DUMP || 'pg_dump';
+const PG_RESTORE = process.env.PG_RESTORE || 'pg_restore';
+
+async function createPostgres(target) {
+  // Custom format: compressed, and pg_restore can pick tables out of it.
+  // --no-owner / --no-privileges so it restores under any role.
+  const partial = `${target}.partial`;
+  await pgTool(PG_DUMP, ['--format=custom', '--no-owner', '--no-privileges', '--compress=6', `--file=${partial}`]);
+  fs.renameSync(partial, target);   // never leave a half-written file that looks like a snapshot
+}
+
+async function verifyPostgres(file) {
+  const listing = await pgTool(PG_RESTORE, ['--list', file]);
+  const tableData = listing.split('\n').filter((l) => / TABLE DATA /.test(l));
+  const tables = tableData.map((l) => l.trim().split(/\s+/).at(-2));
+  const required = ['users', 'messages', 'schema_migrations'];
+  const missing = required.filter((t) => !tables.includes(t));
+  console.log(`\n   format          : pg_dump custom archive`);
+  console.log(`   tables with data: ${tables.length}\n`);
+  if (missing.length) {
+    console.error(`❌ archive has no data for: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  console.log('✅ archive is readable and complete.\n');
+}
+
+async function restorePostgres(file) {
+  if (!has('force')) {
+    console.error(
+      `\nThis will replace every table in the database at DATABASE_URL with ${file}.\n`
+      + 'Stop the server first, then re-run with --force.\n'
+    );
+    process.exit(1);
+  }
+  await verifyPostgres(file);
+  // One transaction: a failed restore leaves the database as it was.
+  await pgTool(PG_RESTORE, [
+    '--clean', '--if-exists', '--no-owner', '--no-privileges', '--single-transaction',
+    `--dbname=${pgEnv().PGDATABASE}`, file
+  ]);
+  console.log(`✅ restored ${file} into the configured PostgreSQL database`);
+  console.log('   Start the server; migrations run automatically on connect.');
+}
+
+// --- SQLite ------------------------------------------------------------------------
+
 async function create() {
+  if (POSTGRES) {
+    fs.mkdirSync(OUT_DIR, { recursive: true });
+    const target = path.resolve(OUT_DIR, `discord-${stamp()}.dump`);
+    if (fs.existsSync(target)) {
+      console.error(`❌ ${target} already exists`);
+      process.exit(1);
+    }
+    await createPostgres(target);
+    console.log(`✅ database → ${path.relative(process.cwd(), target)} (${humanBytes(fs.statSync(target).size)}, pg_dump)`);
+    copyUploads();
+    return;
+  }
   if (!fs.existsSync(DB_PATH)) {
     console.error(`❌ no database at ${DB_PATH}`);
     process.exit(1);
@@ -111,7 +217,10 @@ async function create() {
 
   const size = fs.statSync(target).size;
   console.log(`✅ database → ${path.relative(process.cwd(), target)} (${humanBytes(size)})`);
+  copyUploads();
+}
 
+function copyUploads() {
   if (has('files')) {
     if (!fs.existsSync(STORAGE_ROOT)) {
       console.warn(`⚠️  no storage directory at ${STORAGE_ROOT} — skipping files`);
@@ -130,7 +239,7 @@ async function create() {
 function snapshots() {
   if (!fs.existsSync(OUT_DIR)) return [];
   return fs.readdirSync(OUT_DIR)
-    .filter((name) => /^discord-\d{8}-\d{6}\.db$/.test(name))
+    .filter((name) => /^discord-\d{8}-\d{6}\.(db|dump)$/.test(name))
     .sort()
     .map((name) => {
       const full = path.join(OUT_DIR, name);
@@ -172,6 +281,7 @@ async function verify(file) {
     console.error('❌ pass the path to a snapshot');
     process.exit(1);
   }
+  if (file.endsWith('.dump')) return verifyPostgres(file);
   // Read-write, not read-only: validating an FTS5 inverted index needs a
   // writable handle, and on a read-only one integrity_check reports a failure
   // that is really just a permission problem.
@@ -199,6 +309,14 @@ async function restore(file) {
     console.error('❌ pass the path to a snapshot');
     process.exit(1);
   }
+  const isDump = file.endsWith('.dump');
+  if (isDump !== POSTGRES) {
+    console.error(isDump
+      ? '❌ a .dump is a PostgreSQL snapshot — set DATABASE_URL to the target database.'
+      : '❌ a .db is a SQLite snapshot — unset DATABASE_URL (or use npm run db:migrate-to-pg to move it to Postgres).');
+    process.exit(1);
+  }
+  if (isDump) return restorePostgres(file);
   if (!has('force')) {
     console.error(
       `\nThis will overwrite ${DB_PATH} with ${file}.\n`

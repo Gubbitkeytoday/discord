@@ -1,0 +1,48 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+          # Test harnesses, E2E drivers and security PoCs are not shipped and
+          # use throwaway credentials by design; scan the application code.
+          config: |
+            paths-ignore:
+              - scripts/test*.mjs
+              - scripts/testHarness.mjs
+              - scripts/e2e/**
+              - scripts/security/**
+              - scripts/load/**
+              - scripts/perf/**
+              - scripts/a11y/**
+              - scripts/ux/**
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript

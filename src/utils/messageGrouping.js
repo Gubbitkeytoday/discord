@@ -1,4 +1,5 @@
 import { t, localeTag } from '../i18n/index.jsx';
+import { compareIds } from './syncCursor';
 // Message list presentation rules, mirroring Discord's behaviour.
 
 /** Two messages group together if same author, same day, within this window. */
@@ -16,7 +17,26 @@ const startOfDay = (date) =>
  * A message never groups when it is a reply, a system message, or the first
  * message after a divider — Discord always shows a full header in those cases.
  */
-export function decorateMessages(messages, { lastReadMessageId = null, currentUserId = null } = {}) {
+export function decorateMessages(messages, options = {}) {
+  const flags = messageFlags(messages, options);
+  return messages.map((message, i) => ({
+    ...message,
+    isGrouped: flags[i].grouped,
+    dateDivider: flags[i].dateDivider ? new Date(message.created_at) : null,
+    isFirstUnread: flags[i].firstUnread
+  }));
+}
+
+const SYSTEM = new Set(['join', 'pin', 'thread_created', 'channel_pinned_message', 'member_join', 'guild_member_join']);
+
+/**
+ * The same rules as decorateMessages, returned as a parallel array of plain
+ * flags ({ grouped, dateDivider, firstUnread }) instead of copies of every
+ * message. The message list passes these as primitive props, so a memoised
+ * row keeps its identity and does not re-render when another message
+ * arrives.
+ */
+export function messageFlags(messages, { lastReadMessageId = null, currentUserId = null } = {}) {
   let previous = null;
   let unreadMarked = false;
 
@@ -31,7 +51,8 @@ export function decorateMessages(messages, { lastReadMessageId = null, currentUs
     const isFirstUnread =
       !unreadMarked &&
       Boolean(lastReadMessageId) &&
-      message.id > lastReadMessageId &&
+      !message.pending && !message.failed &&
+      compareIds(message.id, lastReadMessageId) > 0 &&
       message.user_id !== currentUserId;
     if (isFirstUnread) unreadMarked = true;
 
@@ -40,12 +61,12 @@ export function decorateMessages(messages, { lastReadMessageId = null, currentUs
       !isFirstUnread &&
       !message.reply_to_id &&
       ['default', 'reply'].includes(message.type) && !message.sticker &&
-      previous?.type !== 'join' && previous?.type !== 'pin' && previous?.type !== 'thread_created' &&
+      !SYSTEM.has(previous?.type) &&
       previous?.user_id === message.user_id &&
       created - previousCreated < GROUP_WINDOW_MS;
 
     previous = message;
-    return { ...message, isGrouped, dateDivider: isNewDay ? created : null, isFirstUnread };
+    return { grouped: isGrouped, dateDivider: isNewDay, firstUnread: isFirstUnread };
   });
 }
 
@@ -61,8 +82,10 @@ export function formatDateDivider(date, locale = localeTag()) {
 }
 
 export function formatTime(date, locale = localeTag(), use24Hour = true) {
+  // 12-hour: "3:05 PM" (no leading zero, as Discord writes it); 24-hour:
+  // "15:05" / "09:05". hourCycle rather than hour12, so midnight is never "24:00".
   return new Date(date).toLocaleTimeString(locale, {
-    hour: '2-digit', minute: '2-digit', hour12: !use24Hour
+    hour: use24Hour ? '2-digit' : 'numeric', minute: '2-digit', hourCycle: use24Hour ? 'h23' : 'h12'
   });
 }
 

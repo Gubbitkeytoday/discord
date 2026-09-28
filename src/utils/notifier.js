@@ -14,6 +14,8 @@ import {
   playLeaveVoiceSound, playMuteSound, playUnmuteSound
 } from './soundEffects';
 import { speak } from './speech';
+import { proxiedImageUrl } from './media';
+import { t } from '../i18n/index.jsx';
 
 const SOUND_PLAYERS = {
   message: playMessageIncomingSound,
@@ -26,6 +28,47 @@ const SOUND_PLAYERS = {
   undeafen: playUnmuteSound,
   call: playMentionSound
 };
+
+// --- screen share & attention ------------------------------------------------
+
+let streaming = false;
+/** App tells us when the user is sharing their screen. */
+export function setScreenSharing(value) {
+  streaming = Boolean(value);
+}
+
+/** "Mute notifications while streaming": nothing private pops up on a shared screen. */
+function silencedByStream(prefs) {
+  return streaming && prefs.notifications.muteWhileStreaming;
+}
+
+let flashTimer = null;
+let flashBaseTitle = null;
+/**
+ * The web's taskbar flash: while the tab is in the background, alternate the
+ * tab title until the user looks at it. Browsers do not let a page flash the
+ * OS taskbar itself; a blinking tab title is what they allow.
+ */
+export function flashAttention(label) {
+  const prefs = getPreferences();
+  if (!prefs.notifications.taskbarFlash || document.visibilityState === 'visible') return false;
+  if (flashTimer) return true;
+  flashBaseTitle = document.title;
+  let on = false;
+  flashTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? `● ${label}` : flashBaseTitle;
+  }, 1000);
+  const stop = () => {
+    if (document.visibilityState !== 'visible') return;
+    clearInterval(flashTimer);
+    flashTimer = null;
+    document.title = flashBaseTitle;
+    document.removeEventListener('visibilitychange', stop);
+  };
+  document.addEventListener('visibilitychange', stop);
+  return true;
+}
 
 /** Ask the browser for permission. Only ever called from a click. */
 export async function requestNotificationPermission() {
@@ -48,6 +91,7 @@ export function playSound(event, { force = false } = {}) {
   if (!force) {
     if (prefs.streamerMode.enabled && prefs.streamerMode.disableSounds) return false;
     if (prefs.notifications.sounds?.[event] === false) return false;
+    if (silencedByStream(prefs) && (event === 'message' || event === 'mention')) return false;
   }
   const player = SOUND_PLAYERS[event];
   if (!player) return false;
@@ -68,13 +112,24 @@ export function notifyMessage({ title, body, icon, tag, muted = false, status, o
   if (muted) return false;
   if (status === 'dnd') return false;
   if (streamerMode.enabled && streamerMode.disableNotifications) return false;
+  if (silencedByStream(prefs)) return false;
+  flashAttention(streamerMode.enabled && streamerMode.hideUsernames !== false ? t('notif.newMessage') : title);
   if (!notifications.desktopEnabled) return false;
   if (notificationPermission() !== 'granted') return false;
   // A notification for the window you are already looking at is just noise.
   if (document.visibilityState === 'visible' && document.hasFocus()) return false;
 
+  // Streamer mode › hide usernames: a notification that does get through
+  // (streamer mode on, notifications allowed) names nobody and quotes nothing.
+  const masked = streamerMode.enabled && streamerMode.hideUsernames !== false;
   try {
-    const notification = new Notification(title, { body, icon, tag, silent: true });
+    // Remote avatars go through our image proxy (the CSP allows same-origin
+    // images only); no avatar → the app icon.
+    const notification = new Notification(masked ? 'Antigravity' : title, {
+      body: masked ? t('notif.newMessage') : body,
+      icon: icon && !masked ? proxiedImageUrl(icon) : '/icons/icon-192.png',
+      tag, silent: true
+    });
     notification.onclick = () => {
       window.focus();
       notification.close();
@@ -99,11 +154,44 @@ export function speakMessage({ author, content, isCurrentChannel }) {
   return speak(`${author} says ${content}`, { rate: prefs.accessibility.ttsRate });
 }
 
-/** Reflect unread counts in the tab title, if the user wants a badge. */
-export function applyUnreadBadge(mentionCount) {
+/**
+ * Play back a message sent with /tts, if Accessibility › Text-to-speech
+ * allows playback on this account.
+ */
+export function speakTtsMessage({ author, content }) {
   const prefs = getPreferences();
-  const base = 'Antigravity';
-  document.title = prefs.notifications.unreadBadge && mentionCount > 0
-    ? `(${mentionCount}) ${base}`
-    : base;
+  if (!prefs.accessibility.ttsEnabled || !content) return false;
+  if (prefs.streamerMode.enabled && prefs.streamerMode.disableSounds) return false;
+  return speak(`${author} says ${content}`, { rate: prefs.accessibility.ttsRate });
+}
+
+/**
+ * Reflect unread counts in the tab title and, where the Badging API exists
+ * (installed PWA on desktop Chromium, iOS/macOS home-screen apps), on the app
+ * icon — if the user wants a badge.
+ */
+export function applyUnreadBadge(mentionCount, baseTitle = 'Antigravity') {
+  const prefs = getPreferences();
+  // The caller's title ("#general | Server — Antigravity") is kept, so the
+  // badge never wipes out where you are (WCAG 2.4.2).
+  const base = baseTitle || 'Antigravity';
+  const show = prefs.notifications.unreadBadge && mentionCount > 0;
+  const title = show ? `(${mentionCount}) ${base}` : base;
+  if (flashTimer) flashBaseTitle = title;
+  else document.title = title;
+  try {
+    if (show && typeof navigator.setAppBadge === 'function') navigator.setAppBadge(mentionCount).catch(() => {});
+    else if (typeof navigator.clearAppBadge === 'function') navigator.clearAppBadge().catch(() => {});
+  } catch { /* not allowed in this context */ }
+}
+
+/**
+ * Is a channel/server settings row's mute in force? A timed mute that has run
+ * out is not (the server clears it too, but a client may hold the old row).
+ */
+export function isMuteActive(settings, now = Date.now()) {
+  if (!settings?.muted) return false;
+  if (!settings.muted_until) return true;
+  const until = Date.parse(settings.muted_until);
+  return Number.isFinite(until) ? until > now : true;
 }

@@ -6,36 +6,45 @@
 //  realtime in realtime.js.
 // ============================================================================
 
+// Must stay the first import: sizes the libuv pool before anything uses it.
+import './lib/threadpool.js'; // realtime-scale
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
 
-import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION } from './db.js';
+// observability: logger first, so everything below logs through it.
+import { logger, httpLogger } from './lib/logger.js';
+import * as telemetry from './lib/telemetry.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, SCHEMA_VERSION, sql, dbHealth, dbStats, DB_PATH, isPostgres } from './db.js';
 import {
-  initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError
+  initStorage, STORAGE_ROOT, PUBLIC_BASE, startGarbageCollector, StorageError, activeBackend
 } from './storageService.js';
 import {
   ApiError, asyncRoute, makeIdentify, errorHandler, parseLimit
 } from './lib/httpUtils.js';
 import { resolveSession, pruneSessions } from './lib/auth.js';
 import { config } from './lib/config.js';
-import {
-  securityHeaders, requestLogger, metricsMiddleware, renderMetrics, metricsSnapshot
-} from './lib/middleware.js';
-import { pruneAccountTokens } from './services/accountSecurity.js';
+import { staticAssets } from './lib/staticAssets.js';
+import { securityHeaders, metricsMiddleware } from './lib/middleware.js';
+import { pruneAccountTokens, assertReauthenticated } from './services/accountSecurity.js';
 import { sweepStaleThreads } from './services/threads.js';
 import {
-  writeRateLimit, uploadRateLimit, readRateLimit
+  writeRateLimit, uploadRateLimit, readRateLimit, rateLimit
 } from './lib/rateLimit.js';
+import { proxyHandler as mediaProxyHandler } from './services/mediaProxy.js';
 import { PERMISSIONS, toNames } from './lib/permissions.js';
 import { assertChannelAccess } from './services/access.js';
 
 import filesRouter from './routes/files.js';
+import mediaRouter from './routes/media.js'; // media pipeline
+import observabilityRouter from './routes/observability.js'; // observability
+import { modAlertEvents } from './services/admin/modAlerts.js'; // admin polish: live mod alerts
 import * as messageService from './services/messages.js';
 import * as guildService from './services/guilds.js';
 import * as userService from './services/users.js';
@@ -53,38 +62,83 @@ import * as linkEmbeds from './services/linkEmbeds.js';
 import * as automod from './services/automod.js';
 import * as webhookService from './services/webhooks.js';
 import * as reportService from './services/reports.js';
+import { isInstanceAdmin } from './services/instanceAdmin.js';
 import * as channelPerms from './services/channelPerms.js';
 import * as userSettings from './services/userSettings.js';
 import * as pollService from './services/polls.js';
 import * as eventService from './services/events.js';
 import authRouter from './routes/auth.js';
 import securityRouter from './routes/accountSecurity.js';
+import createPushRouter from './routes/push.js'; // push
+import createLivekitRouter from './routes/livekit.js'; // livekit
+import { isEnabled as pushEnabled } from './services/push.js'; // push (health)
+import { isLivekitEnabled } from './services/livekit.js'; // livekit (health)
+import passkeysRouter from './routes/passkeys.js'; // passkeys
+import translationRouter from './routes/translation.js'; // translation
+import createServerAppearanceRouter from './routes/serverAppearance.js'; // servers (round 4)
+import createProfilesRouter from './routes/profiles.js'; // profiles
+import createPaymentsRouter from './routes/payments.js'; // payments: donations, supporter badge
 import {
-  registerRealtime, resetVolatileState, fanOutMessage, sweepAfk
+  registerRealtime, resetVolatileState, fanOutMessage, sweepAfk,
+  revalidateRooms, emitToChannelViewers, emitToRelated,
+  realtimeServerOptions, drainRealtime, closeRealtimeBackends, realtimeHealth, holdsLease, messageAdmission
 } from './realtime.js';
+import syncRouter from './routes/sync.js'; // realtime-scale
 import { requireUser } from './lib/httpUtils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// After an uncaught exception the process is in an unknown state (a half-
+// finished write, a leaked lock or connection). Log it, then drain and exit so
+// the supervisor (Docker restart policy / systemd) starts a clean process —
+// the documented Node guidance, rather than limping on.
 process.on('uncaughtException', (err) => {
   if (err?.code === 'EPIPE') return;
-  console.error('⚠️ Uncaught Exception caught:', err);
+  logger.fatal({ err }, 'uncaught exception — shutting down');
+  telemetry.reportError(err, { source: 'uncaughtException' });
+  process.exitCode = 1;
+  // `shutdown` is defined below; by the time anything can throw, it exists.
+  const exit = () => {
+    if (typeof globalThis.__agShutdown === 'function') globalThis.__agShutdown('uncaughtException', 1);
+    else process.exit(1);
+  };
+  telemetry.flushErrors(2000).finally(exit);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ Unhandled Rejection caught:', reason);
+  logger.error({ err: reason }, 'unhandled promise rejection');
+  telemetry.reportError(reason instanceof Error ? reason : new Error(String(reason)), { source: 'unhandledRejection' });
 });
 process.stdout?.on('error', (err) => { if (err?.code === 'EPIPE') return; });
 process.stderr?.on('error', (err) => { if (err?.code === 'EPIPE') return; });
 
 
 const PORT = config.port;
-// An empty allow-list means same-origin only, which is what you want once this
-// process also serves the SPA.
-const CORS_ORIGIN = config.corsOrigins.includes('*')
-  ? '*'
-  : (config.corsOrigins.length > 0 ? config.corsOrigins : false);
+// CORS (CORS_ORIGIN, lib/config.js):
+//   unset        same-origin only (production default; this process serves
+//                the SPA, so no CORS header is ever needed).
+//   a,b,c        exact origins allowed, with credentials (cookies).
+//   *            development default: any origin, WITHOUT credentials. Browsers
+//                never honour cookies for a wildcard anyway; saying so here
+//                means no response ever pairs "*" with Allow-Credentials.
+// Listed origins are matched exactly (scheme + host + port), never by prefix
+// or pattern, and the Origin header is only echoed back when it matched.
+const CORS_ALLOWED = new Set(config.corsOrigins.filter((origin) => origin !== '*'));
+const CORS_ANY_ORIGIN = config.corsOrigins.includes('*');
+function corsOrigin(origin, callback) {
+  if (typeof origin === 'string' && CORS_ALLOWED.has(origin)) return callback(null, origin);
+  return callback(null, false);
+}
+const corsOptions = CORS_ANY_ORIGIN
+  ? { origin: '*', credentials: false }
+  : { origin: corsOrigin, credentials: true };
 
 // --- boot --------------------------------------------------------------------
+
+// observability: both are no-ops unless OTEL_EXPORTER_OTLP_ENDPOINT / SENTRY_DSN
+// are set. startOtel() is normally already done by lib/otel-preload.mjs.
+await telemetry.startOtel();
+await telemetry.initErrorTracking();
+if (config.enableMetrics) telemetry.startDefaultMetrics();
 
 await initDB();
 await initStorage();
@@ -93,19 +147,42 @@ await resetVolatileState();
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
-  maxHttpBufferSize: 1e6 // messages only — file bytes go over HTTP, not the socket
+  // Same policy as the HTTP API (the client connects withCredentials).
+  cors: { ...corsOptions, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+  // Payload cap (file bytes go over HTTP, not the socket) and connection
+  // state recovery — see realtime.js.
+  ...realtimeServerOptions()
 });
+
+// Moderator alerts (AutoMod "alert", raid detection) are posted as messages;
+// deliver them live like any other message.
+modAlertEvents.on('message', (message) => fanOutMessage(io, message));
 
 // Behind a proxy, req.ip must come from X-Forwarded-For or every rate limit
 // keys on the proxy's own address instead of the real client.
 app.set('trust proxy', config.trustProxy);
 app.disable('x-powered-by');
 
-app.use(securityHeaders({ isProduction: config.isProduction, publicUrl: config.publicUrl }));
-app.use(requestLogger({ format: config.logFormat, level: config.logLevel }));
+app.use(securityHeaders({
+  isProduction: config.isProduction,
+  publicUrl: config.publicUrl,
+  // Uploads served from a CDN / bucket origin (STORAGE_PUBLIC_BASE=https://…),
+  // plus any origins an operator explicitly allows (CSP_IMG_SOURCES).
+  imageSources: [
+    ...(() => {
+      try { return /^https?:\/\//i.test(process.env.STORAGE_PUBLIC_BASE ?? '') ? [new URL(process.env.STORAGE_PUBLIC_BASE).origin] : []; }
+      catch { return []; }
+    })(),
+    ...String(process.env.CSP_IMG_SOURCES ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  ]
+}));
+app.use(httpLogger());
 app.use(metricsMiddleware());
-app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
+app.use(telemetry.httpMetrics());
+app.use(cors(corsOptions));
+// Stripe signs the exact bytes it sent: the webhook must see the RAW body, so
+// it is read here, before express.json (which then skips an already-read body).
+app.use('/api/payments/stripe/webhook', express.raw({ type: () => true, limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Real sessions first; the x-user-id shortcut only when explicitly enabled.
@@ -129,61 +206,18 @@ app.use(PUBLIC_BASE, express.static(STORAGE_ROOT, {
   }
 }));
 
-// --- health ------------------------------------------------------------------
+// --- health & metrics (routes/observability.js) ----------------------------------
 
-/**
- * Liveness: is the process up? Deliberately does not touch the database, so a
- * database blip cannot make an orchestrator kill an otherwise healthy container.
- */
-app.get('/api/live', (_req, res) => {
-  res.json({ status: 'alive', uptime_seconds: Math.round(process.uptime()) });
-});
-
-/**
- * Readiness: should this instance receive traffic? This one *does* check the
- * database, because an instance that cannot read it should leave the pool.
- */
-app.get('/api/ready', asyncRoute(async (req, res) => {
-  if (req.app.get('shutting-down')) {
-    res.status(503).json({ status: 'draining' });
-    return;
-  }
-  try {
-    await getQuery('SELECT 1 AS ok');
-    res.json({ status: 'ready', ...metricsSnapshot() });
-  } catch (err) {
-    res.status(503).json({ status: 'not_ready', error: err.message });
-  }
-}));
-
-if (config.enableMetrics) {
-  app.get('/metrics', (req, res) => {
-    // With METRICS_TOKEN set the endpoint is private; without it, open — which
-    // is normal when the metrics port is only reachable inside the network.
-    if (config.metricsToken && req.get('authorization') !== `Bearer ${config.metricsToken}`) {
-      res.status(401).type('text/plain').send('unauthorized\n');
-      return;
-    }
-    res.type('text/plain; version=0.0.4')
-      .send(renderMetrics({ socketConnections: io.engine.clientsCount }));
-  });
-}
-
-app.get('/api/health', asyncRoute(async (_req, res) => {
-  const { version } = await getQuery(
-    `SELECT MAX(version) AS version FROM schema_migrations`
-  );
-  res.json({
-    status: 'ok',
-    schema_version: version,
-    // What *this process* was built against. A client that expects more than
-    // this is talking to a server that was started before the code changed —
-    // the API would 404 on newer routes with no other clue.
-    code_schema_version: SCHEMA_VERSION,
-    storage_root: STORAGE_ROOT,
-    uptime_seconds: Math.round(process.uptime()),
-    connected_sockets: io.engine.clientsCount
-  });
+// observability
+app.use(observabilityRouter({
+  io,
+  config,
+  schemaVersion: SCHEMA_VERSION,
+  realtimeHealth, // realtime-scale: adapter/recovery state gates readiness
+  // Cheap feature flags for /api/health (no network calls).
+  features: () => ({ push: { enabled: pushEnabled() }, livekit: { enabled: isLivekitEnabled() } }),
+  db: { health: dbHealth, getQuery, stats: dbStats, path: DB_PATH, isPostgres },
+  storage: { root: STORAGE_ROOT, backend: activeBackend }
 }));
 
 /** Permission flag reference, so the client can build a role editor. */
@@ -200,11 +234,28 @@ app.get('/api/meta/permissions', (_req, res) => {
 app.use('/api', authRouter);
 app.use('/api', securityRouter);
 app.use('/api', filesRouter);
+app.use('/api', createPushRouter({ io })); // push
+app.use('/api', createLivekitRouter({ io })); // livekit
+app.use('/api', syncRouter); // realtime-scale: catch-up after reconnect
+app.use('/api', passkeysRouter); // passkeys
+app.use('/api', translationRouter); // translation
+app.use('/api', createServerAppearanceRouter({ io })); // servers (round 4): appearance, profile, discovery
+app.use('/api', createProfilesRouter({ io })); // profiles: cosmetics, tags, badges, status expiry
+app.use('/api', createPaymentsRouter({ io })); // payments: PromptPay / Stripe donations (off unless configured)
+app.use(mediaRouter); // media pipeline: /api/media/*, S3 fallback for /uploads/*
+
+// Same-origin image proxy: every remote image (avatars, icons, link previews)
+// is fetched by the server, so viewers' browsers never contact third-party
+// hosts. Signed-in users only (an <img> sends the session cookie), with its
+// own rate bucket. See services/mediaProxy.js.
+const mediaProxyLimit = rateLimit({ name: 'media-proxy', limit: 600, windowMs: 60_000 });
+app.get('/api/media/proxy', requireUser, mediaProxyLimit, asyncRoute(mediaProxyHandler));
 
 // --- users -------------------------------------------------------------------
 
-app.get('/api/users', asyncRoute(async (_req, res) => {
-  res.json(await userService.listUsers());
+app.get('/api/users', requireUser, asyncRoute(async (req, res) => {
+  // Scoped to people the caller shares a server, a DM or a friendship with.
+  res.json((await userService.listUsers(req.userId)).map(publicUserEvent));
 }));
 
 // Every custom emoji the viewer may use, grouped by server — the picker's
@@ -249,6 +300,33 @@ app.put('/api/users/:userId/note', requireUser, writeRateLimit, asyncRoute(async
   }));
 }));
 
+/**
+ * Drop socket rooms a permission change just took away. Best-effort and
+ * off the request path: the change itself already committed.
+ */
+function refreshRooms(scope) {
+  revalidateRooms(io, scope).catch((err) => logger.error({ err }, 'room revalidation failed'));
+}
+
+/** Channel lifecycle events go only to members who can view the channel. */
+function emitChannelEvent(channel, event, payload = channel) {
+  if (!channel?.server_id) return;
+  emitToChannelViewers(io, channel, event, payload)
+    .catch((err) => logger.error({ err, event }, 'channel event fan-out failed'));
+}
+
+/** What everyone may learn about a user from a broadcast. */
+function publicUserEvent(user) {
+  if (!user) return user;
+  const { mutual_servers: _servers, ...rest } = user;
+  const hidden = (user.profile_visibility ?? 'everyone') !== 'everyone';
+  return {
+    ...rest,
+    status: rest.status === 'invisible' ? 'offline' : rest.status,
+    ...(hidden ? { bio: null, banner_url: null, pronouns: null } : {})
+  };
+}
+
 /** Reads scoped to one guild require membership in it. */
 async function requireMembership(req, serverId = req.params.serverId) {
   const resolved = await guildService.resolvePermissions({ userId: req.userId, serverId });
@@ -267,7 +345,9 @@ app.put('/api/users/:userId', asyncRoute(async (req, res) => {
   const updated = await userService.updateProfile({
     userId: req.params.userId, patch: req.body ?? {}
   });
-  io.emit('user_updated', updated);
+  // People who can know this user get the public view — never the full server
+  // list or a private profile's bio; the user's own devices get everything.
+  await emitToRelated(io, updated.id, 'user_updated', publicUserEvent(updated), updated);
   res.json(updated);
 }));
 
@@ -278,9 +358,12 @@ app.patch('/api/users/:userId/presence', asyncRoute(async (req, res) => {
     status: req.body?.status,
     customStatus: req.body?.custom_status
   });
-  io.emit('presence_updated', {
-    userId: updated.id, status: updated.status, custom_status: updated.custom_status
-  });
+  // Others see "invisible" as offline, exactly as on the socket path.
+  await emitToRelated(io, updated.id, 'presence_updated', {
+    userId: updated.id,
+    status: updated.status === 'invisible' ? 'offline' : updated.status,
+    custom_status: updated.custom_status
+  }, { userId: updated.id, status: updated.status, custom_status: updated.custom_status });
   res.json(updated);
 }));
 
@@ -370,7 +453,9 @@ app.post('/api/servers', requireUser, writeRateLimit, asyncRoute(async (req, res
     name: req.body.name,
     iconUrl: req.body.icon_url ?? null,
     iconFileId: req.body.icon_file_id ?? null,
-    ownerId
+    ownerId,
+    // Default channel/category names follow the creator's language.
+    locale: typeof req.body.locale === 'string' ? req.body.locale.slice(0, 16) : null
   });
   res.json(server);
 }));
@@ -382,6 +467,27 @@ async function emitMemberJoined(serverId, userId, detail) {
 }
 
 app.post('/api/servers/:serverId/join', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // Joining by id alone is only for guilds that opted into discovery (Discord's
+  // DISCOVERABLE feature). Every other guild is invite-only — without this,
+  // anyone who learned a server id could walk into a private server.
+  const target = await getQuery(
+    `SELECT features FROM servers WHERE id = ? AND deleted_at IS NULL`, [req.params.serverId]
+  );
+  if (!target) throw ApiError.notFound('Server');
+  let features = [];
+  try { features = JSON.parse(target.features || '[]'); } catch { features = []; }
+  const alreadyMember = (await guildService.resolvePermissions({
+    userId: req.userId, serverId: req.params.serverId
+  })).isMember;
+  const banned = await getQuery(
+    `SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?`, [req.params.serverId, req.userId]
+  );
+  if (banned) throw ApiError.forbidden('You are banned from this server');
+  if (!alreadyMember && !(Array.isArray(features) && features.includes('DISCOVERABLE'))) {
+    throw new ApiError('This server can only be joined with an invite', {
+      status: 403, code: 'INVITE_REQUIRED'
+    });
+  }
   const detail = await guildService.joinServer({
     serverId: req.params.serverId, userId: req.userId
   });
@@ -396,6 +502,7 @@ app.post('/api/servers/:serverId/leave', requireUser, asyncRoute(async (req, res
   io.to(req.params.serverId).emit('member_removed', {
     serverId: req.params.serverId, userId: req.userId, reason: 'leave'
   });
+  refreshRooms({ userIds: [req.userId], serverId: req.params.serverId });
   res.json(result);
 }));
 
@@ -404,7 +511,10 @@ app.get('/api/servers/:serverId/audit-log', asyncRoute(async (req, res) => {
     userId: req.userId, serverId: req.params.serverId, permission: 'VIEW_AUDIT_LOG'
   });
   res.json(await guildService.listAuditLog(req.params.serverId, {
-    limit: parseLimit(req.query.limit), before: req.query.before ?? null
+    limit: parseLimit(req.query.limit), before: req.query.before ?? null,
+    actionType: typeof req.query.action_type === 'string' ? req.query.action_type : null,
+    userId: typeof req.query.user_id === 'string' ? req.query.user_id : null,
+    targetId: typeof req.query.target_id === 'string' ? req.query.target_id : null
   }));
 }));
 
@@ -454,6 +564,7 @@ app.delete('/api/servers/:serverId/members/:userId/roles/:roleId', requireUser, 
   await guildService.assertPermission({ userId: req.userId, serverId, permission: 'MANAGE_ROLES' });
   await guildService.removeRole({ serverId, userId, roleId, actorId: req.userId });
   io.to(serverId).emit('member_updated', { serverId, userId });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -467,6 +578,7 @@ app.post('/api/servers/:serverId/bans/:userId', requireUser, asyncRoute(async (r
     reason: req.body?.reason, deleteMessageSeconds: Number(req.body?.deleteMessageSeconds) || 0
   });
   io.to(serverId).emit('member_removed', { serverId, userId, reason: 'ban' });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -475,6 +587,7 @@ app.post('/api/servers/:serverId/kicks/:userId', requireUser, asyncRoute(async (
   await guildService.assertPermission({ userId: req.userId, serverId, permission: 'KICK_MEMBERS' });
   await guildService.kickMember({ serverId, userId, moderatorId: req.userId, reason: req.body?.reason });
   io.to(serverId).emit('member_removed', { serverId, userId, reason: 'kick' });
+  refreshRooms({ userIds: [userId], serverId });
   res.json({ success: true });
 }));
 
@@ -537,7 +650,7 @@ app.post('/api/channels', requireUser, writeRateLimit, asyncRoute(async (req, re
     topic: req.body.topic ?? null,
     userId: req.userId
   });
-  io.to(serverId).emit('channel_created', channel);
+  emitChannelEvent(channel, 'channel_created');
   res.json(channel);
 }));
 
@@ -545,7 +658,7 @@ app.patch('/api/channels/:channelId', requireUser, asyncRoute(async (req, res) =
   const channel = await guildService.updateChannel({
     channelId: req.params.channelId, patch: req.body ?? {}, userId: req.userId
   });
-  if (channel.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  emitChannelEvent(channel, 'channel_updated');
   res.json(channel);
 }));
 
@@ -606,6 +719,7 @@ app.delete('/api/dms/:channelId/recipients/:userId', requireUser, asyncRoute(asy
     channelId: req.params.channelId, userId: req.userId, targetId: req.params.userId
   });
   io.to(`user-${req.params.userId}`).emit('dm_channel_removed', { id: req.params.channelId });
+  refreshRooms({ userIds: [req.params.userId], channelIds: [req.params.channelId] });
   await emitDmToRecipients(req.params.channelId, req.params.userId, 'dm_channel_updated');
   res.json(result);
 }));
@@ -624,7 +738,8 @@ app.get('/api/messages/:channelId', requireUser, asyncRoute(async (req, res) => 
 }));
 
 app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
-  const message = await messageService.createMessage({
+  // Bounded concurrency; 503 RETRY_LATER instead of an unbounded queue.
+  const message = await messageAdmission.run(() => messageService.createMessage({
     channelId: req.body.channel_id,
     userId: req.userId,
     content: req.body.content,
@@ -633,12 +748,14 @@ app.post('/api/messages', requireUser, writeRateLimit, asyncRoute(async (req, re
     nonce: req.body.nonce ?? null,
     stickerId: req.body.sticker_id ?? null,
     poll: req.body.poll ?? null,
+    forwardedFrom: req.body.forwarded_from ?? null,
+    allowedMentions: req.body.allowed_mentions ?? null,
     // Embeds and components are a bot's vocabulary; a person's client never
     // sends them, and the validators reject anything malformed either way.
     embeds: req.botApplicationId ? req.body.embeds ?? null : null,
     components: req.botApplicationId ? req.body.components ?? null : null,
     applicationId: req.botApplicationId ?? null
-  });
+  }));
   fanOutMessage(io, message);
   res.json(message);
 }));
@@ -691,7 +808,9 @@ app.get('/api/polls/:messageId/answers/:answerId/voters', requireUser, asyncRout
 
 const broadcastEvent = (event, kind = 'event_updated') => {
   if (!event) return;
-  io.to(`server-${event.server_id}`).emit(kind, event);
+  // The guild room is the server id itself (join_server); a `server-` prefix
+  // reached nobody, so event changes were never live.
+  io.to(event.server_id).emit(kind, event);
 };
 
 app.get('/api/servers/:serverId/events', requireUser, asyncRoute(async (req, res) => {
@@ -731,7 +850,7 @@ app.put('/api/events/:eventId/interest', requireUser, writeRateLimit, asyncRoute
     eventId: req.params.eventId, userId: req.userId,
     interested: req.body?.interested !== false
   });
-  io.to(`server-${event.server_id}`).emit('event_interest', {
+  io.to(event.server_id).emit('event_interest', {
     event_id: event.id, interested_count: event.interested_count
   });
   res.json(event);
@@ -800,15 +919,20 @@ app.put('/api/messages/:messageId/reactions/:emoji', requireUser, writeRateLimit
 }));
 
 app.get('/api/search/messages', requireUser, asyncRoute(async (req, res) => {
-  res.json(await messageService.searchMessages({
+  const limit = parseLimit(req.query.limit, { fallback: 25, max: 100 });
+  const results = await messageService.searchMessages({
     query: req.query.q,
     channelId: req.query.channelId ?? null,
     serverId: req.query.serverId ?? null,
     authorId: req.query.authorId ?? null,
     hasAttachment: req.query.hasAttachment === 'true',
-    limit: parseLimit(req.query.limit, { fallback: 25, max: 100 }),
-    viewerId: req.userId
-  }));
+    limit,
+    viewerId: req.userId,
+    // Cursor pagination: pass the previous page's X-Next-Cursor as ?before=.
+    before: typeof req.query.before === 'string' ? req.query.before : null
+  });
+  if (results.length >= limit) res.setHeader('X-Next-Cursor', results[results.length - 1].id);
+  res.json(results);
 }));
 
 // --- read state & notifications ---------------------------------------------
@@ -862,13 +986,13 @@ app.post('/api/notifications/read', requireUser, asyncRoute(async (req, res) => 
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
   if (ids && ids.length) {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
       [req.userId, ...ids]
     );
   } else {
     await runQuery(
-      `UPDATE notifications SET read_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE notifications SET read_at = ${sql.now}
         WHERE user_id = ? AND read_at IS NULL`,
       [req.userId]
     );
@@ -955,6 +1079,7 @@ app.patch('/api/servers/:serverId/roles/:roleId', requireUser, asyncRoute(async 
     actorId: req.userId, patch: req.body ?? {}
   });
   io.to(req.params.serverId).emit('role_updated', role);
+  refreshRooms({ serverId: req.params.serverId });
   res.json(role);
 }));
 
@@ -963,6 +1088,7 @@ app.delete('/api/servers/:serverId/roles/:roleId', requireUser, asyncRoute(async
     serverId: req.params.serverId, roleId: req.params.roleId, actorId: req.userId
   });
   io.to(req.params.serverId).emit('role_deleted', { roleId: req.params.roleId });
+  refreshRooms({ serverId: req.params.serverId });
   res.json(result);
 }));
 
@@ -980,7 +1106,8 @@ app.get('/api/servers/:serverId/members', requireUser, asyncRoute(async (req, re
   await requireMembership(req);
   res.json(await guildAdmin.listMembers(req.params.serverId, {
     limit: parseLimit(req.query.limit, { fallback: 200, max: 1000 }),
-    search: req.query.search ?? null
+    search: req.query.search ?? null,
+    viewerId: req.userId
   }));
 }));
 
@@ -1056,7 +1183,7 @@ app.post('/api/channels/:channelId/threads', requireUser, writeRateLimit, asyncR
     userId: req.userId,
     autoArchiveDuration: Number(req.body?.autoArchiveDuration) || 1440
   });
-  if (thread.server_id) io.to(thread.server_id).emit('thread_created', thread);
+  emitChannelEvent(thread, 'thread_created');
   res.json(thread);
 }));
 
@@ -1087,7 +1214,7 @@ app.patch('/api/threads/:threadId', requireUser, asyncRoute(async (req, res) => 
     threadId: req.params.threadId, userId: req.userId,
     archived: Boolean(req.body?.archived), locked: req.body?.locked
   });
-  if (thread?.server_id) io.to(thread.server_id).emit('channel_updated', thread);
+  emitChannelEvent(thread, 'channel_updated');
   res.json(thread);
 }));
 
@@ -1145,7 +1272,9 @@ app.get('/api/servers/:serverId/lockdowns', requireUser, asyncRoute(async (req, 
 
 app.get('/api/servers/:serverId/profile/:userId', requireUser, asyncRoute(async (req, res) => {
   await requireMembership(req);
-  res.json(await guildAdmin.getGuildProfile({ serverId: req.params.serverId, userId: req.params.userId }));
+  res.json(await guildAdmin.getGuildProfile({
+    serverId: req.params.serverId, userId: req.params.userId, viewerId: req.userId
+  }));
 }));
 
 app.patch('/api/servers/:serverId/profile/@me', requireUser, asyncRoute(async (req, res) => {
@@ -1367,9 +1496,16 @@ app.get('/api/users/@me/export', requireUser, asyncRoute(async (req, res) => {
   res.type('application/json').send(JSON.stringify(data, null, 2));
 }));
 
-app.delete('/api/users/@me', requireUser, asyncRoute(async (req, res) => {
+app.delete('/api/users/@me', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
+  // Irreversible, so a session alone is not enough: the password again, and
+  // the second factor when the account has one.
+  await assertReauthenticated({
+    userId: req.userId, password: req.body?.password, code: req.body?.mfa_code ?? req.body?.code
+  });
   const result = await dataRights.deleteAccount({ userId: req.userId });
   io.to(`user-${req.userId}`).emit('identify_error', { error: 'ACCOUNT_DELETED' });
+  // A deleted account must stop receiving anything at all.
+  io.in(`user-${req.userId}`).disconnectSockets(true);
   res.json(result);
 }));
 
@@ -1403,8 +1539,40 @@ app.post('/api/channels/:channelId/permissions/sync', requireUser, asyncRoute(as
     channelId: req.params.channelId, userId: req.userId
   });
   io.to(req.params.channelId).emit('channel_permissions_synced', result);
+  const synced = await getQuery(`SELECT server_id FROM channels WHERE id = ?`, [req.params.channelId]);
+  if (synced?.server_id) refreshRooms({ serverId: synced.server_id });
   res.json(result);
 }));
+
+// --- voice: ICE servers ------------------------------------------------------
+//
+// STUN is enough on most home networks; behind symmetric NAT or a strict
+// corporate firewall the mesh needs a TURN relay. Credentials use coturn's
+// REST scheme (use-auth-secret): short-lived, per user, derived from a shared
+// secret, so no long-lived TURN password ever reaches a browser.
+
+app.get('/api/voice/ice-servers', requireUser, (req, res) => {
+  const list = (value) => String(value ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  const stun = list(process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302');
+  const iceServers = stun.length ? [{ urls: stun }] : [];
+
+  const turn = list(process.env.TURN_URLS);
+  const secret = process.env.TURN_SECRET;
+  if (turn.length && secret) {
+    const ttl = Math.max(60, Number.parseInt(process.env.TURN_TTL_SECONDS, 10) || 86400);
+    // coturn's REST API (use-auth-secret) mandates HMAC-SHA1. The username is
+    // expiry + a random nonce, so no account identifier goes into the MAC.
+    const turnLabel = `${Math.floor(Date.now() / 1000) + ttl}:${crypto.randomUUID()}`;
+    const credential = crypto.createHmac('sha1', secret).update(turnLabel).digest('base64');
+    iceServers.push({ urls: turn, username: turnLabel, credential });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    iceServers,
+    iceTransportPolicy: process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all'
+  });
+});
 
 // --- calls in DMs ------------------------------------------------------------
 //
@@ -1537,7 +1705,7 @@ app.put('/api/servers/:serverId/onboarding/complete', requireUser, writeRateLimi
 // already fires for new posts; tag/pin changes go out as `forum_post_updated`.
 
 const broadcastForumPost = (post) => {
-  if (post?.server_id) io.to(post.server_id).emit('forum_post_updated', post);
+  if (post?.server_id) emitChannelEvent({ ...post, type: 'thread' }, 'forum_post_updated', post);
 };
 
 app.get('/api/channels/:channelId/forum/tags', requireUser, asyncRoute(async (req, res) => {
@@ -1573,7 +1741,7 @@ app.patch('/api/channels/:channelId/forum', requireUser, asyncRoute(async (req, 
   const channel = await forumService.updateForumSettings({
     channelId: req.params.channelId, userId: req.userId, patch: req.body ?? {}
   });
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  emitChannelEvent(channel, 'channel_updated');
   res.json(channel);
 }));
 
@@ -1599,8 +1767,9 @@ app.post('/api/channels/:channelId/forum/posts', requireUser, writeRateLimit, as
     nonce: req.body?.nonce ?? null
   });
   if (post.server_id) {
-    io.to(post.server_id).emit('thread_created', await threadService.getThread(post.id));
-    io.to(post.server_id).emit('forum_post_created', post);
+    const thread = await threadService.getThread(post.id);
+    emitChannelEvent(thread, 'thread_created');
+    emitChannelEvent(thread, 'forum_post_created', post);
   }
   res.status(201).json({ post, message });
 }));
@@ -1628,7 +1797,9 @@ app.put('/api/forum/posts/:threadId/pin', requireUser, asyncRoute(async (req, re
 
 // --- link embeds -------------------------------------------------------------
 
-app.post('/api/embeds/resolve', requireUser, asyncRoute(async (req, res) => {
+// Each call makes the server fetch third-party URLs, so it spends the write
+// budget rather than the (much larger) read budget.
+app.post('/api/embeds/resolve', requireUser, writeRateLimit, asyncRoute(async (req, res) => {
   const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, 5) : [];
   if (req.body?.content) {
     res.json({ embeds: await linkEmbeds.resolveEmbedsForContent(req.body.content) });
@@ -1659,7 +1830,7 @@ app.post('/api/servers/:serverId/automod', writeRateLimit, asyncRoute(async (req
   res.json(rule);
 }));
 
-app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.patch('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -1668,7 +1839,7 @@ app.patch('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) 
   }));
 }));
 
-app.delete('/api/servers/:serverId/automod/:ruleId', asyncRoute(async (req, res) => {
+app.delete('/api/servers/:serverId/automod/:ruleId', writeRateLimit, asyncRoute(async (req, res) => {
   await guildService.assertPermission({
     userId: req.userId, serverId: req.params.serverId, permission: 'MANAGE_GUILD'
   });
@@ -1734,7 +1905,7 @@ app.get('/api/reports', asyncRoute(async (req, res) => {
   const serverId = req.query.serverId ?? null;
   const isAdmin = process.env.ADMIN_TOKEN && req.get('x-admin-token') === process.env.ADMIN_TOKEN;
   if (!isAdmin) {
-    if (!serverId) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN หรือระบุ serverId');
+    if (!serverId) throw new ApiError('ADMIN_TOKEN or a serverId is required', { status: 403, code: 'FORBIDDEN' });
     await guildService.assertPermission({
       userId: req.userId, serverId, permission: 'MANAGE_MESSAGES'
     });
@@ -1750,12 +1921,20 @@ app.patch('/api/reports/:reportId', requireUser, asyncRoute(async (req, res) => 
   const isAdmin = process.env.ADMIN_TOKEN && req.get('x-admin-token') === process.env.ADMIN_TOKEN;
   if (!isAdmin) {
     // A guild moderator may only close reports raised inside their own guild.
-    const report = await getQuery(`SELECT server_id FROM reports WHERE id = ?`, [req.params.reportId]);
+    const report = await getQuery(`SELECT server_id, escalated FROM reports WHERE id = ?`, [req.params.reportId]);
     if (!report) throw ApiError.notFound('Report');
-    if (!report.server_id) throw ApiError.forbidden('ต้องใช้ ADMIN_TOKEN');
-    await guildService.assertPermission({
-      userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
-    });
+    // Reports with no guild (DMs, users) and escalated ones are the instance
+    // administrators' queue; they may close them from the admin console.
+    const instanceQueue = !report.server_id || Number(report.escalated) === 1;
+    if (instanceQueue && await isInstanceAdmin(req.userId)) {
+      // allowed
+    } else if (!report.server_id) {
+      throw new ApiError('Only an administrator of this instance can do that', { status: 403, code: 'NOT_INSTANCE_ADMIN' });
+    } else {
+      await guildService.assertPermission({
+        userId: req.userId, serverId: report.server_id, permission: 'MANAGE_MESSAGES'
+      });
+    }
   }
   res.json(await reportService.resolveReport({
     reportId: req.params.reportId,
@@ -1785,7 +1964,11 @@ app.put('/api/channels/:channelId/permissions/:targetType/:targetId', requireUse
     allow: req.body?.allow ?? '0', deny: req.body?.deny ?? '0'
   });
   const channel = await getQuery(`SELECT * FROM channels WHERE id = ?`, [req.params.channelId]);
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  if (channel?.server_id) {
+    // Viewers only; then evict sockets that just lost VIEW_CHANNEL here.
+    emitChannelEvent(channel, 'channel_updated');
+    refreshRooms({ serverId: channel.server_id });
+  }
   res.json(result);
 }));
 
@@ -1795,7 +1978,11 @@ app.delete('/api/channels/:channelId/permissions/:targetType/:targetId', require
     targetType: req.params.targetType, targetId: req.params.targetId
   });
   const channel = await getQuery(`SELECT * FROM channels WHERE id = ?`, [req.params.channelId]);
-  if (channel?.server_id) io.to(channel.server_id).emit('channel_updated', channel);
+  if (channel?.server_id) {
+    // Viewers only; then evict sockets that just lost VIEW_CHANNEL here.
+    emitChannelEvent(channel, 'channel_updated');
+    refreshRooms({ serverId: channel.server_id });
+  }
   res.json(result);
 }));
 
@@ -1895,38 +2082,24 @@ app.use('/api', (_req, res) => {
 if (config.serveStatic) {
   const staticRoot = path.resolve(__dirname, config.staticDir);
   if (!fs.existsSync(staticRoot)) {
-    console.error(`❌ SERVE_STATIC is on but ${staticRoot} does not exist. Run: npm run build`);
+    logger.fatal({ staticRoot }, 'SERVE_STATIC is on but the directory does not exist. Run: npm run build');
     process.exit(1);
   }
 
-  // Hashed asset names are immutable; index.html must never be cached, or
-  // clients keep booting the previous bundle after a deploy.
-  app.use(express.static(staticRoot, {
-    index: false,
-    setHeaders(res, filePath) {
-      if (/\.[0-9a-zA-Z_-]{8,}\.(js|css|woff2?|png|jpe?g|svg|webp)$/.test(filePath)) {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      } else {
-        res.setHeader('Cache-Control', 'no-cache');
-      }
-    }
-  }));
+  // Hashed assets (assets/*) immutable; index.html, sw.js and the manifest
+  // no-cache, or clients keep booting the previous bundle after a deploy.
+  // Text is brotli/gzip-compressed for installs without a compressing proxy
+  // in front, and any other non-API path returns the shell (client routing).
+  app.use(staticAssets({ root: staticRoot }));
 
-  // Client-side routing: any non-API path returns the shell.
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
-    res.setHeader('Cache-Control', 'no-cache');
-    return res.sendFile(path.join(staticRoot, 'index.html'));
-  });
-
-  console.log(`🌐 Serving SPA from ${staticRoot}`);
+  logger.info({ staticRoot }, 'serving SPA');
 }
 
 app.use(errorHandler);
 
 // --- realtime & lifecycle ----------------------------------------------------
 
-registerRealtime(io);
+await registerRealtime(io);
 
 // Sweep abandoned uploads and expired files periodically.
 const stopGC = startGarbageCollector({ intervalMs: 6 * 60 * 60 * 1000, dryRun: false });
@@ -1939,10 +2112,10 @@ const housekeeping = setInterval(async () => {
     const tokens = await pruneAccountTokens();
     const { archived } = await sweepStaleThreads();
     if (sessions || tokens || archived) {
-      console.log(`🧽 housekeeping: ${sessions} session(s), ${tokens} token(s), ${archived} thread(s)`);
+      logger.info({ sessions, tokens, archived }, 'housekeeping pruned expired rows');
     }
   } catch (err) {
-    console.error('housekeeping failed:', err.message);
+    logger.error({ err }, 'housekeeping failed');
   }
 }, 60 * 60 * 1000);
 housekeeping.unref?.();
@@ -1955,7 +2128,7 @@ housekeeping.unref?.();
 // AFK sweep every 30 seconds — coarse enough to be free, fine enough that a
 // one-minute timeout still feels like one minute.
 const afkSweep = setInterval(() => {
-  sweepAfk(io).catch((err) => console.error('afk sweep failed:', err.message));
+  sweepAfk(io).catch((err) => logger.error({ err }, 'afk sweep failed'));
 }, 30 * 1000);
 afkSweep.unref?.();
 
@@ -1963,6 +2136,8 @@ const REMINDER_LEAD_MS = 15 * 60 * 1000;
 const remindedEvents = new Set();
 const eventReminders = setInterval(async () => {
   try {
+    // Once per cluster when several instances share Redis.
+    if (!(await holdsLease('event-reminders', 120_000))) return;
     const soon = await eventService.upcomingWithin(REMINDER_LEAD_MS);
     for (const event of soon) {
       if (remindedEvents.has(event.id)) continue;
@@ -1979,15 +2154,17 @@ const eventReminders = setInterval(async () => {
     // Forget events that are now in the past so the set cannot grow forever.
     if (remindedEvents.size > 1000) remindedEvents.clear();
   } catch (err) {
-    console.error('event reminders failed:', err.message);
+    logger.error({ err }, 'event reminders failed');
   }
 }, 60 * 1000);
 eventReminders.unref?.();
 
 httpServer.listen(PORT, config.host, () => {
-  console.log(`🚀 Antigravity Discord on http://${config.host}:${PORT} (${config.nodeEnv})`);
-  console.log(`   public url → ${config.publicUrl}`);
-  console.log(`   storage    → ${STORAGE_ROOT}`);
+  logger.info({
+    url: `http://${config.host}:${PORT}`, env: config.nodeEnv, public_url: config.publicUrl,
+    storage: STORAGE_ROOT, release: telemetry.RELEASE, node: process.version,
+    tracing: telemetry.tracingActive(), error_tracking: telemetry.errorTrackingConfigured()
+  }, `Antigravity Discord listening on http://${config.host}:${PORT}`);
 });
 
 /**
@@ -1998,17 +2175,17 @@ httpServer.listen(PORT, config.host, () => {
  */
 let shuttingDown = false;
 
-async function shutdown(signal) {
+async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`\n${signal} received — draining.`);
+  logger.info({ signal }, 'shutdown signal received — draining');
 
   // Fail readiness first so the load balancer stops sending new traffic while
   // in-flight requests finish.
   app.set('shutting-down', true);
 
   const forceExit = setTimeout(() => {
-    console.error('   drain timed out — exiting anyway.');
+    logger.error('drain timed out — exiting anyway');
     process.exit(1);
   }, config.shutdownTimeoutMs);
   forceExit.unref?.();
@@ -2016,14 +2193,22 @@ async function shutdown(signal) {
   try {
     stopGC();
     clearInterval(housekeeping);
+    clearInterval(afkSweep);
+    clearInterval(eventReminders);
+    // Tell sockets to reconnect elsewhere, close them recoverably, stop
+    // accepting; idle keep-alive connections go now, in-flight requests finish.
+    await drainRealtime(io);
+    httpServer.closeIdleConnections?.();
     await new Promise((resolve) => io.close(resolve));
     await new Promise((resolve) => httpServer.close(resolve));
+    await closeRealtimeBackends();
     await closeDB();
+    await telemetry.shutdownTelemetry();
     clearTimeout(forceExit);
-    console.log('   drained cleanly.');
-    process.exit(0);
+    logger.info('drained cleanly');
+    process.exit(exitCode);
   } catch (err) {
-    console.error('   shutdown error:', err.message);
+    logger.error({ err }, 'shutdown error');
     process.exit(1);
   }
 }
@@ -2031,7 +2216,7 @@ async function shutdown(signal) {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => shutdown(signal));
 }
+globalThis.__agShutdown = shutdown;
 
-process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
 
 export { app, io, httpServer };

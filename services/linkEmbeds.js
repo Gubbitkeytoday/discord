@@ -8,56 +8,160 @@
 
 import crypto from 'crypto';
 import dns from 'dns/promises';
+import http from 'http';
+import https from 'https';
 import net from 'net';
 
-import { runQuery, getQuery } from '../db.js';
+import { runQuery, getQuery, sql } from '../db.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5000;
 const MAX_BYTES = 256 * 1024;   // enough for <head>, not enough to be a download
+const MAX_REDIRECTS = 3;
 
 const hashUrl = (url) => crypto.createHash('sha256').update(url).digest('hex').slice(0, 32);
 
-/** Reject anything that is not a public http(s) host. */
+/**
+ * Reject anything that is not a public http(s) host. Resolves to the parsed
+ * URL and the vetted address the request will be pinned to: every address the
+ * name resolves to must be public, and the connection then goes to the first
+ * of them — by IP, so no second DNS answer (rebinding) is ever used.
+ */
 async function assertPublicUrl(rawUrl) {
+  const fail = (message, code) => Object.assign(new Error(message), { code });
   let url;
-  try { url = new URL(rawUrl); } catch { throw new Error('URL ไม่ถูกต้อง'); }
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('รองรับเฉพาะ http/https');
+  try { url = new URL(rawUrl); } catch { throw fail('Invalid URL', 'EINVALIDURL'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw fail('Only http(s) URLs are supported', 'EINVALIDURL');
 
-  const host = url.hostname;
+  // WHATWG keeps the brackets on an IPv6 literal ("[::1]").
+  const host = url.hostname.replace(/^\[|\]$/g, '');
   if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host)) {
-    throw new Error('ปฏิเสธ host ภายในเครื่อง');
+    throw fail('Refusing a local host', 'EPRIVATE');
   }
 
   // Resolve and check every address — a public name can point at a private IP.
   let addresses;
   try {
     addresses = net.isIP(host)
-      ? [{ address: host }]
+      ? [{ address: host, family: net.isIP(host) }]
       : await dns.lookup(host, { all: true });
   } catch {
-    throw new Error('resolve host ไม่ได้');
+    throw fail('Host does not resolve', 'ENOTFOUND');
   }
 
+  if (!addresses.length) throw fail('Host does not resolve', 'ENOTFOUND');
   for (const { address } of addresses) {
-    if (isPrivateAddress(address)) throw new Error('ปฏิเสธที่อยู่ภายในเครือข่าย');
+    if (isPrivateAddress(address)) throw fail('Refusing a private network address', 'EPRIVATE');
   }
-  return url;
+  const [first] = addresses;
+  return { url, address: first.address, family: first.family ?? net.isIP(first.address) };
 }
 
-function isPrivateAddress(ip) {
+export function isPrivateAddress(ip) {
   if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
+    const [a, b, c] = ip.split('.').map(Number);
     return (
       a === 10 || a === 127 || a === 0 ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168) ||
       (a === 169 && b === 254) ||   // link-local, incl. cloud metadata
-      (a === 100 && b >= 64 && b <= 127)
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 192 && b === 0 && c === 0) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      a >= 224                      // multicast, reserved, broadcast
     );
   }
+  if (!net.isIPv6(ip)) return true;  // not an address we understand: refuse
   const lower = ip.toLowerCase();
-  return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80');
+  // IPv4-mapped / -translated forms (::ffff:127.0.0.1, ::ffff:7f00:1,
+  // 64:ff9b::a9fe:a9fe) reach the IPv4 address they embed.
+  const mapped = lower.match(/^(?:::ffff:(?:0:)?|64:ff9b::)(.+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    if (net.isIPv4(tail)) return isPrivateAddress(tail);
+    const hex = tail.split(':');
+    if (hex.length === 2) {
+      const hi = parseInt(hex[0], 16); const lo = parseInt(hex[1], 16);
+      return isPrivateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    return true;
+  }
+  return lower === '::1' || lower === '::' || lower.startsWith('fc') || lower.startsWith('fd')
+    || lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea')
+    || lower.startsWith('feb') || lower.startsWith('ff');
+}
+
+/**
+ * Request options for `url` pinned to an already-vetted `address`. The socket
+ * dials that IP; the name still goes in the Host header and, for https, in
+ * SNI and the certificate check (`servername`), so virtual hosting and TLS
+ * verification work exactly as with a name. Nothing is resolved again at
+ * connect time, which closes the DNS-rebinding window completely.
+ */
+export function pinnedRequestOptions(url, { address, family }) {
+  const secure = url.protocol === 'https:';
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  return {
+    protocol: secure ? 'https:' : 'http:',
+    host: address,
+    family: family === 6 ? 6 : 4,
+    port: url.port ? Number(url.port) : (secure ? 443 : 80),
+    path: `${url.pathname || '/'}${url.search}`,
+    ...(secure && !net.isIP(hostname) ? { servername: hostname } : {}),
+    headers: { Host: url.host }
+  };
+}
+
+/**
+ * GET with every hop checked. Redirects are followed by hand (at most
+ * MAX_REDIRECTS), and each target goes through assertPublicUrl again — with
+ * `redirect: 'follow'` a public page could 302 the unfurler straight to the
+ * cloud metadata service.
+ */
+export async function safeGet(startUrl, { signal, accept = 'text/html,application/xhtml+xml' }) {
+  let target = await assertPublicUrl(startUrl);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const current = target.url;
+    const response = await new Promise((resolve, reject) => {
+      const options = pinnedRequestOptions(current, target);
+      const client = options.protocol === 'https:' ? https : http;
+      const req = client.get({
+        ...options,
+        signal,
+        headers: {
+          ...options.headers,
+          // Many sites only emit OpenGraph tags for a bot-looking agent.
+          'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
+          Accept: accept
+        }
+      }, resolve);
+      req.on('error', reject);
+    });
+    const status = response.statusCode ?? 0;
+    if (status >= 300 && status < 400 && response.headers.location) {
+      response.resume();
+      if (hop === MAX_REDIRECTS) throw new Error('too many redirects');
+      target = await assertPublicUrl(new URL(response.headers.location, current).href);
+      continue;
+    }
+    if (status < 200 || status >= 300) {
+      response.resume();
+      throw new Error(`HTTP ${status}`);
+    }
+    return { response, url: current };
+  }
+  throw new Error('too many redirects');
+}
+
+/** Only http(s) image URLs survive into an embed. */
+function safeHttpUrl(value, base) {
+  try {
+    const url = new URL(value, base);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 const META_PATTERNS = {
@@ -80,13 +184,16 @@ function extract(html, patterns) {
   return null;
 }
 
-function decodeEntities(text) {
-  return text
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)));
+// One pass over the text: decoding entity by entity in sequence would turn a
+// literal "&amp;lt;" into "<" (double unescaping) instead of "&lt;".
+const NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+export function decodeEntities(text) {
+  return text.replace(/&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));/gi, (entity, hex, dec, name) => {
+    if (name !== undefined) return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : entity;
+    const codePoint = hex !== undefined ? parseInt(hex, 16) : Number(dec);
+    return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+  });
 }
 
 /**
@@ -105,38 +212,28 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
   }
 
   let embed = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const url = await assertPublicUrl(rawUrl);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    const response = await fetch(url, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: {
-        // Many sites only emit OpenGraph tags for a bot-looking agent.
-        'User-Agent': 'Mozilla/5.0 (compatible; AntigravityBot/1.0; +link-preview)',
-        Accept: 'text/html,application/xhtml+xml'
-      }
-    }).finally(() => clearTimeout(timer));
-
-    const contentType = response.headers.get('content-type') ?? '';
+    const { response, url } = await safeGet(rawUrl, { signal: controller.signal });
+    const contentType = String(response.headers['content-type'] ?? '');
 
     if (contentType.startsWith('image/')) {
-      embed = { type: 'image', url: rawUrl, image: rawUrl };
+      response.destroy();
+      // `url` is the link; `image` is what the browser loads — via our proxy,
+      // so viewing the preview does not reveal the viewer to the site.
+      embed = { type: 'image', url: rawUrl, image: proxiedImageUrl(rawUrl) };
     } else if (contentType.includes('html')) {
       // Read at most MAX_BYTES rather than buffering an arbitrary page.
-      const reader = response.body?.getReader();
       const chunks = [];
       let received = 0;
-      while (reader && received < MAX_BYTES) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
+      for await (const chunk of response) {
+        chunks.push(chunk);
+        received += chunk.length;
+        if (received >= MAX_BYTES) break;
       }
-      reader?.cancel().catch(() => {});
-      const html = Buffer.concat(chunks.map(Buffer.from)).toString('utf8');
+      response.destroy();
+      const html = Buffer.concat(chunks).toString('utf8');
 
       const title = extract(html, META_PATTERNS.title);
       if (title) {
@@ -146,20 +243,28 @@ export async function resolveEmbed(rawUrl, { force = false } = {}) {
           url: rawUrl,
           title,
           description: extract(html, META_PATTERNS.description),
-          image: image ? new URL(image, url).href : null,
+          image: image ? proxiedImageUrl(safeHttpUrl(image, url)) : null,
           site_name: extract(html, META_PATTERNS.siteName) ?? url.hostname,
-          color: extract(html, META_PATTERNS.themeColor)
+          // Rendered into a style; only a plain colour is accepted.
+          color: /^#[0-9a-f]{3,8}$/i.test(extract(html, META_PATTERNS.themeColor) ?? '')
+            ? extract(html, META_PATTERNS.themeColor) : null
         };
+      } else {
+        response.destroy();
       }
+    } else {
+      response.destroy();
     }
   } catch (err) {
     // Cache the miss too, so one bad link is not refetched on every render.
     embed = null;
+  } finally {
+    clearTimeout(timer);
   }
 
   await runQuery(
     `INSERT INTO link_embeds (url_hash, url, data, fetched_at, expires_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?)
+     VALUES (?, ?, ?, ${sql.now}, ?)
      ON CONFLICT(url_hash) DO UPDATE SET
        data = excluded.data, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at`,
     [key, rawUrl, JSON.stringify(embed), new Date(Date.now() + CACHE_TTL_MS).toISOString()]

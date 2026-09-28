@@ -6,12 +6,18 @@
 //  screen without an audit trail is how servers get quietly wrecked.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { toBigInt, ALL_PERMISSIONS } from '../lib/permissions.js';
 import { addReference, releaseReference, findFileByPublicUrl } from '../storageService.js';
-import { assertPermission, resolvePermissions, writeAuditLog } from './guilds.js';
+import { assertPermission, assertMemberHierarchy, resolvePermissions, writeAuditLog } from './guilds.js';
+import { publicStatus, currentViewerId } from '../lib/presence.js'; // safety
+import { canViewProfile } from './users.js'; // safety
+import { validateRoleStyle, assertRoleStyleComplete, isReservedVanity } from './serverAppearance.js'; // servers
+import { checkIdentityText, assertNotReservedName, cleanBio, LIMITS as PROFILE_LIMITS } from './profiles.js'; // profiles
 
 // --- guild profile -----------------------------------------------------------
 
@@ -34,6 +40,9 @@ async function validateVanity(slug, serverId) {
     throw new ApiError('Vanity URL may use lowercase letters, digits and hyphens (2–32 characters)',
       { code: 'VANITY_INVALID' });
   }
+  if (isReservedVanity(clean)) {
+    throw new ApiError('That vanity URL is reserved', { status: 409, code: 'VANITY_RESERVED' });
+  }
   const taken = await getQuery(
     `SELECT id FROM servers WHERE vanity_url = ? AND id != ? AND deleted_at IS NULL`, [clean, serverId]
   );
@@ -50,6 +59,10 @@ export async function updateGuild({ serverId, actorId, patch }) {
 
   if (patch.vanity_url !== undefined) {
     patch = { ...patch, vanity_url: await validateVanity(patch.vanity_url, serverId) };
+  }
+  // Remote guild images are stored as same-origin proxy URLs.
+  for (const field of ['icon_url', 'banner_url', 'splash_url']) {
+    if (typeof patch[field] === 'string') patch = { ...patch, [field]: proxiedImageUrl(patch[field]) };
   }
   if (patch.verification_level !== undefined) {
     const level = Number(patch.verification_level);
@@ -78,20 +91,28 @@ export async function updateGuild({ serverId, actorId, patch }) {
   }
   if (!sets.length) return before;
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(serverId);
 
   await transaction(async () => {
     await runQuery(`UPDATE servers SET ${sets.join(', ')} WHERE id = ?`, params);
 
-    // Track icon/banner file references so a replaced icon becomes collectable.
-    for (const [urlField, idField] of [['icon_url', 'icon_file_id'], ['banner_url', 'banner_file_id']]) {
+    // Track icon/banner/splash file references so a replaced image becomes
+    // collectable, and remember whether the new one is animated: the client
+    // shows a still until hover, and needs to know there is anything to play.
+    for (const [urlField, idField, animatedField] of [
+      ['icon_url', 'icon_file_id', 'icon_animated'],
+      ['banner_url', 'banner_file_id', 'banner_animated'],
+      ['splash_url', 'splash_file_id', null]
+    ]) {
       if (patch[urlField] === undefined) continue;
       const file = await findFileByPublicUrl(patch[urlField]);
       if (before[idField] && before[idField] !== file?.id) await releaseReference(before[idField]);
-      if (file) {
-        await addReference(file.id);
-        await runQuery(`UPDATE servers SET ${idField} = ? WHERE id = ?`, [file.id, serverId]);
+      if (file && before[idField] !== file.id) await addReference(file.id);
+      await runQuery(`UPDATE servers SET ${idField} = ? WHERE id = ?`, [file?.id ?? null, serverId]);
+      if (animatedField) {
+        const animated = file ? Boolean(file.is_animated) : /\.gif(\?|#|$)/i.test(String(patch[urlField] ?? ''));
+        await runQuery(`UPDATE servers SET ${animatedField} = ? WHERE id = ?`, [animated ? 1 : 0, serverId]);
       }
     }
     await writeAuditLog({
@@ -109,7 +130,7 @@ export async function deleteGuild({ serverId, actorId }) {
   if (server.owner_id !== actorId) throw ApiError.forbidden('Only the owner can delete a server');
 
   await runQuery(
-    `UPDATE servers SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE servers SET deleted_at = ${sql.now} WHERE id = ?`,
     [serverId]
   );
   return { success: true };
@@ -141,7 +162,7 @@ export async function transferOwnership({ serverId, actorId, newOwnerId }) {
  * role at or above their own highest role. Without both checks, MANAGE_ROLES is
  * a straight path to administrator.
  */
-async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissions }) {
+async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissions, nextPosition }) {
   const resolved = await resolvePermissions({ userId: actorId, serverId });
   if (resolved.isOwner) return resolved;
 
@@ -154,6 +175,11 @@ async function assertRoleHierarchy({ serverId, actorId, targetRole, nextPermissi
 
   if (targetRole && targetRole.position >= highest) {
     throw ApiError.forbidden('You cannot manage a role at or above your highest role');
+  }
+  // Moving a role up is also a hierarchy decision: dragging a role you manage
+  // above your own would make its holders outrank you.
+  if (nextPosition !== undefined && Number(nextPosition) >= highest) {
+    throw ApiError.forbidden('You cannot move a role at or above your highest role');
   }
   if (nextPermissions !== undefined) {
     const granting = toBigInt(nextPermissions) & ~toBigInt(resolved.permissions);
@@ -193,12 +219,24 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     serverId, actorId,
     // @everyone sits at position 0 and is edited by anyone with MANAGE_ROLES.
     targetRole: role.is_everyone ? null : role,
-    nextPermissions: patch.permissions
+    nextPermissions: patch.permissions,
+    nextPosition: role.is_everyone ? undefined : patch.position
   });
 
-  // `color_secondary` turns the name into a gradient; NULL keeps it flat.
+  // Style: solid / gradient (two colours + angle) / holographic, plus a
+  // unicode emoji as the role icon. Validated as a group so a gradient can
+  // never be stored without its second colour.
+  const style = validateRoleStyle(patch);
+  if (style.unicode_emoji !== undefined && !role.is_everyone) {
+    // An emoji icon replaces an uploaded one, and vice versa.
+    patch = { ...patch, icon_url: style.unicode_emoji ? null : patch.icon_url };
+  }
+  if (typeof patch.icon_url === 'string' && patch.icon_url) {
+    patch = { ...patch, icon_url: proxiedImageUrl(patch.icon_url) };
+  }
   const writable = ['name', 'color', 'color_secondary', 'permissions', 'hoist',
-                    'mentionable', 'position', 'icon_url'];
+                    'mentionable', 'position', 'icon_url', 'style', 'gradient_angle', 'unicode_emoji'];
+  const next = { ...role };
   const sets = [];
   const params = [];
   const changes = [];
@@ -208,20 +246,65 @@ export async function updateRole({ serverId, roleId, actorId, patch }) {
     if (role.is_everyone && field !== 'permissions') continue;
     const value = ['hoist', 'mentionable'].includes(field)
       ? (patch[field] ? 1 : 0)
-      : field === 'permissions' ? String(patch[field]) : patch[field];
+      : field === 'permissions' ? String(patch[field])
+      : field === 'color' ? normaliseColor(patch[field], field)
+      : field in style ? style[field]
+      : field === 'icon_url' ? (patch[field] || null)
+      : patch[field];
+    next[field] = value;
+    if (value === role[field]) continue;
     sets.push(`${field} = ?`);
     params.push(value);
     changes.push({ key: field, old: role[field], new: value });
   }
+  // A solid role keeps no second colour, so switching back is a clean reset.
+  if (next.style === 'solid' && next.color_secondary && patch.style === 'solid') {
+    next.color_secondary = null;
+    sets.push('color_secondary = ?');
+    params.push(null);
+    changes.push({ key: 'color_secondary', old: role.color_secondary, new: null });
+  }
+  if (!role.is_everyone) assertRoleStyleComplete(next);
   if (!sets.length) return role;
 
   params.push(roleId);
-  await runQuery(`UPDATE roles SET ${sets.join(', ')} WHERE id = ?`, params);
-  await writeAuditLog({
-    serverId, userId: actorId, actionType: 'ROLE_UPDATE',
-    targetType: 'role', targetId: roleId, changes
+  await transaction(async () => {
+    await runQuery(`UPDATE roles SET ${sets.join(', ')} WHERE id = ?`, params);
+    // Keep the icon's storage reference in step with icon_url.
+    if (patch.icon_url !== undefined || style.unicode_emoji) {
+      const file = next.icon_url ? await findFileByPublicUrl(next.icon_url) : null;
+      if (role.icon_file_id && role.icon_file_id !== file?.id) await releaseReference(role.icon_file_id);
+      if (file && role.icon_file_id !== file.id) await addReference(file.id);
+      await runQuery(`UPDATE roles SET icon_file_id = ? WHERE id = ?`, [file?.id ?? null, roleId]);
+    }
+    await writeAuditLog({
+      serverId, userId: actorId, actionType: 'ROLE_UPDATE',
+      targetType: 'role', targetId: roleId, changes
+    });
   });
   return getQuery(`SELECT * FROM roles WHERE id = ?`, [roleId]);
+}
+
+/**
+ * Upload path for a role icon: `file` is a stored files row (already checked
+ * for size and type by the route). Clears any unicode emoji icon.
+ */
+export async function setRoleIcon({ serverId, roleId, actorId, file }) {
+  return updateRole({
+    serverId, roleId, actorId,
+    patch: file ? { icon_url: file.url, unicode_emoji: null } : { icon_url: null }
+  });
+}
+
+/**
+ * Banner, invite splash or icon from an uploaded file (or null to remove).
+ * MANAGE_GUILD is checked by updateGuild; the route checks it before the
+ * upload too, so a member without it cannot even spend storage.
+ */
+export async function setGuildImage({ serverId, actorId, kind, file }) {
+  const field = { banner: 'banner_url', splash: 'splash_url', icon: 'icon_url' }[kind];
+  if (!field) throw new ApiError('kind must be banner, splash or icon', { code: 'INVALID_KIND' });
+  return updateGuild({ serverId, actorId, patch: { [field]: file ? file.url : null } });
 }
 
 export async function deleteRole({ serverId, roleId, actorId }) {
@@ -315,17 +398,22 @@ export async function reorderRoles({ serverId, actorId, order }) {
 
 // --- members -----------------------------------------------------------------
 
-export async function listMembers(serverId, { limit = 200, search = null } = {}) {
+export async function listMembers(serverId, { limit = 200, search = null, viewerId = currentViewerId() } = {}) {
   const params = [serverId];
   let where = 'sm.server_id = ? AND sm.left_at IS NULL';
   if (search) {
-    where += ' AND (u.username LIKE ? OR u.display_name LIKE ? OR sm.nickname LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    // Case-insensitive on both engines (SQLite's LIKE folds ASCII already), and
+    // the user's text is matched literally rather than as a pattern.
+    const op = `${sql.like} ? ESCAPE '\\'`;
+    where += ` AND (u.username ${op} OR u.display_name ${op} OR sm.nickname ${op})`;
+    const like = `%${String(search).replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    params.push(like, like, like);
   }
   params.push(Math.min(limit, 1000));
 
   const members = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url, u.status, u.is_bot,
+            u.profile_visibility,
             sm.nickname, sm.joined_at, sm.timeout_until, sm.pending,
             sm.avatar_url AS member_avatar_url, sm.pronouns AS member_pronouns
        FROM server_members sm JOIN users u ON u.id = sm.user_id
@@ -340,6 +428,14 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
     [serverId]
   );
 
+  // Pronouns follow profile visibility; only members with a restricted
+  // profile cost a (friend / mutual) lookup.
+  const hiddenProfiles = new Set();
+  for (const m of members) {
+    if ((m.profile_visibility ?? 'everyone') === 'everyone' || m.id === viewerId) continue;
+    if (!(await canViewProfile({ id: m.id, profile_visibility: m.profile_visibility }, viewerId))) hiddenProfiles.add(m.id);
+  }
+
   const byUser = new Map();
   for (const row of roleRows) {
     if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
@@ -352,9 +448,11 @@ export async function listMembers(serverId, { limit = 200, search = null } = {})
     const iconed = roles.find((r) => r.icon_url);
     return {
       ...m,
+      // "Invisible" is offline to everyone but its owner.
+      status: publicStatus(m.status, viewerId, m.id),
       // A per-server avatar wins over the account one, as it does in Discord.
       avatar_url: m.member_avatar_url || m.avatar_url,
-      pronouns: m.member_pronouns ?? null,
+      pronouns: hiddenProfiles.has(m.id) ? null : m.member_pronouns ?? null,
       pending: Boolean(m.pending),
       roles,
       role_icon: iconed ? { url: iconed.icon_url, name: iconed.name } : null
@@ -378,11 +476,26 @@ export async function setGuildProfile({ serverId, userId, actorId, patch }) {
   }
   const sets = []; const params = [];
   const text = (value, max) => (value ? String(value).trim().slice(0, max) : null);
+  // The per-server profile gets the same rules as the account one: the
+  // shared bio limit and cleaning, the word filter plus this server's AutoMod
+  // keyword rules, and no nickname that passes for staff or a bot.
+  for (const [field, max] of [['bio', PROFILE_LIMITS.bio], ['pronouns', PROFILE_LIMITS.pronouns], ['nickname', 32]]) {
+    const value = patch[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string' || value.trim().length > max) {
+      throw new ApiError(`${field} must be text of at most ${max} characters`, { code: 'INVALID_FIELD' });
+    }
+  }
+  const bio = patch.bio !== undefined ? (cleanBio(text(patch.bio, PROFILE_LIMITS.bio)) || null) : undefined;
+  const pronouns = patch.pronouns !== undefined ? text(patch.pronouns, PROFILE_LIMITS.pronouns) : undefined;
+  const nickname = patch.nickname !== undefined ? text(patch.nickname, 32) : undefined;
+  await checkIdentityText({ nickname, bio, pronouns }, { serverId });
+  if (nickname) await assertNotReservedName('nickname', nickname, userId);
   if (patch.avatar_url !== undefined) { sets.push('avatar_url = ?'); params.push(patch.avatar_url || null); }
   if (patch.banner_url !== undefined) { sets.push('banner_url = ?'); params.push(patch.banner_url || null); }
-  if (patch.bio !== undefined) { sets.push('bio = ?'); params.push(text(patch.bio, 190)); }
-  if (patch.pronouns !== undefined) { sets.push('pronouns = ?'); params.push(text(patch.pronouns, 40)); }
-  if (patch.nickname !== undefined) { sets.push('nickname = ?'); params.push(text(patch.nickname, 32)); }
+  if (bio !== undefined) { sets.push('bio = ?'); params.push(bio); }
+  if (pronouns !== undefined) { sets.push('pronouns = ?'); params.push(pronouns); }
+  if (nickname !== undefined) { sets.push('nickname = ?'); params.push(nickname); }
   if (sets.length) {
     await runQuery(
       `UPDATE server_members SET ${sets.join(', ')} WHERE server_id = ? AND user_id = ?`,
@@ -392,33 +505,45 @@ export async function setGuildProfile({ serverId, userId, actorId, patch }) {
   return getGuildProfile({ serverId, userId });
 }
 
-/** The per-server profile, with the global one filled in behind it. */
-export async function getGuildProfile({ serverId, userId }) {
+/**
+ * The per-server profile, with the global one filled in behind it.
+ *
+ * Profile visibility applies here exactly as on /api/users/:id: someone who
+ * keeps their profile to friends (or mutuals) shows a viewer outside that
+ * circle only their name and avatar — no bio, pronouns or banner, neither the
+ * per-server ones nor the global ones behind them. `viewerId` defaults to the
+ * requesting user; no viewer at all is treated as a stranger.
+ */
+export async function getGuildProfile({ serverId, userId, viewerId = currentViewerId() }) {
   const row = await getQuery(
     `SELECT sm.nickname, sm.avatar_url, sm.banner_url, sm.bio, sm.pronouns, sm.joined_at,
             u.username, u.display_name, u.avatar_url AS global_avatar_url, u.banner_url AS global_banner_url,
-            u.bio AS global_bio, u.pronouns AS global_pronouns
+            u.bio AS global_bio, u.pronouns AS global_pronouns, u.profile_visibility
        FROM server_members sm JOIN users u ON u.id = sm.user_id
       WHERE sm.server_id = ? AND sm.user_id = ? AND sm.left_at IS NULL`,
     [serverId, userId]
   );
   if (!row) throw ApiError.notFound('Member');
+  const hidden = viewerId !== userId
+    && !(await canViewProfile({ id: userId, profile_visibility: row.profile_visibility }, viewerId));
+  const pick = (value) => (hidden ? null : value ?? null);
   return {
     server_id: serverId,
     user_id: userId,
     nickname: row.nickname ?? null,
     avatar_url: row.avatar_url ?? null,
-    banner_url: row.banner_url ?? null,
-    bio: row.bio ?? null,
-    pronouns: row.pronouns ?? null,
+    banner_url: pick(row.banner_url),
+    bio: pick(row.bio),
+    pronouns: pick(row.pronouns),
     joined_at: row.joined_at,
+    ...(hidden ? { profile_hidden: true } : {}),
     // What the member actually looks like here, once the overrides are applied.
     effective: {
       display_name: row.nickname || row.display_name || row.username,
       avatar_url: row.avatar_url || row.global_avatar_url,
-      banner_url: row.banner_url || row.global_banner_url,
-      bio: row.bio ?? row.global_bio,
-      pronouns: row.pronouns ?? row.global_pronouns
+      banner_url: pick(row.banner_url || row.global_banner_url),
+      bio: pick(row.bio ?? row.global_bio),
+      pronouns: pick(row.pronouns ?? row.global_pronouns)
     }
   };
 }
@@ -426,6 +551,16 @@ export async function getGuildProfile({ serverId, userId }) {
 export async function setNickname({ serverId, userId, actorId, nickname }) {
   const permission = userId === actorId ? 'CHANGE_NICKNAME' : 'MANAGE_NICKNAMES';
   await assertPermission({ userId: actorId, serverId, permission });
+  // Discord: nicknames are 1-32 characters, and renaming someone else obeys
+  // the member hierarchy exactly like kicking them does.
+  const trimmedNick = nickname == null ? '' : String(nickname).trim();
+  if (trimmedNick.length > 32) {
+    throw new ApiError('Nickname must be 32 characters or fewer', { code: 'INVALID_NICKNAME' });
+  }
+  nickname = trimmedNick;
+  if (userId !== actorId) {
+    await assertMemberHierarchy({ serverId, actorId, targetId: userId, action: 'rename' });
+  }
   await runQuery(
     `UPDATE server_members SET nickname = ? WHERE server_id = ? AND user_id = ?`,
     [nickname || null, serverId, userId]
@@ -479,7 +614,7 @@ export async function listInvites(serverId) {
 export async function revokeInvite({ serverId, code, actorId }) {
   await assertPermission({ userId: actorId, serverId, permission: 'MANAGE_GUILD' });
   await runQuery(
-    `UPDATE invites SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE invites SET revoked_at = ${sql.now}
       WHERE code = ? AND server_id = ?`,
     [code, serverId]
   );
@@ -506,17 +641,17 @@ export async function listEmojis(serverId) {
 export async function createEmoji({ serverId, actorId, name, fileId, url, animated = false }) {
   await assertPermission({ userId: actorId, serverId, permission: 'MANAGE_EMOJIS' });
   if (!EMOJI_NAME.test(name ?? '')) {
-    throw new ApiError('ชื่ออีโมจิใช้ได้เฉพาะ a-z, 0-9 และ _ ยาว 2-32 ตัว', { code: 'INVALID_NAME' });
+    throw new ApiError('Emoji names are 2-32 characters: a-z, 0-9 and _', { code: 'INVALID_NAME' });
   }
   const clash = await getQuery(
     `SELECT 1 FROM emojis WHERE server_id = ? AND name = ?`, [serverId, name]
   );
-  if (clash) throw ApiError.conflict('มีอีโมจิชื่อนี้อยู่แล้ว');
+  if (clash) throw new ApiError('An emoji with that name already exists', { status: 409, code: 'EMOJI_NAME_TAKEN' });
 
   const resolvedFile = fileId
     ? await getQuery(`SELECT * FROM files WHERE id = ?`, [fileId])
     : await findFileByPublicUrl(url);
-  if (!resolvedFile && !url) throw new ApiError('ต้องมีรูปภาพ', { code: 'MISSING_IMAGE' });
+  if (!resolvedFile && !url) throw new ApiError('An image is required', { code: 'MISSING_IMAGE' });
 
   const id = generateId();
   await transaction(async () => {

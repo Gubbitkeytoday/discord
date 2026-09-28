@@ -1,17 +1,20 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, Copy, Webhook, Eye, EyeOff } from 'lucide-react';
 import { t, localeTag } from '../../i18n/index.jsx';
+import { post, del } from '../../api';
+import ConfirmModal from '../ConfirmModal';
 
 /**
  * Webhook management. The token is only ever visible immediately after
  * creation — the server stores a hash, so it genuinely cannot be shown again.
  */
-export default function WebhooksTab({ webhooks, channels, currentUserId, reload, onToast }) {
+export default function WebhooksTab({ webhooks, channels, reload, onToast }) {
   const [name, setName] = useState('');
   const [channelId, setChannelId] = useState('');
   const [created, setCreated] = useState(null);   // { id, token, url }
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const textChannels = channels.filter((c) => c.type === 'text' || c.type === 'announcement');
 
@@ -20,13 +23,7 @@ export default function WebhooksTab({ webhooks, channels, currentUserId, reload,
     if (!channelId || !name.trim()) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/channels/${channelId}/webhooks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-id': currentUserId },
-        body: JSON.stringify({ name: name.trim() })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const data = await post(`/api/channels/${channelId}/webhooks`, { name: name.trim() });
       setCreated(data);
       setRevealed(false);
       setName('');
@@ -38,15 +35,11 @@ export default function WebhooksTab({ webhooks, channels, currentUserId, reload,
     }
   };
 
+  // Throws so the confirm dialog stays open with the reason on failure.
   const remove = async (webhook) => {
-    try {
-      const res = await fetch(`/api/webhooks/${webhook.id}`, {
-        method: 'DELETE', headers: { 'x-user-id': currentUserId }
-      });
-      if (!res.ok) throw new Error((await res.json()).error);
-      if (created?.id === webhook.id) setCreated(null);
-      await reload();
-    } catch (err) { onToast?.(err.message, { type: 'error' }); }
+    await del(`/api/webhooks/${webhook.id}`);
+    if (created?.id === webhook.id) setCreated(null);
+    await reload();
   };
 
   const fullUrl = created ? `${window.location.origin}/api/webhooks/${created.id}/${created.token}` : '';
@@ -143,7 +136,7 @@ export default function WebhooksTab({ webhooks, channels, currentUserId, reload,
                 </p>
               </div>
               <button
-                onClick={() => remove(webhook)}
+                onClick={() => setConfirmDelete(webhook)}
                 className="text-d-text3 hover:text-d-danger transition-colors p-1 shrink-0"
                 aria-label={t('common.deleteNamed', { name: webhook.name })}
               >
@@ -152,6 +145,16 @@ export default function WebhooksTab({ webhooks, channels, currentUserId, reload,
             </div>
           ))}
         </div>
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={t('webhooks.deleteTitle', { name: confirmDelete.name })}
+          body={t('webhooks.deleteBody')}
+          confirmLabel={t('common.delete')}
+          onConfirm={() => remove(confirmDelete)}
+          onClose={() => setConfirmDelete(null)}
+        />
       )}
     </div>
   );

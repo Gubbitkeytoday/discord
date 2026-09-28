@@ -7,7 +7,7 @@
 
 import crypto from 'crypto';
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission, writeAuditLog } from './guilds.js';
@@ -83,7 +83,7 @@ export async function deleteWebhook({ webhookId, actorId }) {
     userId: actorId, serverId: webhook.server_id, permission: 'MANAGE_WEBHOOKS'
   });
   await runQuery(
-    `UPDATE webhooks SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE webhooks SET revoked_at = ${sql.now} WHERE id = ?`,
     [webhookId]
   );
   await writeAuditLog({
@@ -108,10 +108,10 @@ export async function executeWebhook({ webhookId, token, content, username = nul
   const ok = webhook
     && provided.length === expected.length
     && crypto.timingSafeEqual(provided, expected);
-  if (!ok) throw new ApiError('Webhook token ไม่ถูกต้อง', { status: 401, code: 'INVALID_TOKEN' });
+  if (!ok) throw new ApiError('Invalid webhook token', { status: 401, code: 'INVALID_TOKEN' });
 
   const body = String(content ?? '').trim();
-  if (!body) throw new ApiError('content ว่างเปล่า', { code: 'EMPTY_MESSAGE' });
+  if (!body) throw new ApiError('content is empty', { code: 'EMPTY_MESSAGE' });
 
   // Webhooks post as the webhook's creator so foreign keys and the UI have a
   // real author, with the webhook recorded on the row.

@@ -17,8 +17,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
 import { playSound } from '../utils/notifier';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
+import { proxiedImageUrl } from '../utils/media';
 
-const FALLBACK_AVATAR = '/avatar-placeholder.svg';
+const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
 /** mm:ss for a call that started at `startedAt`. */
 function useElapsed(startedAt) {
@@ -64,7 +66,7 @@ export function IncomingCall({ call, channel, onAccept, onDecline }) {
     >
       <div className="flex items-center gap-3">
         <img
-          src={caller?.avatar_url || FALLBACK_AVATAR}
+          src={proxiedImageUrl(caller?.avatar_url) || defaultAvatar(caller?.id)}
           alt=""
           className="w-11 h-11 rounded-full object-cover shrink-0"
         />
@@ -80,14 +82,14 @@ export function IncomingCall({ call, channel, onAccept, onDecline }) {
         <button
           type="button"
           onClick={() => { stopRef.current?.(); onDecline?.(); }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-sm font-semibold py-2"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-sm font-semibold min-h-11"
         >
           <PhoneOff className="w-4 h-4" aria-hidden="true" />{t('call.decline')}
         </button>
         <button
           type="button"
           onClick={() => { stopRef.current?.(); onAccept?.(); }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-success/90 hover:bg-d-success text-white text-sm font-semibold py-2"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-d-success/90 hover:bg-d-success text-white text-sm font-semibold min-h-11"
         >
           <Phone className="w-4 h-4" aria-hidden="true" />{t('call.accept')}
         </button>
@@ -117,7 +119,7 @@ export function CallBar({ call, currentUserId, isMuted, onToggleMute, isVideo, o
         {inCall.map((p) => (
           <img
             key={p.user_id}
-            src={p.avatar_url || FALLBACK_AVATAR}
+            src={proxiedImageUrl(p.avatar_url) || defaultAvatar(p.userId ?? p.user_id ?? p.id)}
             alt={p.display_name || p.username}
             title={p.display_name || p.username}
             className="w-6 h-6 rounded-full object-cover ring-2 ring-d-canvas"
@@ -137,28 +139,34 @@ export function CallBar({ call, currentUserId, isMuted, onToggleMute, isVideo, o
               type="button"
               onClick={onToggleMute}
               aria-pressed={isMuted}
-              className="p-1.5 rounded-md hover:bg-d-surface text-d-text2 hover:text-d-strong"
+              className={`inline-flex items-center gap-1.5 min-h-8 pointer-coarse:min-h-11 px-2.5 rounded-md text-xs font-semibold ${
+                isMuted ? 'bg-d-danger text-white' : 'bg-d-control2 hover:bg-d-control text-d-strong'
+              }`}
               title={isMuted ? t('voice.unmute') : t('voice.mute')}
             >
-              {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              {isMuted ? <MicOff className="w-4 h-4" aria-hidden="true" /> : <Mic className="w-4 h-4" aria-hidden="true" />}
+              {t('voice.ctlMute')}
             </button>
             <button
               type="button"
               onClick={onToggleVideo}
               aria-pressed={isVideo}
-              className="p-1.5 rounded-md hover:bg-d-surface text-d-text2 hover:text-d-strong"
+              className={`inline-flex items-center gap-1.5 min-h-8 pointer-coarse:min-h-11 px-2.5 rounded-md text-xs font-semibold ${
+                isVideo ? 'bg-d-brand text-white' : 'bg-d-control2 hover:bg-d-control text-d-strong'
+              }`}
               title={isVideo ? t('call.stopVideo') : t('call.startVideo')}
             >
-              {isVideo ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+              {isVideo ? <Video className="w-4 h-4" aria-hidden="true" /> : <VideoOff className="w-4 h-4" aria-hidden="true" />}
+              {t('voice.ctlCamera')}
             </button>
           </>
         )}
         <button
           type="button"
           onClick={onHangUp}
-          className="inline-flex items-center gap-1.5 rounded-md bg-d-danger/90 hover:bg-d-danger text-white text-xs font-semibold px-2.5 py-1.5"
+          className="inline-flex items-center gap-1.5 rounded-md bg-d-danger hover:bg-d-dangerhover text-white text-xs font-semibold px-3 min-h-8 pointer-coarse:min-h-11"
         >
-          <PhoneOff className="w-3.5 h-3.5" aria-hidden="true" />
+          <PhoneOff className="w-4 h-4" aria-hidden="true" />
           {joined ? t('call.hangUp') : t('call.join')}
         </button>
       </div>

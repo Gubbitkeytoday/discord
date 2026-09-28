@@ -1,23 +1,15 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { useDismiss } from '../hooks/useFocusTrap';
 import { Search, Sticker } from 'lucide-react';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 /** The composer's sticker tray. Sends immediately on click, as Discord does. */
 export default function StickerPicker({ stickers = [], onPick, onClose }) {
   const [filter, setFilter] = useState('');
   const ref = useRef(null);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    const onClick = (e) => { if (!ref.current?.contains(e.target)) onClose(); };
-    window.addEventListener('keydown', onKey);
-    const timer = setTimeout(() => window.addEventListener('mousedown', onClick), 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      clearTimeout(timer);
-    };
-  }, [onClose]);
+  useDismiss(ref, onClose);
 
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -48,13 +40,13 @@ export default function StickerPicker({ stickers = [], onPick, onClose }) {
         ) : (
           <div className="grid grid-cols-3 gap-2">
             {visible.map((sticker) => (
-              <button
+              <button aria-label={sticker.name}
                 key={sticker.id}
                 onClick={() => { onPick(sticker); onClose(); }}
                 title={sticker.name}
                 className="aspect-square rounded-lg bg-d-base hover:bg-d-hover p-1.5 transition-colors"
               >
-                <img src={sticker.url} alt={sticker.name} className="w-full h-full object-contain" loading="lazy" />
+                <img src={proxiedImageUrl(sticker.url)} alt={sticker.name} className="w-full h-full object-contain" loading="lazy" />
               </button>
             ))}
           </div>

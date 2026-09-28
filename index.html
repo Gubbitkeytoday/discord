@@ -1,18 +1,102 @@
 <!DOCTYPE html>
-<html lang="th">
+<html lang="en" dir="ltr">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="https://assets-global.website-files.com/6257adef93867e50d84d30e2/636e0a6a49cf127bf92de1e2_icon_clyde_blurple_RGB.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- PWA: manifest, theme colour per OS scheme (src/pwa keeps it in sync
+         with the in-app theme), iOS home-screen icon/title. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#121214" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#e3e4e8" media="(prefers-color-scheme: light)" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Antigravity" />
+    <!-- viewport-fit=cover lets the pt-safe/pb-safe utilities pad around the
+         notch; resizes-content makes the soft keyboard shrink the layout
+         instead of covering the composer. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- Pre-paint theme: copy the look the app last painted (theme, gradient,
+         density, font, season — src/theme/engine.js writes it) onto <html>
+         before any CSS or JS arrives, so there is no flash of the wrong theme.
+         Every name and value is re-validated here: only data-* keys from a
+         fixed list, custom properties with plain colour/number values (no
+         url()), and a #rrggbb theme-color. Production CSP: this script's
+         sha256 must be listed in script-src (see lib/middleware.js). -->
+    <script>(function(){try{var raw=localStorage.getItem('antigravity.boot');if(!raw||raw.length>8000)return;var b=JSON.parse(raw),r=document.documentElement,d=b&&b.d||{},v=b&&b.v||{},k=['theme','contrast','tint','season','radius','uiFont','uiDensity','messageDisplay','reducedMotion','underlineLinks','textSpacing','largeTargets'],i,n,x;for(i=0;i<k.length;i++){x=d[k[i]];if(typeof x==='string'&&/^[a-z0-9-]{1,24}$/.test(x))r.dataset[k[i]]=x;}for(n in v){x=v[n];if(/^--[a-z0-9-]{1,40}$/.test(n)&&typeof x==='string'&&/^[a-z0-9#(),.%\s-]{1,400}$/i.test(x)&&!/url|image|expression/i.test(x))r.style.setProperty(n,x);}if(typeof b.c==='string'&&/^#[0-9a-f]{6}$/i.test(b.c)){x=document.querySelectorAll('meta[name="theme-color"]');for(i=0;i<x.length;i++)x[i].setAttribute('content',b.c);}}catch(e){}})();</script>
     <title>Antigravity Discord</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Fonts are self-hosted (@fontsource, imported in src/main.jsx): no
+         third-party request, and the app renders the same offline. The Latin
+         400 face paints nearly every glyph of the first screen, so fetch it in
+         parallel with the JS instead of after the CSS has been parsed. Vite
+         fingerprints this path to the same file the @font-face rule uses. -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="/node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2" />
+    <!-- Critical CSS for the loading splash. It must paint before the
+         stylesheet and the bundle arrive (22 s on Slow 3G), so it is inline
+         and needs no JavaScript. React replaces #root's content on mount. -->
+    <style>
+      html { background: #121214; color: #dcdcdf; }
+      /* The pre-paint script above sets data-theme from the last visit; a
+         first visit has none, so follow the OS — also after index.css has
+         loaded, whose token default is dark. */
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme]) { background: #e3e4e8; color: #2e3035; }
+        html:not([data-theme]) body { background: #e3e4e8 !important; color: #2e3035 !important; }
+      }
+      html[data-theme="light"] { background: #e3e4e8; color: #2e3035; }
+      html[data-theme="ash"] { background: #2a2b30; color: #e0e0e3; }
+      html[data-theme="onyx"] { background: #000; color: #d6d6da; }
+      html[data-tint="gradient"] { background: var(--tint-bg-app, #121214); }
+      html, body { margin: 0; height: 100%; overscroll-behavior-x: none; }
+      #root { height: 100%; }
+      .boot {
+        box-sizing: border-box; height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 20px; padding: 24px;
+        font: 600 15px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Noto Sans Thai', sans-serif;
+      }
+      .boot-logo { width: 72px; height: 72px; animation: boot-bob 1.6s ease-in-out infinite; }
+      .boot-spinner {
+        width: 28px; height: 28px; border-radius: 50%;
+        border: 3px solid rgba(128, 132, 142, 0.35); border-top-color: #5865f2;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      .boot-name { margin: 0; letter-spacing: 0.01em; opacity: 0.9; }
+      .boot-slow { margin: 0; max-width: 28em; text-align: center; font-weight: 400; font-size: 14px; opacity: 0; animation: boot-fade 0.4s ease-out 6s forwards; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @keyframes boot-bob { 50% { transform: translateY(-6px); } }
+      @keyframes boot-fade { to { opacity: 0.8; } }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-logo { animation: none; }
+        .boot-spinner { animation-duration: 2.4s; }
+      }
+    </style>
   </head>
   <!-- Colours come from the theme tokens in index.css, never hardcoded here:
        a literal hex background on body would override the light theme. -->
   <body class="bg-d-base text-d-text overflow-hidden">
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot" role="status" aria-live="polite" aria-label="Loading Antigravity…">
+        <svg class="boot-logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+          <rect width="64" height="64" rx="18" fill="#5865f2" />
+          <path d="M18 20h28a4 4 0 0 1 4 4v14a4 4 0 0 1-4 4H30l-9 7v-7h-3a4 4 0 0 1-4-4V24a4 4 0 0 1 4-4z" fill="#fff" />
+          <circle cx="26" cy="31" r="3" fill="#5865f2" />
+          <circle cx="38" cy="31" r="3" fill="#5865f2" />
+        </svg>
+        <p class="boot-name" aria-hidden="true">Antigravity</p>
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <!-- Only if the network is slow: reassure, in the two languages the
+             app ships first (the bundle, which knows the user's language, has
+             not arrived yet). -->
+        <p class="boot-slow" aria-hidden="true">
+          <span lang="en">Still loading — slow connection</span> ·
+          <span lang="th">กำลังโหลด อินเทอร์เน็ตช้า</span>
+        </p>
+      </div>
+      <noscript>
+        <p style="text-align:center;padding:24px">Antigravity needs JavaScript to run. Please enable it in your browser.</p>
+      </noscript>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

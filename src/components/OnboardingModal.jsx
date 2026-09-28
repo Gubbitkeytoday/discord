@@ -8,7 +8,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Hash, Volume2, MessagesSquare, Megaphone, Check, Loader2, ShieldCheck, ArrowRight, ArrowLeft } from 'lucide-react';
 import { get, put } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
+import { serverIconOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
 
 const ICONS = { text: Hash, voice: Volume2, forum: MessagesSquare, announcement: Megaphone, stage: Volume2 };
@@ -22,7 +23,7 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
   const [error, setError] = useState(null);
 
   const mustStay = Boolean(bundle?.me?.pending);
-  const dialogRef = useFocusTrap(true, mustStay ? () => {} : onClose);
+  const dialogRef = useDialog(mustStay ? () => {} : onClose);
 
   useEffect(() => {
     if (!server?.id) return;
@@ -94,8 +95,8 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
               <X className="w-5 h-5" />
             </button>
           )}
-          {server.icon_url
-            ? <img src={server.icon_url} alt="" className="w-16 h-16 rounded-2xl object-cover mx-auto mb-3" />
+          {serverIconOf(server)
+            ? <img src={serverIconOf(server)} alt="" className="w-16 h-16 rounded-2xl object-cover mx-auto mb-3" />
             : <div className="w-16 h-16 rounded-2xl bg-d-brand text-white font-bold text-xl flex items-center justify-center mx-auto mb-3">{server.name?.slice(0, 2)}</div>}
           <h2 id="onboarding-title" className="text-xl font-bold text-d-strong">
             {current === 'welcome' && t('onboarding.welcomeTo', { server: server.name })}
@@ -112,7 +113,7 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
         <div className="px-6 pb-4 overflow-y-auto">
           {current === 'welcome' && (
             <div>
-              {bundle.welcome.description && <p className="text-sm text-d-text2 text-center mb-4">{bundle.welcome.description}</p>}
+              {Boolean(bundle.welcome.description) && <p className="text-sm text-d-text2 text-center mb-4">{bundle.welcome.description}</p>}
               <ul className="space-y-2">
                 {bundle.welcome.channels.map((c) => {
                   const Icon = ICONS[c.type] ?? Hash;
@@ -160,7 +161,7 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
               {bundle.prompts.map((p) => (
                 <fieldset key={p.id}>
                   <legend className="font-semibold text-d-strong text-sm mb-0.5">
-                    {p.title}{p.required && <span className="text-d-danger"> *</span>}
+                    {p.title}{Boolean(p.required) && <span className="text-d-danger"> *</span>}
                   </legend>
                   <p className="text-[11px] text-d-text3 mb-2">{p.single_select ? t('onboarding.pickOne') : t('onboarding.pickAny')}</p>
                   <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
@@ -172,7 +173,7 @@ export default function OnboardingModal({ server, onClose, onComplete, onToast, 
                           <span className="text-lg leading-none" aria-hidden="true">{o.emoji || '•'}</span>
                           <span className="min-w-0">
                             <span className="block text-sm font-semibold text-d-strong">{o.title}</span>
-                            {o.description && <span className="block text-xs text-d-text3">{o.description}</span>}
+                            {Boolean(o.description) && <span className="block text-xs text-d-text3">{o.description}</span>}
                           </span>
                           {on && <Check className="w-4 h-4 text-d-brand ml-auto shrink-0 mt-0.5" aria-hidden="true" />}
                         </label>

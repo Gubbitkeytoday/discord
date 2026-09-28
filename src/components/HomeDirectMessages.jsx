@@ -1,21 +1,23 @@
 import React, { useMemo, useState } from 'react';
 import { t } from '../i18n/index.jsx';
-import { DEFAULT_AVATAR } from '../utils/avatar';
+import { DEFAULT_AVATAR, defaultAvatar } from '../utils/avatar';
 import {
   Users, MessageSquare, X, UserPlus, Check, ShieldOff, ShieldAlert, UserMinus,
-  Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox
+  Mic, MicOff, Headphones, Settings, PhoneOff, Plus, Inbox, Menu
 } from 'lucide-react';
 import UserStatusMenu from './UserStatusMenu';
+import StatusIndicator from './ui/StatusIndicator.jsx';
+import { proxiedImageUrl } from '../utils/media';
+import { useMessageRequests, MessageRequestRow, MessageRequestBar } from './admin/MessageRequests';
+import { BirthdateCard } from './admin/BirthdatePrompt';
+import { useStreamerMask, useAccountFlags } from './admin/safety';
+import AvatarWithDecoration from './profile/AvatarWithDecoration';
+import Nameplate from './profile/Nameplate';
+import DisplayName from './profile/DisplayName';
+import { useIdentities } from '../profile/store';
 
 const FALLBACK_AVATAR = DEFAULT_AVATAR;
 
-const STATUS_COLORS = {
-  online: 'bg-d-online',
-  idle: 'bg-d-idle',
-  dnd: 'bg-d-danger',
-  offline: 'bg-d-text4',
-  invisible: 'bg-d-text4'
-};
 
 const statusLabels = () => ({
   online: t('status.online'), idle: t('status.idle'), dnd: t('status.dnd'),
@@ -55,6 +57,7 @@ export default function HomeDirectMessages({
   onUserContextMenu,
   onCreateGroupDm,
   onOpenUserSettingsModal,
+  onOpenSupport,
   onSetStatus,
   isMuted,
   onToggleMute,
@@ -62,6 +65,14 @@ export default function HomeDirectMessages({
   onToggleDeafen,
   currentVoiceChannel,
   onLeaveVoice,
+  mobileOpen = false,
+  onOpenMobile,
+  onCloseMobile,
+  serverCount = 0,
+  onCreateServer,
+  onJoinServer,
+  onToast,
+  onPrefetchChannel,
   children
 }) {
   const [activeTab, setActiveTab] = useState('online');
@@ -69,6 +80,7 @@ export default function HomeDirectMessages({
   const [addFriendNote, setAddFriendNote] = useState('');
   const [addFriendResult, setAddFriendResult] = useState(null);
   const [filter, setFilter] = useState('');
+  const [hoveredDm, setHoveredDm] = useState(null);   // drives that row's avatar decoration
   const [showStatusMenu, setShowStatusMenu] = useState(false);
 
   const acceptedFriends = useMemo(
@@ -112,10 +124,48 @@ export default function HomeDirectMessages({
 
   const isConversationOpen = Boolean(activeChannelId && dms.some((d) => d.id === activeChannelId));
 
+  // Message requests: DMs from non-friends are listed apart from the
+  // conversations you chose, with Accept / Ignore / Block & report.
+  const requestKey = useMemo(
+    () => dms.map((d) => `${d.id}:${d.last_message_id ?? ''}:${readStates[d.id]?.unread ? 1 : 0}`).join('|'),
+    [dms, readStates]
+  );
+  const requests = useMessageRequests(requestKey);
+  const requestIds = useMemo(() => new Set(requests.requests.map((r) => r.channel_id)), [requests.requests]);
+  const shownDms = useMemo(() => visibleDms.filter((d) => !requestIds.has(d.id)), [visibleDms, requestIds]);
+  // One batched identity lookup for everyone on this page (DM partners and
+  // the friends list): decorations, nameplates and name styles.
+  const identityIds = useMemo(() => [...new Set([
+    ...shownDms.filter((d) => d.type === 'dm').map((d) => d.recipients?.[0]?.id),
+    ...visibleFriends.map((f) => f.id)
+  ].filter(Boolean))], [shownDms, visibleFriends]);
+  const identities = useIdentities(identityIds, null);
+  const shownRequests = useMemo(() => {
+    if (!filter.trim()) return requests.requests;
+    const needle = filter.toLowerCase();
+    return requests.requests.filter((r) => `${r.user.display_name ?? ''} ${r.user.username ?? ''}`.toLowerCase().includes(needle));
+  }, [requests.requests, filter]);
+  const activeRequest = isConversationOpen ? requests.requests.find((r) => r.channel_id === activeChannelId) : null;
+  const accountFlags = useAccountFlags(currentUser);
+  const isMinor = accountFlags.age_group === 'minor';
+  const mask = useStreamerMask();
+
   return (
     <div className="flex-1 bg-d-canvas flex shrink-0 min-w-0 h-full">
+      {/* On a phone the DM list is a drawer beside the server rail, exactly
+          like a server's channel list, so a conversation gets the full width. */}
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label={t('common.close')}
+          onClick={onCloseMobile}
+          className="md:hidden fixed inset-0 bg-black/60 z-30"
+        />
+      )}
       {/* DM sidebar */}
-      <div className="w-60 max-md:w-48 bg-d-surface flex flex-col shrink-0 border-r border-d-edge/40">
+      <div className={`w-60 bg-d-surface flex flex-col shrink-0 border-r border-d-edge/40 max-md:fixed max-md:inset-y-0 max-md:left-[72px] max-md:z-40 max-md:w-[min(20rem,calc(100vw-72px-3rem))] max-md:shadow-2xl max-md:transition-transform ${
+        mobileOpen ? '' : 'max-md:-translate-x-[calc(100%+72px)] max-md:invisible'
+      }`}>
         <div className="h-12 px-3 border-b border-d-edge flex items-center">
           <input
             value={filter}
@@ -143,7 +193,27 @@ export default function HomeDirectMessages({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5">
+        <div id="channel-list" tabIndex={-1} className="flex-1 overflow-y-auto px-2 pb-3 space-y-0.5 focus:outline-none">
+          {shownRequests.length > 0 && (
+            <div className="mb-3 pb-2 border-b border-d-divider" role="group" aria-labelledby="dm-requests-heading">
+              <div id="dm-requests-heading" className="px-2 mb-1 mt-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider">
+                <span>{t('safety.messageRequests')}</span>
+                <span className="bg-d-danger text-white text-[10px] font-bold px-1.5 rounded-full" aria-label={t('safety.requestCount', { count: shownRequests.length })}>
+                  {shownRequests.length}
+                </span>
+              </div>
+              {shownRequests.map((request) => (
+                <MessageRequestRow
+                  key={request.channel_id}
+                  request={request}
+                  blur={requests.blur_previews}
+                  active={request.channel_id === activeChannelId}
+                  onOpen={(id) => onSelectDm?.(id)}
+                />
+              ))}
+            </div>
+          )}
+
           <div className="px-2 flex items-center justify-between text-xs font-bold text-d-text3 tracking-wider mb-1 mt-2">
             <span>{t('dm.directMessages')}</span>
             <button
@@ -156,23 +226,31 @@ export default function HomeDirectMessages({
             </button>
           </div>
 
-          {visibleDms.length === 0 && (
+          {shownDms.length === 0 && shownRequests.length === 0 && (
             <p className="px-2 text-[11px] text-d-text4 leading-relaxed">{t('dm.noConversations')}</p>
           )}
 
-          {visibleDms.map((dm) => {
+          {shownDms.map((dm) => {
             const isActive = dm.id === activeChannelId;
             const state = readStates[dm.id] ?? {};
             const hasUnread = Boolean(state.unread) && !isActive;
             const recipient = dm.recipients?.[0];
+            const identity = dm.type === 'dm' && recipient ? identities[recipient.id] : null;
 
             return (
               <div key={dm.id} className="relative group">
                 {hasUnread && (
                   <span aria-hidden="true" className="absolute -left-2 top-1/2 -translate-y-1/2 w-1 h-2 bg-white rounded-r-full" />
                 )}
-                <button
+                <Nameplate
+                  as="button"
+                  type="button"
+                  item={identity?.nameplate}
+                  onMouseEnter={() => setHoveredDm(dm.id)}
+                  onMouseLeave={() => setHoveredDm((cur) => (cur === dm.id ? null : cur))}
                   onClick={() => onSelectDm?.(dm.id)}
+                  onPointerEnter={() => onPrefetchChannel?.(dm.id)}
+                  onFocus={() => onPrefetchChannel?.(dm.id)}
                   onContextMenu={(e) => {
                     if (dm.type !== 'dm' || !recipient || !onUserContextMenu) return;
                     e.preventDefault();
@@ -184,19 +262,32 @@ export default function HomeDirectMessages({
                       : 'text-d-text3 hover:bg-d-hover/60 hover:text-d-text'
                   }`}
                 >
-                  <div className="relative shrink-0">
-                    <img src={dm.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover" />
-                    {dm.type === 'dm' && (
-                      <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-d-surface ${
-                        STATUS_COLORS[recipient?.status] ?? STATUS_COLORS.offline
-                      }`} />
-                    )}
-                  </div>
+                  {dm.type === 'dm' ? (
+                    <AvatarWithDecoration
+                      src={dm.avatar_url}
+                      userId={recipient?.id ?? dm.id}
+                      size={32}
+                      decoration={identity?.decoration}
+                      status={recipient?.status}
+                      ring={isActive ? 'var(--color-d-active)' : 'var(--color-d-surface)'}
+                      context="list"
+                      hovered={hoveredDm === dm.id}
+                    />
+                  ) : (
+                    <div className="relative shrink-0">
+                      <img src={proxiedImageUrl(dm.avatar_url || defaultAvatar(dm.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
+                    </div>
+                  )}
 
                   <div className="flex flex-col min-w-0 text-left flex-1">
-                    <span className={`text-sm truncate leading-tight ${hasUnread ? 'font-bold' : 'font-semibold'}`}>
-                      {dm.display_name}
-                    </span>
+                    <DisplayName
+                      name={dm.display_name}
+                      identity={dm.type === 'dm' ? identity : null}
+                      compact
+                      showTag={false}
+                      showNewMember={false}
+                      className={`text-sm leading-tight ${hasUnread ? 'font-bold' : 'font-semibold'}`}
+                    />
                     {dm.type === 'group_dm' && (
                       <span className="text-[11px] text-d-text3 leading-tight">
                         {t('dm.members', { count: (dm.recipients?.length ?? 0) + 1 })}
@@ -209,7 +300,7 @@ export default function HomeDirectMessages({
                       {state.mention_count}
                     </span>
                   )}
-                </button>
+                </Nameplate>
 
                 <button
                   onClick={(e) => { e.stopPropagation(); onCloseDm?.(dm.id); }}
@@ -233,7 +324,7 @@ export default function HomeDirectMessages({
               </span>
               <span className="text-[11px] text-d-text3 truncate max-w-[130px]">{currentVoiceChannel.name}</span>
             </div>
-            <button
+            <button aria-label={t('sidebar.disconnect')}
               onClick={onLeaveVoice}
               className="p-1.5 bg-d-danger/20 hover:bg-d-danger text-d-danger hover:text-white rounded-full transition-colors shrink-0"
               title={t('sidebar.disconnect')}
@@ -247,22 +338,22 @@ export default function HomeDirectMessages({
         <div className="h-14 bg-d-panel px-2 flex items-center justify-between shrink-0 relative">
           <button
             onClick={() => setShowStatusMenu((v) => !v)}
-            aria-haspopup="menu"
+            aria-haspopup="dialog"
             aria-expanded={showStatusMenu}
             className="flex items-center gap-2 px-1 py-1 hover:bg-d-hover/60 rounded-md flex-1 min-w-0 transition-colors text-left"
           >
             <div className="relative shrink-0">
-              <img src={currentUser?.avatar_url || FALLBACK_AVATAR} alt="" className="w-8 h-8 rounded-full object-cover" />
-              <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-panel ${
-                STATUS_COLORS[currentUser?.status] ?? STATUS_COLORS.offline
-              }`} />
+              <img src={proxiedImageUrl(currentUser?.avatar_url || defaultAvatar(currentUser?.id))} alt="" className="w-8 h-8 rounded-full object-cover" />
+              <span className="absolute -bottom-0.5 -right-0.5">
+                <StatusIndicator status={currentUser?.status} size={10} ring="var(--color-d-panel)" />
+              </span>
             </div>
             <div className="flex flex-col min-w-0">
               <span className="text-sm font-semibold text-d-strong truncate leading-tight">
                 {currentUser?.display_name || currentUser?.username}
               </span>
               <span className="text-[11px] text-d-text3 truncate leading-tight">
-                {currentUser?.custom_status || `@${currentUser?.username}`}
+                {currentUser?.custom_status || (mask.usernames ? t('safety.streamerHidden') : `@${currentUser?.username}`)}
               </span>
             </div>
           </button>
@@ -272,6 +363,7 @@ export default function HomeDirectMessages({
               currentUser={currentUser}
               onSetStatus={onSetStatus}
               onOpenSettings={onOpenUserSettingsModal}
+              onOpenSupport={onOpenSupport}
               onClose={() => setShowStatusMenu(false)}
             />
           )}
@@ -285,7 +377,7 @@ export default function HomeDirectMessages({
             >
               {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
-            <button
+            <button aria-label={isDeafened ? t('sidebar.undeafen') : t('sidebar.deafen')}
               onClick={onToggleDeafen}
               aria-pressed={isDeafened}
               className={`p-1.5 hover:bg-d-hover hover:text-white rounded transition-colors ${isDeafened ? 'text-d-danger' : ''}`}
@@ -293,7 +385,7 @@ export default function HomeDirectMessages({
             >
               <Headphones className="w-5 h-5" />
             </button>
-            <button
+            <button aria-label={t('sidebar.userSettings')}
               onClick={onOpenUserSettingsModal}
               className="p-1.5 hover:bg-d-hover hover:text-d-strong rounded transition-colors"
               title={t('sidebar.userSettings')}
@@ -306,22 +398,78 @@ export default function HomeDirectMessages({
 
       {/* Conversation, or the friends dashboard */}
       {isConversationOpen ? (
-        children
+        activeRequest ? (
+          <div className="flex-1 flex flex-col min-w-0 h-full">
+            <MessageRequestBar
+              request={activeRequest}
+              isMinor={isMinor}
+              onToast={onToast}
+              onAccept={() => requests.accept(activeRequest.channel_id)}
+              onIgnore={async () => {
+                const id = activeRequest.channel_id;
+                await requests.ignore(id);
+                onCloseDm?.(id);
+              }}
+              onReported={async () => {
+                const id = activeRequest.channel_id;
+                await requests.ignore(id).catch(() => {});
+                onCloseDm?.(id);
+              }}
+            />
+            <div className="flex-1 flex min-h-0 min-w-0">{children}</div>
+          </div>
+        ) : children
       ) : (
-        <div className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
-          <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 bg-d-canvas shrink-0">
-            <div className="flex items-center gap-2 pr-4 border-r border-d-divider">
+        <main id="main-content" aria-labelledby="friends-title" className="flex-1 flex flex-col h-full bg-d-canvas min-w-0">
+          <h1 id="friends-title" className="sr-only">{t('dm.friends')}</h1>
+          <div className="h-12 px-4 shadow-sm border-b border-d-edge flex items-center gap-4 max-md:gap-2 bg-d-canvas shrink-0 min-w-0">
+            {onOpenMobile && (
+              <button
+                type="button"
+                onClick={onOpenMobile}
+                className="md:hidden text-d-text2 hover:text-d-strong shrink-0"
+                aria-label={t('sidebar.openChannels')}
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            )}
+            <div aria-hidden="true" className="flex items-center gap-2 pr-4 border-r border-d-divider shrink-0 max-sm:hidden">
               <Users className="w-5 h-5 text-d-text4" />
               <span className="font-bold text-d-strong">{t('dm.friends')}</span>
             </div>
 
-            <div className="flex items-center gap-2 text-sm font-semibold">
+            {/* Phones: one compact select instead of a sideways-scrolling strip. */}
+            <div className="sm:hidden flex items-center gap-2 min-w-0 flex-1">
+              <select
+                value={activeTab === 'add' ? 'add' : activeTab}
+                onChange={(e) => setActiveTab(e.target.value)}
+                aria-label={t('dm.friends')}
+                className="min-w-0 flex-1 bg-d-surface text-sm font-semibold text-d-strong rounded px-2 py-1.5 border border-d-edge focus:outline-none focus:border-d-brand"
+              >
+                {tabs().map((tab) => (
+                  <option key={tab.key} value={tab.key}>
+                    {tab.label}{tab.key === 'pending' && pendingIncoming.length > 0 ? ` (${pendingIncoming.length})` : ''}
+                  </option>
+                ))}
+                <option value="add">{t('dm.addFriend')}</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setActiveTab('add')}
+                aria-label={t('dm.addFriend')}
+                className="shrink-0 p-2 rounded bg-d-success text-white hover:bg-d-successhover"
+              >
+                <UserPlus className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-sm:hidden flex items-center gap-2 text-sm font-semibold overflow-x-auto scrollbar-none min-w-0">
               {tabs().map((tab) => (
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
                   aria-pressed={activeTab === tab.key}
-                  className={`px-2 py-1 rounded transition-colors ${
+                  className={`px-2 py-1 rounded transition-colors shrink-0 whitespace-nowrap ${
                     activeTab === tab.key ? 'bg-d-active text-d-strong' : 'text-d-text2 hover:bg-d-hover/60'
                   }`}
                 >
@@ -335,7 +483,7 @@ export default function HomeDirectMessages({
               ))}
               <button
                 onClick={() => setActiveTab('add')}
-                className={`px-2 py-1 rounded transition-colors ${
+                className={`px-2 py-1 rounded transition-colors shrink-0 whitespace-nowrap ${
                   activeTab === 'add' ? 'bg-d-successhover text-white' : 'bg-d-success text-white hover:bg-d-successhover'
                 }`}
               >
@@ -345,6 +493,9 @@ export default function HomeDirectMessages({
           </div>
 
           <div className="flex-1 overflow-y-auto p-6">
+            {/* Accounts made before the age gate are asked once, without
+                blocking anything (teen protections depend on the answer). */}
+            <BirthdateCard user={currentUser ? { ...currentUser, ...accountFlags } : null} onToast={onToast} />
             {activeTab === 'add' ? (
               <div className="max-w-xl">
                 <h2 className="text-base font-bold text-d-strong mb-1">{t('dm.addFriend')}</h2>
@@ -389,7 +540,34 @@ export default function HomeDirectMessages({
                   {tabs().find((tab) => tab.key === activeTab)?.label} — {visibleFriends.length}
                 </h2>
 
-                {visibleFriends.length === 0 && (
+                {visibleFriends.length === 0 && friends.length === 0 && (activeTab === 'online' || activeTab === 'all') ? (
+                  // First run: nothing here yet, so say what to do next
+                  // instead of "Nobody in this list".
+                  <div className="max-w-md mx-auto text-center py-10">
+                    <Users className="w-12 h-12 mx-auto mb-3 text-d-text4" aria-hidden="true" />
+                    <h3 className="text-lg font-bold text-d-strong mb-1">
+                      {serverCount === 0 ? t('home.welcomeTitle') : t('home.noFriendsTitle')}
+                    </h3>
+                    <p className="text-sm text-d-text2 mb-6">
+                      {serverCount === 0 ? t('home.welcomeBody') : t('home.noFriendsBody')}
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2 justify-center">
+                      {onCreateServer && (
+                        <button type="button" onClick={onCreateServer} className="bg-d-brand hover:bg-d-brandhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.createServer')}
+                        </button>
+                      )}
+                      {onJoinServer && (
+                        <button type="button" onClick={onJoinServer} className="bg-d-surface hover:bg-d-hover text-d-strong text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                          {t('home.joinServer')}
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setActiveTab('add')} className="bg-d-success hover:bg-d-successhover text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">
+                        {t('dm.addFriend')}
+                      </button>
+                    </div>
+                  </div>
+                ) : visibleFriends.length === 0 && (
                   <div className="text-center py-16 text-d-text3">
                     <Inbox className="w-10 h-10 mx-auto mb-3 opacity-40" />
                     <p className="text-sm">{t('dm.nobodyHere')}</p>
@@ -415,14 +593,15 @@ export default function HomeDirectMessages({
                           onClick={() => onOpenProfile?.(friend.id)}
                           className="flex items-center gap-3 min-w-0 text-left flex-1"
                         >
-                          <div className="relative shrink-0">
-                            <img src={friend.avatar_url || FALLBACK_AVATAR} alt="" className="w-10 h-10 rounded-full object-cover" />
-                            {!isBlockedTab && (
-                              <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-d-canvas ${
-                                STATUS_COLORS[friend.status] ?? STATUS_COLORS.offline
-                              }`} />
-                            )}
-                          </div>
+                          <AvatarWithDecoration
+                            src={friend.avatar_url}
+                            userId={friend.id}
+                            size={40}
+                            decoration={isBlockedTab ? null : identities[friend.id]?.decoration}
+                            status={isBlockedTab ? null : friend.status}
+                            ring="var(--color-d-canvas)"
+                            context="list"
+                          />
                           <div className="min-w-0">
                             <div className="font-bold text-d-strong text-sm truncate">
                               {friend.display_name || friend.username}
@@ -519,7 +698,7 @@ export default function HomeDirectMessages({
               </>
             )}
           </div>
-        </div>
+        </main>
       )}
     </div>
   );

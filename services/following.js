@@ -11,7 +11,7 @@
 // ============================================================================
 
 import crypto from 'crypto';
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission } from './guilds.js';
@@ -109,7 +109,7 @@ export async function unfollow({ followId, userId }) {
   await assertPermission({ userId, serverId: row.target_server_id, channelId: row.target_channel_id, permission: 'MANAGE_WEBHOOKS' });
   await transaction(async () => {
     await runQuery(`DELETE FROM channel_follows WHERE id = ?`, [followId]);
-    await runQuery(`UPDATE webhooks SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [row.webhook_id]);
+    await runQuery(`UPDATE webhooks SET revoked_at = ${sql.now} WHERE id = ?`, [row.webhook_id]);
   });
   return { ok: true };
 }

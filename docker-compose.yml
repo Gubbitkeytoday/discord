@@ -1,21 +1,47 @@
 # ============================================================================
 #  Antigravity Discord — production stack
 #
-#  Two services: the app, and Caddy in front of it for automatic HTTPS. Caddy is
-#  the reason this is worth using compose at all — a WebSocket app needs TLS and
-#  correct forwarded headers, and getting a certificate by hand is the step most
-#  likely to be skipped.
+#  The app, and Caddy in front of it for automatic HTTPS. Caddy is the reason
+#  this is worth using compose at all — a WebSocket app needs TLS and correct
+#  forwarded headers, and getting a certificate by hand is the step most likely
+#  to be skipped. (Browsers also refuse microphone access on plain http.)
+#
+#  Optional third service: coturn, the TURN relay voice and video need for
+#  users behind symmetric NAT / CGNAT / strict firewalls. Enable it with the
+#  `turn` profile — see DEPLOYMENT.md, "Voice and video: TURN".
+#
+#  Optional: a LiveKit SFU (`livekit` profile) replaces the peer-to-peer mesh
+#  for voice/video — see DEPLOYMENT.md, "Voice and video: LiveKit".
+#
+#  The database is PostgreSQL (the `postgres` service). The app creates and
+#  migrates the schema itself on boot, and waits for Postgres to be healthy.
+#  To keep SQLite instead, set `DATABASE_URL=` (empty) in .env — the app then
+#  uses /data/discord.db and the postgres service can be removed.
 #
 #  First run:
-#    cp .env.example .env      # then edit: PUBLIC_URL, STORAGE_URL_SECRET, DOMAIN
-#    docker compose up -d
-#    docker compose exec app node db/seed.js     # optional demo data
+#    cp .env.example .env      # then edit: PUBLIC_URL, DOMAIN, and the secrets —
+#    npm run secrets           # prints STORAGE_URL_SECRET, POSTGRES_PASSWORD, …
+#    docker compose up -d                       # or: --profile turn up -d
+#    docker compose exec -e SEED_DATABASE=1 app node db/seed.js   # optional demo data
+#
+#  Profiles (combine freely): turn, livekit, scale, translate, observability,
+#  no-proxy (app on 127.0.0.1:${APP_PORT:-3001} without Caddy — NAS setups).
+#  Backups: scripts/ops/docker-backup.sh (DEPLOYMENT.md §6).
+#
+#  Moving an existing SQLite deployment over: DEPLOYMENT.md, "PostgreSQL".
 # ============================================================================
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   app:
     build: .
     restart: unless-stopped
+    init: true
     env_file: .env
     environment:
       NODE_ENV: production
@@ -25,43 +51,343 @@ services:
       LOG_FORMAT: json
       # Caddy is the only thing in front of the app, so exactly one hop of
       # X-Forwarded-For is trustworthy. Trusting more would let a client forge
-      # its own IP and escape rate limiting.
-      TRUST_PROXY: 1
+      # its own IP and escape rate limiting. `no-proxy` profile behind a NAS
+      # reverse proxy: TRUST_PROXY=2 in .env (NAS proxy + app-direct).
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      # PostgreSQL by default. `${VAR-default}` keeps an explicitly empty
+      # DATABASE_URL= from .env, which switches the app back to SQLite.
+      DATABASE_URL: ${DATABASE_URL-postgres://antigravity:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/antigravity}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
       DB_PATH: /data/discord.db
       STORAGE_ROOT: /data/uploads
+      BACKUP_DIR: /backups
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - app-data:/data
+      # Separate from the data volume so deleting one cannot take the other.
+      # Copy it off the host too — a backup on the same disk is not a backup.
+      - app-backups:/backups
     expose:
       - "3001"
-    # Not published to the host: only Caddy may reach it.
+    # Not published to the host: only Caddy (or app-direct, `no-proxy`
+    # profile) may reach it.
     networks:
       - edge
+    # server.js drains in-flight requests and closes the database on SIGTERM.
     stop_grace_period: 30s
+    logging: *logging
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: antigravity
+      POSTGRES_DB: antigravity
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # scram-sha-256 for every connection, including the first.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --encoding=UTF8"
+    # Modest settings for a small VM; see DEPLOYMENT.md "Tuning" before
+    # raising them. max_connections must exceed DB_POOL_MAX × app instances.
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # pg_dump snapshots land next to the app's backups.
+      - app-backups:/backups
+    # Never published: only the app reaches it, over the internal network.
+    expose:
+      - "5432"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antigravity -d antigravity -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # Postgres needs time to checkpoint on shutdown.
+    stop_grace_period: 60s
+    shm_size: 256mb
+    logging: *logging
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     environment:
       # Set DOMAIN in .env. Use `localhost` to get a local self-signed cert
       # instead of a public ACME certificate.
       DOMAIN: ${DOMAIN:-localhost}
+      # Only used by the (commented-out) LiveKit block in the Caddyfile.
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN:-}
+    # Host ports are configurable for machines where something else already
+    # owns 80/443 (a Synology/QNAP NAS: DSM's own web server). Forward the
+    # router's 80 -> HTTP_PORT and 443 -> HTTPS_PORT so certificates can still
+    # be issued, or use the `no-proxy` profile instead (DEPLOYMENT.md §2b).
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"     # HTTP/3
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"     # HTTP/3
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # `scale` profile: CADDYFILE=./Caddyfile.scale (two sticky upstreams).
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy-data:/data           # certificates — losing this re-issues them
       - caddy-config:/config
     networks:
       - edge
+    logging: *logging
+
+  # --- no-proxy profile ---------------------------------------------------------
+  # The app on one plain-HTTP host port, without the TLS `caddy` service, for
+  # hosts where something else terminates TLS (Synology/QNAP reverse proxy,
+  # Traefik, nginx Proxy Manager, Cloudflare Tunnel) or a LAN-only test:
+  #
+  #   docker compose --profile no-proxy up -d app-direct
+  #
+  # (Name the service: a bare `up -d` would also start `caddy`.) Binds
+  # 127.0.0.1 by default, so only a proxy on the same host can reach it; set
+  # APP_BIND=0.0.0.0 to open it to the LAN — and then SECURE_COOKIES=0 and
+  # PUBLIC_URL=http://<lan-ip>:<APP_PORT>, since there is no TLS. A small
+  # Caddy (the image the stack already uses) forwards to the app so the app
+  # stays on the internal network with the same headers as behind `caddy`.
+  app-direct:
+    image: caddy:2-alpine
+    profiles: ["no-proxy"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3001}:3001"
+    volumes:
+      - ./Caddyfile.no-proxy:/etc/caddy/Caddyfile:ro
+    networks:
+      - edge
+    logging: *logging
+
+  # TURN relay. Host networking because a relay allocates one UDP port per
+  # participant from a range; publishing thousands of ports through Docker's
+  # proxy is slow and fragile. Open 3478/udp+tcp and the relay range
+  # (49160-49200/udp below) in the host firewall / cloud security group, and
+  # forward the same ports on the router when the host sits behind one.
+  #
+  # Uses the TURN REST shared secret: the app mints short-lived credentials per
+  # user (GET /api/voice/ice-servers), so no static password ships to browsers.
+  coturn:
+    image: coturn/coturn:4.6
+    profiles: ["turn"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_REALM: ${DOMAIN:-localhost}
+      # Set whenever the host sits behind NAT — a cloud VM (AWS, GCP…) *or* a
+      # home/office router in front of a NAS: public IP / host's private IP.
+      #   TURN_EXTERNAL_IP=203.0.113.10   or   203.0.113.10/192.168.1.20
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+    # A shell wrapper so a missing secret fails loudly instead of starting an
+    # open relay, and so the external IP is only passed when it is set.
+    # ($$ escapes compose interpolation; the container's shell expands these.)
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        test -n "$$TURN_SECRET" || { echo "coturn: TURN_SECRET is not set" >&2; exit 1; };
+        exec turnserver -n --log-file=stdout --fingerprint
+        --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm="$$TURN_REALM"
+        --listening-port=3478 --no-tls --no-dtls
+        --min-port=49160 --max-port=49200
+        $${TURN_EXTERNAL_IP:+--external-ip=$$TURN_EXTERNAL_IP}
+        --no-cli --no-multicast-peers
+        --denied-peer-ip=0.0.0.0-0.255.255.255
+        --denied-peer-ip=10.0.0.0-10.255.255.255
+        --denied-peer-ip=100.64.0.0-100.127.255.255
+        --denied-peer-ip=127.0.0.0-127.255.255.255
+        --denied-peer-ip=169.254.0.0-169.254.255.255
+        --denied-peer-ip=172.16.0.0-172.31.255.255
+        --denied-peer-ip=192.168.0.0-192.168.255.255
+        --total-quota=300 --stale-nonce=600
+    logging: *logging
+
+  # --- livekit (optional SFU) -------------------------------------------------
+  # LiveKit SFU for voice / video / screen share / stage. Enable with
+  #   docker compose --profile livekit up -d
+  # and set LIVEKIT_* in .env (see DEPLOYMENT.md, "Voice and video: LiveKit").
+  # Without it the app uses its peer-to-peer mesh, exactly as before.
+  #
+  # Bridge network (not host): the app reaches the server API and LiveKit
+  # reaches the app's webhook over `edge`, and Caddy terminates TLS for
+  # LIVEKIT_DOMAIN in front of the signalling port. Media needs only three
+  # published ports, because livekit.yaml multiplexes WebRTC onto one UDP port:
+  #   7882/udp  media (primary)      7881/tcp  ICE/TCP fallback
+  #   3479/udp  embedded TURN relay
+  # Open them in the host firewall and the cloud security group.
+  livekit:
+    image: livekit/livekit-server:v1.10.1
+    profiles: ["livekit"]
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      # "key: secret". The key must match webhook.api_key in livekit.yaml.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-antigravity}: ${LIVEKIT_API_SECRET:-}"
+      # To advertise a fixed public IP instead of STUN discovery, add:
+      #   NODE_IP: 203.0.113.10
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    expose:
+      - "7880"
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+      - "3479:3479/udp"
+    networks:
+      - edge
+    logging: *logging
+
+  # --- scale profile (realtime-scale) ---------------------------------------
+  # Two app instances sharing Valkey: Socket.IO Redis Streams adapter for
+  # cross-instance fan-out and connection-state recovery, shared rate limits,
+  # presence with TTL heartbeats. Requires PostgreSQL (the default above) and
+  # in .env:
+  #   REDIS_URL=redis://valkey:6379
+  #   CADDYFILE=./Caddyfile.scale
+  # then: docker compose --profile scale up -d
+  # See DEPLOYMENT.md §8 "Running several instances".
+  valkey:
+    image: valkey/valkey:8-alpine
+    profiles: ["scale"]
+    restart: unless-stopped
+    # Ephemeral by design: sockets, presence, rate buckets and the replay
+    # stream are all rebuilt within minutes. No persistence, bounded memory.
+    command: ["valkey-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    expose:
+      - "6379"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  app-2:
+    extends:
+      service: app
+    profiles: ["scale"]
+    environment:
+      # Snowflake ids embed a worker id; every instance needs its own (the
+      # first app uses the default, 0). A third instance would use 2, etc.
+      WORKER_ID: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  # --- translation -------------------------------------------------------------
+  # Self-hosted machine translation for POST /api/translate — message text
+  # never leaves your infrastructure. Enable with the `translate` profile and
+  # set LIBRETRANSLATE_URL=http://libretranslate:5000 in .env. Only the
+  # languages in LT_LOAD_ONLY are downloaded (first start fetches the models
+  # into the volume; allow a few minutes and ~1-2 GB). See DEPLOYMENT.md,
+  # "Passkeys and message translation".
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    profiles: ["translate"]
+    restart: unless-stopped
+    environment:
+      LT_LOAD_ONLY: ${LT_LOAD_ONLY:-en,th,ja,zh,zt,ko,es,fr,de,pt,ru,vi,id}
+      LT_DISABLE_WEB_UI: "true"
+      LT_UPDATE_MODELS: "true"
+      # Optional: require LIBRETRANSLATE_API_KEY (set the same key in the app).
+      LT_API_KEYS: ${LT_API_KEYS:-false}
+    volumes:
+      - lt-models:/home/libretranslate/.local
+    # Internal only: the app is its sole client.
+    expose:
+      - "5000"
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "./venv/bin/python scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    logging: *logging
+
+  # --- observability profile ---------------------------------------------------
+  # Grafana + Tempo (traces) + Loki (logs) + Prometheus (metrics) + an
+  # OpenTelemetry Collector in one container, with the Antigravity dashboard
+  # and alert rules pre-provisioned from ops/. Enable with:
+  #
+  #   docker compose --profile observability up -d
+  #   # and in .env: OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318
+  #   #              GRAFANA_ADMIN_PASSWORD=<something long>
+  #
+  # Grafana listens on 127.0.0.1:3000 only; reach it over an SSH tunnel
+  # (ssh -L 3000:127.0.0.1:3000 host) rather than publishing it. OTLP ports are
+  # not published: only the app, on the internal network, sends to them.
+  # Sized for one small node (it keeps ~15 days by default); for anything
+  # bigger, point OTEL_EXPORTER_OTLP_ENDPOINT at a managed backend instead.
+  # See DEPLOYMENT.md, "Observability".
+  lgtm:
+    image: grafana/otel-lgtm:0.34.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      # `:-` rather than `:?` so compose still parses without this profile;
+      # the entrypoint below refuses to start Grafana with no password.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >-
+        test -n "$$GF_SECURITY_ADMIN_PASSWORD" || { echo "lgtm: GRAFANA_ADMIN_PASSWORD is not set" >&2; exit 1; };
+        exec /otel-lgtm/run-all.sh
+    ports:
+      - "127.0.0.1:3000:3000"
+    expose:
+      - "4317"
+      - "4318"
+    volumes:
+      - lgtm-data:/data
+      - ./ops/grafana/provisioning/dashboards.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/antigravity.yml:ro
+      - ./ops/grafana/dashboards:/otel-lgtm/antigravity-dashboards:ro
+      - ./ops/alerts/grafana-alerting.yml:/otel-lgtm/grafana/conf/provisioning/alerting/antigravity.yml:ro
+    networks:
+      - edge
+    logging: *logging
+  # --- end observability profile -----------------------------------------------
 
 volumes:
   app-data:
+  app-backups:
+  pg-data:
   caddy-data:
   caddy-config:
+  lt-models:   # translation (LibreTranslate language models)
+  lgtm-data:        # observability profile
 
 networks:
   edge:

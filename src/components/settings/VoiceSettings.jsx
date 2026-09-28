@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, Video, VideoOff, Loader2 } from 'lucide-react';
 import { useVoiceSettings, listAudioDevices } from '../../hooks/useVoiceSettings';
 import { t } from '../../i18n/index.jsx';
+import { loadVoiceConfig } from '../../voice/config';
 import {
   PageHeader, Section, SettingToggle, Slider, RadioList, ResetButton,
   Divider, StackedRow, Field, Select, Button, inputClass
@@ -26,6 +27,13 @@ export default function VoiceSettings({ onToast }) {
   const [capturingKey, setCapturingKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(null);   // 'livekit' | 'mesh'
+
+  useEffect(() => {
+    let cancelled = false;
+    loadVoiceConfig().then((cfg) => { if (!cancelled) setVoiceMode(cfg.mode); });
+    return () => { cancelled = true; };
+  }, []);
 
   const streamRef = useRef(null);
   const ctxRef = useRef(null);
@@ -148,6 +156,15 @@ export default function VoiceSettings({ onToast }) {
     startCameraPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.videoDeviceId, settings.videoResolution, settings.videoFrameRate]);
+
+  // Likewise the mic test: picking another microphone should test that one,
+  // not keep metering the device that was open when the test started.
+  useEffect(() => {
+    if (!testing) return;
+    stopTest();
+    startTest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.inputDeviceId, settings.echoCancellation, settings.noiseSuppression, settings.autoGainControl]);
 
   // The blur preview mirrors exactly what peers would receive.
   useEffect(() => {
@@ -295,6 +312,7 @@ export default function VoiceSettings({ onToast }) {
 
         {settings.inputMode === 'ptt' && (
           <div className="mt-4 border-l-2 border-d-divider pl-4">
+            <p className="text-sm text-d-text2 pt-2" data-testid="ptt-touch-hint">{t('voice.pttTouchHint')}</p>
             <Row2 label={t('voice.keybind')}>
               <button
                 type="button"
@@ -347,6 +365,15 @@ export default function VoiceSettings({ onToast }) {
 
       <Divider />
 
+      {/* --- which media path this server uses (informational) ------------------ */}
+      {voiceMode && (
+        <Section title={t('voice.connectionMode')}>
+          <p className="text-sm text-d-text2" data-testid="voice-mode" data-mode={voiceMode}>
+            {voiceMode === 'livekit' ? t('voice.modeLivekit') : t('voice.modeMesh')}
+          </p>
+        </Section>
+      )}
+
       {/* --- processing --------------------------------------------------------- */}
       <Section title={t('voice.processing')}>
         <SettingToggle
@@ -356,6 +383,7 @@ export default function VoiceSettings({ onToast }) {
         />
         <SettingToggle
           label={t('voice.noiseSuppression')}
+          hint={`${t('voice.noiseSuppressionHint')} ${t('voice.noiseSuppressionInCall')}`}
           checked={settings.noiseSuppression}
           onChange={(value) => update({ noiseSuppression: value })}
         />
@@ -410,7 +438,7 @@ export default function VoiceSettings({ onToast }) {
             className={`h-full w-full object-cover ${settings.blurCamera ? 'invisible absolute' : ''}
               ${settings.mirrorCamera ? 'scale-x-[-1]' : ''}`}
           />
-          {settings.blurCamera && (
+          {Boolean(settings.blurCamera) && (
             <canvas
               ref={blurCanvasRef}
               className={`h-full w-full object-cover ${settings.mirrorCamera ? 'scale-x-[-1]' : ''}`}
@@ -472,7 +500,7 @@ export default function VoiceSettings({ onToast }) {
           onChange={(value) => update({ blurCamera: value })}
           last={!settings.blurCamera}
         />
-        {settings.blurCamera && (
+        {Boolean(settings.blurCamera) && (
           <Slider
             label={t('voice.blurStrength')}
             value={settings.blurStrength}
@@ -507,9 +535,26 @@ export default function VoiceSettings({ onToast }) {
           onChange={(value) => update({ silenceWarning: value })}
         />
         <SettingToggle
+          label={t('voice.announceSpeaking')}
+          hint={t('voice.announceSpeakingHint')}
+          checked={Boolean(settings.announceSpeaking)}
+          onChange={(value) => update({ announceSpeaking: value })}
+        />
+        <SettingToggle
           label={t('voice.joinLeaveSounds')}
           checked={settings.voiceJoinSound}
           onChange={(value) => update({ voiceJoinSound: value })}
+        />
+        <SettingToggle
+          label={t('voice.muteSounds')}
+          checked={settings.muteSounds !== false}
+          onChange={(value) => update({ muteSounds: value })}
+        />
+        <SettingToggle
+          label={t('voice.callControlLabels')}
+          hint={t('voice.callControlLabelsHint')}
+          checked={settings.callControlLabels !== false}
+          onChange={(value) => update({ callControlLabels: value })}
         />
         <SettingToggle
           label={t('voice.spatialAudio')}

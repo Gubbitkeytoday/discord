@@ -4,9 +4,17 @@
 // output-volume setting, so turning the app down turns the beeps down too
 // rather than leaving them at full volume over a quiet call.
 
+import { SOUND_PACKS, renderEvent, soundUrl, SAMPLE_RATE } from '../theme/soundPacks.js';
+
 let audioCtx = null;
 let masterGain = null;
 let readVolume = () => 1;
+let readPack = () => 'classic';
+
+/** Let the settings layer supply the chosen sound pack (Appearance › Sounds). */
+export function setSoundPackSource(fn) {
+  readPack = fn;
+}
 
 /** Let the settings layer supply the current output volume (0-2). */
 export function setSoundVolumeSource(fn) {
@@ -41,7 +49,7 @@ const getAudioContext = () => {
 const destination = () => masterGain ?? audioCtx.destination;
 
 // 1. Join Voice Channel Sound (Upward 2-tone melody)
-export const playJoinVoiceSound = () => {
+const classic_playJoinVoiceSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -77,7 +85,7 @@ export const playJoinVoiceSound = () => {
 };
 
 // 2. Leave Voice Channel Sound (Downward 2-tone melody)
-export const playLeaveVoiceSound = () => {
+const classic_playLeaveVoiceSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -113,7 +121,7 @@ export const playLeaveVoiceSound = () => {
 };
 
 // 3. Mute Microphones Click Sound
-export const playMuteSound = () => {
+const classic_playMuteSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -138,7 +146,7 @@ export const playMuteSound = () => {
 };
 
 // 4. Unmute Microphones Click Sound
-export const playUnmuteSound = () => {
+const classic_playUnmuteSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -163,7 +171,7 @@ export const playUnmuteSound = () => {
 };
 
 // 5. Message Incoming Sound
-export const playMessageIncomingSound = () => {
+const classic_playMessageIncomingSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -189,7 +197,7 @@ export const playMessageIncomingSound = () => {
 
 // 6. Mention / notification chime — two quick notes, distinct from a plain
 //    incoming message so a ping is recognisable without looking.
-export const playMentionSound = () => {
+const classic_playMentionSound = () => {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
@@ -272,4 +280,84 @@ export async function playSoundboardClip(url, { volume = 100, userVolume = 100 }
 /** Drop decoded audio — called when a sound is deleted or replaced. */
 export function forgetSoundboardClip(url) {
   clipCache.delete(url);
+}
+
+// ---------------------------------------------------------------------------
+// Sound packs (src/theme/soundPacks.js)
+//
+// A pack other than 'classic' plays its WAV from public/sounds/. If the file
+// cannot be fetched or decoded (offline before it was ever cached, a blocked
+// request) the same notes are rendered in JS into an AudioBuffer, so a pack
+// never goes silent.
+// ---------------------------------------------------------------------------
+
+const renderedCache = new Map(); // `${pack}/${event}` -> AudioBuffer
+
+function renderedBuffer(pack, event) {
+  const key = `${pack}/${event}`;
+  if (!renderedCache.has(key)) {
+    const samples = renderEvent(pack, event, SAMPLE_RATE);
+    if (!samples) return null;
+    const buffer = getAudioContext().createBuffer(1, samples.length, SAMPLE_RATE);
+    buffer.copyToChannel(samples, 0);
+    renderedCache.set(key, buffer);
+  }
+  return renderedCache.get(key);
+}
+
+function playBuffer(buffer) {
+  const ctx = getAudioContext();
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(destination());
+  source.start();
+  source.onended = () => { try { source.disconnect(); } catch { /* gone */ } };
+}
+
+/**
+ * Play `event` from `pack` (default: the user's choice). Returns false when
+ * the pack is 'classic', so the caller plays the built-in oscillator sound.
+ */
+export function playPackSound(event, pack = readPack()) {
+  if (!pack || pack === 'classic' || !SOUND_PACKS.includes(pack)) return false;
+  try {
+    getAudioContext();
+  } catch {
+    return true;
+  }
+  loadClip(soundUrl(pack, event))
+    .then(playBuffer)
+    .catch(() => {
+      try {
+        const buffer = renderedBuffer(pack, event);
+        if (buffer) playBuffer(buffer);
+      } catch (err) {
+        console.error('Sound effect playback failed:', err);
+      }
+    });
+  return true;
+}
+
+const packAware = (event, classic) => () => { if (!playPackSound(event)) classic(); };
+
+export const playJoinVoiceSound = packAware('voiceJoin', classic_playJoinVoiceSound);
+export const playLeaveVoiceSound = packAware('voiceLeave', classic_playLeaveVoiceSound);
+export const playMuteSound = packAware('mute', classic_playMuteSound);
+export const playUnmuteSound = packAware('unmute', classic_playUnmuteSound);
+export const playMessageIncomingSound = packAware('message', classic_playMessageIncomingSound);
+export const playMentionSound = packAware('mention', classic_playMentionSound);
+
+const CLASSIC = {
+  voiceJoin: classic_playJoinVoiceSound,
+  voiceLeave: classic_playLeaveVoiceSound,
+  mute: classic_playMuteSound,
+  unmute: classic_playUnmuteSound,
+  message: classic_playMessageIncomingSound,
+  mention: classic_playMentionSound
+};
+
+/** Settings preview: play one event from a given pack, whatever is selected. */
+export function previewSoundPack(pack, event = 'message') {
+  if (playPackSound(event, pack)) return;
+  CLASSIC[event]?.();
 }

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+<defs><linearGradient id="lt-p" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fdf2f8"/><stop offset=".45" stop-color="#f9a8d4"/><stop offset="1" stop-color="#db2777"/></linearGradient><symbol id="lt-f" viewBox="-20 -20 40 30" overflow="visible">
+<path d="M0-17C7-10 7-2 0 5C-7-2-7-10 0-17Z" fill="url(#lt-p)"/>
+<path d="M0 5C-2-4-8-10-15-11C-13-3-7 3 0 5Z" fill="url(#lt-p)" opacity=".92"/>
+<path d="M0 5C2-4 8-10 15-11C13-3 7 3 0 5Z" fill="url(#lt-p)" opacity=".92"/>
+<path d="M0 6C-6 2-14 0-19-2C-15 4-7 7 0 6Z" fill="#f9a8d4"/>
+<path d="M0 6C6 2 14 0 19-2C15 4 7 7 0 6Z" fill="#f9a8d4"/>
+<path d="M0-12V2" stroke="#fdf2f8" stroke-width=".8" opacity=".7"/>
+</symbol></defs>
+<style>.bob{animation:lt-bob 4s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.b2{animation-delay:-2s}@keyframes lt-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2.5px)}}@media (prefers-reduced-motion: reduce){*{animation:none!important}}</style>
+<path d="M11 74A51 51 0 0 0 109 74" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round" opacity=".85"/>
+<path d="M17 86A49 49 0 0 0 103 86" fill="none" stroke="#6ee7b7" stroke-width="1.2" stroke-dasharray="2 5" stroke-linecap="round"/>
+<ellipse cx="28" cy="104" rx="15" ry="5" fill="#059669"/>
+<path d="M28 104L40 101" stroke="#34d399" stroke-width="1"/>
+<ellipse cx="94" cy="106" rx="12" ry="4" fill="#047857"/>
+<g class="bob"><use href="#lt-f" x="4" y="78" width="40" height="30"/></g>
+<g class="bob b2"><use href="#lt-f" x="76" y="84" width="32" height="24"/></g>
+<circle cx="60" cy="112" r="2.2" fill="#fbcfe8"/><circle cx="52" cy="113" r="1.4" fill="#fbcfe8"/>
+</svg>

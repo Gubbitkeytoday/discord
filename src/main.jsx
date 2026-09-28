@@ -1,9 +1,26 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
+import ErrorBoundary from './components/ErrorBoundary';
 import { initPreferences } from './hooks/useUserSettings';
 import { I18nProvider, initLocale } from './i18n/index.jsx';
+import { DEFAULT_AVATAR } from './utils/avatar';
+import './utils/telemetry'; // Web Vitals + optional error reporting (lazy, off unless configured)
+// Self-hosted fonts: no request to a font CDN (privacy, offline installs).
+// Each weight file declares per-script @font-face rules with unicode-range,
+// so a browser only downloads the subsets a page actually uses.
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
+import '@fontsource/inter/800.css';
+// Kanit is only for Thai (Latin text is Inter), so only its Thai subset loads.
+import '@fontsource/kanit/thai-400.css';
+import '@fontsource/kanit/thai-500.css';
+import '@fontsource/kanit/thai-600.css';
+import '@fontsource/kanit/thai-700.css';
 import './index.css';
+import './pwa/register.js'; // PWA: service worker, Web Push, install, update prompt
 
 // Apply the cached appearance and accessibility preferences before React
 // mounts, so the app never flashes the wrong theme, zoom or contrast.
@@ -12,10 +29,31 @@ initPreferences();
 // hyphenation are correct from the start.
 initLocale();
 
+// Avatars come from user-supplied URLs that rot, get hot-link blocked, or are
+// unreachable behind a firewall; each one left the browser's broken-image
+// glyph in the member list, DMs and every message. Rather than thread an
+// onError through ~50 image sites, one capturing listener swaps any failed
+// round image (avatars are always `rounded-full`) for the inline default.
+// `error` does not bubble, hence the capture phase.
+document.addEventListener('error', (event) => {
+  const img = event.target;
+  if (img?.tagName !== 'IMG') return;
+  if (!img.classList.contains('rounded-full') || img.dataset.avatarFallback) return;
+  img.dataset.avatarFallback = '1';
+  img.src = DEFAULT_AVATAR;
+}, true);
+
+// A horizontal swipe on a phone is the app's (channel drawer), not the
+// browser's back gesture — which used to leave the app for about:blank.
+document.documentElement.style.overscrollBehaviorX = 'none';
+document.body.style.overscrollBehaviorX = 'none';
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <I18nProvider>
-      <App />
+      <ErrorBoundary variant="app" region="app">
+        <App />
+      </ErrorBoundary>
     </I18nProvider>
   </React.StrictMode>
 );

@@ -8,12 +8,15 @@
 //  the new server's role ids at creation time.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import crypto from 'crypto';
-import { assertPermission, getServerDetail, writeAuditLog } from './guilds.js';
+import { assertPermission, getServerDetail, writeAuditLog, applyNewServerSafetyDefaults } from './guilds.js';
+import { parseBuiltinCode, builtinTemplateData, resolveLang, BUILTIN_TEMPLATE_KEYS } from './admin/defaults.js';
 import { DEFAULT_PERMISSIONS } from '../lib/permissions.js';
+import { validateRoleStyle, validateUnicodeEmoji } from './serverAppearance.js'; // servers
 
 export const TEMPLATE_VERSION = 1;
 export const TEMPLATE_LIMITS = Object.freeze({ perServer: 1, name: 100, description: 120 });
@@ -21,6 +24,27 @@ export const TEMPLATE_LIMITS = Object.freeze({ perServer: 1, name: 100, descript
 const CHANNEL_FIELDS = ['name', 'type', 'topic', 'position', 'nsfw', 'rate_limit_per_user', 'bitrate', 'user_limit',
   'default_sort_order', 'default_reaction_emoji', 'require_tag', 'default_layout', 'auto_archive_duration'];
 const SERVER_FIELDS = ['description', 'verification_level', 'default_notifications', 'explicit_content_filter', 'afk_timeout'];
+
+/**
+ * A template role's style, validated as a live edit would be (a template is
+ * user-supplied data). null when there is nothing beyond the default.
+ */
+function templateRoleStyle(r) {
+  try {
+    const style = validateRoleStyle({
+      style: r.style ?? 'solid',
+      gradient_angle: r.gradient_angle ?? 90,
+      color_secondary: r.color_secondary ?? null,
+      unicode_emoji: r.unicode_emoji ?? null
+    });
+    if (style.style !== 'solid' && !r.color) style.style = 'solid';
+    if (style.style === 'gradient' && !style.color_secondary) style.style = 'solid';
+    if (style.style === 'solid' && !style.unicode_emoji) return null;
+    return style;
+  } catch {
+    return null;
+  }
+}
 
 /** Build the snapshot object from a live server. */
 export async function snapshot(serverId) {
@@ -53,12 +77,17 @@ export async function snapshot(serverId) {
     afk_channel: chanKey.get(server.afk_channel_id) ?? null,
     roles: roles.map((r) => ({
       key: roleKey.get(r.id), name: r.name, color: r.color ?? null, position: r.position,
-      permissions: String(r.permissions), hoist: Boolean(r.hoist), mentionable: Boolean(r.mentionable), everyone: Boolean(r.is_everyone)
+      permissions: String(r.permissions), hoist: Boolean(r.hoist), mentionable: Boolean(r.mentionable), everyone: Boolean(r.is_everyone),
+      // servers: role style travels with the template; uploaded icons do not.
+      style: r.style ?? 'solid', color_secondary: r.color_secondary ?? null,
+      gradient_angle: r.gradient_angle ?? 90, unicode_emoji: r.unicode_emoji ?? null
     })),
     channels: channels.map((c) => ({
       key: chanKey.get(c.id),
       parent: chanKey.get(c.parent_id) ?? null,
       ...Object.fromEntries(CHANNEL_FIELDS.map((f) => [f, c[f] ?? null])),
+      // A custom-emoji icon names this server's emoji, so only unicode travels.
+      icon_emoji: c.icon_emoji && !c.icon_emoji.startsWith('<') ? c.icon_emoji : null,
       overwrites: overwrites.filter((o) => o.channel_id === c.id).map((o) => ({
         role: roleKey.get(o.target_id), allow: String(o.allow), deny: String(o.deny)
       })).filter((o) => o.role),
@@ -86,7 +115,7 @@ export async function createTemplate({ serverId, userId, name, description = nul
   const existing = await getQuery(`SELECT code FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (existing) {
     await runQuery(
-      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+      `UPDATE server_templates SET name = ?, description = ?, data = ?, updated_at = ${sql.now} WHERE code = ?`,
       [clean, desc, data, existing.code]
     );
     return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [existing.code]));
@@ -106,7 +135,7 @@ export async function syncTemplate({ serverId, userId }) {
   const row = await getQuery(`SELECT * FROM server_templates WHERE source_server_id = ?`, [serverId]);
   if (!row) throw ApiError.notFound('Template');
   await runQuery(
-    `UPDATE server_templates SET data = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE code = ?`,
+    `UPDATE server_templates SET data = ?, updated_at = ${sql.now} WHERE code = ?`,
     [JSON.stringify(await snapshot(serverId)), row.code]
   );
   return shape(await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [row.code]));
@@ -125,9 +154,33 @@ export async function getServerTemplate(serverId, userId) {
   return row ? shape(row) : null;
 }
 
+/**
+ * A template row by code. Built-in templates (`builtin-<key>[-<lang>]`) are
+ * synthesised on the fly in the requested language, with the user's saved
+ * language as the fallback, so the gallery needs no rows in the database.
+ */
+async function loadTemplateRow(code, userId = null) {
+  const builtin = parseBuiltinCode(code);
+  if (builtin) {
+    let lang = builtin.lang;
+    if (!lang && userId) {
+      const saved = (await getQuery(`SELECT locale FROM users WHERE id = ?`, [userId]))?.locale ?? null;
+      lang = resolveLang(saved);
+    }
+    const data = builtinTemplateData(builtin.key, lang ?? 'en');
+    return {
+      code, name: data.source.name, description: null, source_server_id: null, creator_id: null,
+      usage_count: 0, created_at: null, updated_at: null, data: JSON.stringify(data), builtin: true
+    };
+  }
+  return getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+}
+
+export { BUILTIN_TEMPLATE_KEYS };
+
 /** Public preview of a template by code — what the "use template" screen shows. */
-export async function getTemplate(code) {
-  const row = await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+export async function getTemplate(code, userId = null) {
+  const row = await loadTemplateRow(code, userId);
   if (!row) throw ApiError.notFound('Template');
   const data = JSON.parse(row.data);
   return {
@@ -145,7 +198,7 @@ export async function getTemplate(code) {
  * ids; local keys are re-mapped so overwrites point at the new roles.
  */
 export async function useTemplate({ code, userId, name, iconUrl = null }) {
-  const row = await getQuery(`SELECT * FROM server_templates WHERE code = ?`, [code]);
+  const row = await loadTemplateRow(code, userId);
   if (!row) throw ApiError.notFound('Template');
   const data = JSON.parse(row.data);
   if (data.version !== TEMPLATE_VERSION) throw new ApiError('Unsupported template version', { code: 'TEMPLATE_VERSION' });
@@ -160,7 +213,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       `INSERT INTO servers (id, name, icon_url, owner_id, member_count, description, verification_level,
                             default_notifications, explicit_content_filter, afk_timeout)
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-      [serverId, serverName, iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`, userId,
+      [serverId, serverName, proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(serverName)}`), userId,
        data.server?.description ?? null, Math.min(4, Math.max(0, Number(data.server?.verification_level) || 0)),
        ['all_messages', 'only_mentions'].includes(data.server?.default_notifications) ? data.server.default_notifications : 'all_messages',
        Number(data.server?.explicit_content_filter) || 0,
@@ -180,6 +233,13 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
         `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, serverId, String(r.name).slice(0, 100), r.color ?? null, Number(r.position) || 1, String(r.permissions ?? '0'), r.hoist ? 1 : 0, r.mentionable ? 1 : 0]
       );
+      const style = templateRoleStyle(r);
+      if (style) {
+        await runQuery(
+          `UPDATE roles SET style = ?, color_secondary = ?, gradient_angle = ?, unicode_emoji = ? WHERE id = ?`,
+          [style.style, style.color_secondary, style.gradient_angle, style.unicode_emoji, id]
+        );
+      }
     }
 
     await runQuery(`INSERT INTO server_members (server_id, user_id) VALUES (?, ?)`, [serverId, userId]);
@@ -201,6 +261,11 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
          c.default_reaction_emoji ?? null, c.require_tag ? 1 : 0,
          ['list', 'gallery'].includes(c.default_layout) ? c.default_layout : 'list', Number(c.auto_archive_duration) || 1440]
       );
+      if (c.icon_emoji) {
+        let emoji = null;
+        try { emoji = validateUnicodeEmoji(c.icon_emoji); } catch { emoji = null; }
+        if (emoji) await runQuery(`UPDATE channels SET icon_emoji = ? WHERE id = ?`, [emoji, id]);
+      }
       for (const o of c.overwrites ?? []) {
         const roleId = roleIds.get(o.role);
         if (!roleId) continue;
@@ -212,7 +277,7 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       let pos = 0;
       for (const tag of (c.tags ?? []).slice(0, 20)) {
         await runQuery(
-          `INSERT OR IGNORE INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO forum_tags (id, channel_id, name, emoji, moderated, position) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           [generateId(), id, String(tag.name).slice(0, 20), tag.emoji ?? null, tag.moderated ? 1 : 0, pos++]
         );
       }
@@ -222,7 +287,8 @@ export async function useTemplate({ code, userId, name, iconUrl = null }) {
       `UPDATE servers SET system_channel_id = ?, rules_channel_id = ?, afk_channel_id = ? WHERE id = ?`,
       [chanIds.get(data.system_channel) ?? null, chanIds.get(data.rules_channel) ?? null, chanIds.get(data.afk_channel) ?? null, serverId]
     );
-    await runQuery(`UPDATE server_templates SET usage_count = usage_count + 1 WHERE code = ?`, [code]);
+    if (!row.builtin) await runQuery(`UPDATE server_templates SET usage_count = usage_count + 1 WHERE code = ?`, [code]);
+    await applyNewServerSafetyDefaults(serverId);
     await writeAuditLog({ serverId, userId, actionType: 'SERVER_CREATE', targetId: serverId, changes: [{ key: 'template', new: code }] });
   });
 

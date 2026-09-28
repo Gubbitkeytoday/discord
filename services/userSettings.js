@@ -10,7 +10,7 @@
 //  is preserved rather than dropped.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { ApiError } from '../lib/httpUtils.js';
 
 /**
@@ -20,12 +20,24 @@ import { ApiError } from '../lib/httpUtils.js';
 export const SETTING_DEFAULTS = {
   appearance: {
     theme: 'dark',                 // light | dark | ash | onyx | system
+    systemLightTheme: 'light',     // light | ash      (theme = system, OS light)
+    systemDarkTheme: 'dark',       // ash | dark | onyx (theme = system, OS dark)
     uiDensity: 'default',          // compact | default | spacious
+    radius: 'default',             // sharp | default | round
     messageDisplay: 'cozy',        // cozy | compact
     zoom: 100,                     // 50-200 %
-    chatFontScale: 100,            // 80-160 %
+    chatFontScale: 100,            // 75-150 % of 16 px = 12-24 px
     messageGroupSpacing: 16,       // px between message groups
+    uiFont: 'inter',               // inter | system | atkinson | opendyslexic
+    chatLineHeight: 1.375,         // 1.2-2.2
+    letterSpacing: 0,              // 0-0.2 em
+    wordSpacing: 0,                // 0-0.3 em
+    gradient: 'none',              // none | <preset id> | custom:<id>
+    customThemes: [],              // see validateCustomThemes
+    seasonal: 'auto',              // auto | off
+    soundPack: 'classic',          // classic | soft | retro | glass
     showSendButton: true,
+    showRoleIcons: true,           // role icons beside names
     syncAcrossDevices: true
   },
   accessibility: {
@@ -78,6 +90,9 @@ export const SETTING_DEFAULTS = {
     friendRequests: 'everyone',    // everyone | friends_of_friends | none
     // Discord's "who can add you as a friend" also honours server membership.
     allowServerMemberDms: true,
+    // DMs from people who are not your friends wait in "Message requests"
+    // until you accept them (Discord's message request filter).
+    messageRequests: true,
     showCurrentActivity: true,
     allowAnalytics: false
   },
@@ -89,6 +104,9 @@ export const SETTING_DEFAULTS = {
     enabled: false,
     autoEnable: false,             // when a screen share starts
     hidePersonalInformation: true,
+    // Usernames, #tags and message text in toasts (a viewer can add you
+    // with a username, or read a DM off a notification).
+    hideUsernames: true,
     hideInviteLinks: true,
     disableSounds: true,
     disableNotifications: true
@@ -149,26 +167,113 @@ export const SETTING_DEFAULTS = {
 
 export const CATEGORIES = Object.keys(SETTING_DEFAULTS);
 
+// ============================================================================
+//  Age.
+//
+//  Only the birth year and month are stored (data minimisation, PDPA / GDPR
+//  art. 5(1)(c)); the day is used once, at sign-up, for the 13+ check. Ages
+//  derived later from year + month assume the birthday falls at the *end* of
+//  the month, so a teen stays protected until the month is over — the error
+//  is always on the safe side.
+// ============================================================================
+
+export const MINIMUM_AGE = 13;
+export const ADULT_AGE = 18;
+
+/** Whole years between a birth date and `now` (UTC). Day defaults to month end. */
+export function ageFrom({ year, month, day = null }, now = new Date()) {
+  const y = Number(year); const m = Number(month);
+  if (!Number.isInteger(y) || !Number.isInteger(m)) return null;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const d = day == null ? lastDay : Number(day);
+  let age = now.getUTCFullYear() - y;
+  const beforeBirthday = now.getUTCMonth() + 1 < m
+    || (now.getUTCMonth() + 1 === m && now.getUTCDate() < d);
+  if (beforeBirthday) age -= 1;
+  return age;
+}
+
+/**
+ * Validate a date of birth. Throws INVALID_BIRTHDATE for impossible dates and
+ * AGE_TOO_YOUNG under 13. Returns `{ year, month, age }` — never the day.
+ */
+export function checkBirthdate({ year, month, day }, now = new Date()) {
+  const y = Number(year); const m = Number(month); const d = Number(day);
+  const valid = Number.isInteger(y) && Number.isInteger(m) && Number.isInteger(d)
+    && y >= now.getUTCFullYear() - 120 && y <= now.getUTCFullYear()
+    && m >= 1 && m <= 12 && d >= 1 && d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (!valid) throw new ApiError('That date of birth is not valid', { code: 'INVALID_BIRTHDATE' });
+  const age = ageFrom({ year: y, month: m, day: d }, now);
+  if (age < 0) throw new ApiError('That date of birth is not valid', { code: 'INVALID_BIRTHDATE' });
+  if (age < MINIMUM_AGE) {
+    throw new ApiError(`You need to be at least ${MINIMUM_AGE} to use this service`,
+      { status: 403, code: 'AGE_TOO_YOUNG' });
+  }
+  return { year: y, month: m, age };
+}
+
+/** 'minor' | 'adult' | 'unknown' for a user row carrying birth_year / birth_month. */
+export function ageGroupOf(row, now = new Date()) {
+  if (!row || row.birth_year == null || row.birth_month == null) return 'unknown';
+  const age = ageFrom({ year: row.birth_year, month: row.birth_month }, now);
+  if (age == null) return 'unknown';
+  return age < ADULT_AGE ? 'minor' : 'adult';
+}
+
+export async function getAgeGroup(userId) {
+  const row = await getQuery(`SELECT birth_year, birth_month FROM users WHERE id = ?`, [userId]);
+  return ageGroupOf(row);
+}
+
+/**
+ * Teen defaults (Discord's Teen Safety defaults, stricter where it costs
+ * nothing): only friends can DM, other DMs wait as message requests, every
+ * DM image is scanned, and friend requests need a friend in common. They are
+ * defaults — stored choices still win — and are written once when an
+ * account is found to be under 18.
+ */
+export const MINOR_PRIVACY_DEFAULTS = Object.freeze({
+  allowDmsFrom: 'friends',
+  allowServerMemberDms: false,
+  messageRequests: true,
+  dmScanning: 'everyone',
+  friendRequests: 'friends_of_friends'
+});
+
+/** Persist the teen defaults over whatever the account had. */
+export async function applyMinorDefaults(userId) {
+  return updateCategory(userId, 'privacy', { ...MINOR_PRIVACY_DEFAULTS });
+}
+
+async function defaultsFor(userId, category) {
+  if (category !== 'privacy') return SETTING_DEFAULTS[category];
+  return (await getAgeGroup(userId)) === 'minor'
+    ? { ...SETTING_DEFAULTS.privacy, ...MINOR_PRIVACY_DEFAULTS }
+    : SETTING_DEFAULTS.privacy;
+}
+
 function parse(json, fallback) {
   if (!json) return fallback;
   try { return JSON.parse(json); } catch { return fallback; }
 }
+
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
 /**
  * Merge one level deep: a category is a flat object except for
  * `notifications.sounds`, which callers patch a key at a time.
  */
 function merge(base, patch) {
-  const out = { ...base };
-  for (const [key, value] of Object.entries(patch ?? {})) {
-    if (value && typeof value === 'object' && !Array.isArray(value)
-        && base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) {
-      out[key] = { ...base[key], ...value };
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
+  // Built with Object.fromEntries rather than `out[key] = …`: a JSON body can
+  // carry an own "__proto__" key, and assigning that would swap the merged
+  // object's prototype instead of storing a setting. Such keys are dropped.
+  const entries = Object.entries(patch ?? {})
+    .filter(([key]) => key !== '__proto__' && key !== 'constructor' && key !== 'prototype')
+    .map(([key, value]) => [key,
+      isPlainObject(value) && Object.hasOwn(base, key) && isPlainObject(base[key])
+        ? { ...base[key], ...value }
+        : value]);
+  return { ...base, ...Object.fromEntries(entries) };
 }
 
 /** Everything, defaults filled in for anything never saved. */
@@ -179,7 +284,8 @@ export async function getAll(userId) {
   const stored = new Map(rows.map((r) => [r.category, parse(r.data, {})]));
   const result = {};
   for (const category of CATEGORIES) {
-    result[category] = merge(SETTING_DEFAULTS[category], stored.get(category) ?? {});
+    const defaults = category === 'privacy' ? await defaultsFor(userId, category) : SETTING_DEFAULTS[category];
+    result[category] = merge(defaults, stored.get(category) ?? {});
   }
   return result;
 }
@@ -189,7 +295,7 @@ export async function getCategory(userId, category) {
   const row = await getQuery(
     `SELECT data FROM user_settings WHERE user_id = ? AND category = ?`, [userId, category]
   );
-  return merge(SETTING_DEFAULTS[category], parse(row?.data, {}));
+  return merge(await defaultsFor(userId, category), parse(row?.data, {}));
 }
 
 /** Merge a patch into one category and return the category's full new value. */
@@ -207,7 +313,7 @@ export async function updateCategory(userId, category, patch) {
      VALUES (?, ?, ?)
      ON CONFLICT(user_id, category) DO UPDATE SET
        data = excluded.data,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+       updated_at = ${sql.now}`,
     [userId, category, JSON.stringify(next)]
   );
   return next;
@@ -218,14 +324,20 @@ export async function resetCategory(userId, category) {
   await runQuery(
     `DELETE FROM user_settings WHERE user_id = ? AND category = ?`, [userId, category]
   );
-  return { ...SETTING_DEFAULTS[category] };
+  return { ...(await defaultsFor(userId, category)) };
 }
 
 // --- validation --------------------------------------------------------------
 
 const ENUMS = {
   'appearance.theme': ['light', 'dark', 'ash', 'onyx', 'system'],
+  'appearance.systemLightTheme': ['light', 'ash'],
+  'appearance.systemDarkTheme': ['ash', 'dark', 'onyx'],
   'appearance.uiDensity': ['compact', 'default', 'spacious'],
+  'appearance.radius': ['sharp', 'default', 'round'],
+  'appearance.uiFont': ['inter', 'system', 'atkinson', 'opendyslexic'],
+  'appearance.seasonal': ['auto', 'off'],
+  'appearance.soundPack': ['classic', 'soft', 'retro', 'glass'],
   'appearance.messageDisplay': ['cozy', 'compact'],
   'accessibility.roleColors': ['names', 'dots', 'off'],
   'accessibility.stickerAnimation': ['always', 'interaction', 'never'],
@@ -239,7 +351,10 @@ const ENUMS = {
 
 const RANGES = {
   'appearance.zoom': [50, 200],
-  'appearance.chatFontScale': [80, 160],
+  'appearance.chatFontScale': [75, 150],
+  'appearance.chatLineHeight': [1.2, 2.2],
+  'appearance.letterSpacing': [0, 0.2],
+  'appearance.wordSpacing': [0, 0.3],
   'appearance.messageGroupSpacing': [0, 48],
   'accessibility.saturation': [0, 100],
   'accessibility.ttsRate': [0.1, 4],
@@ -276,7 +391,67 @@ function validate(category, value) {
     if (typeof raw === 'string' && raw.length > 200) out[key] = raw.slice(0, 200);
   }
   if (category === 'layout') validateLayout(out);
+  if (category === 'appearance') validateAppearanceThemes(out);
   return out;
+}
+
+// --- gradient and custom themes ----------------------------------------------
+//
+// Mirrors src/theme/schema.js and src/theme/presets.js (the server does not
+// ship src/; scripts/test-themes-71.mjs checks the two agree). A theme is
+// data — base, #rrggbb stops, angle, intensity — never CSS, and anything
+// else is rejected outright rather than cleaned up, so a malformed import
+// fails loudly instead of being stored half-understood.
+
+export const GRADIENT_PRESET_IDS = [
+  'tidepool', 'ember-dusk', 'deep-orchard', 'ultraviolet', 'night-market', 'graphite-rose',
+  'monsoon', 'peach-soda', 'matcha-milk', 'paper-lantern', 'glacier', 'lilac-hour'
+];
+export const MAX_CUSTOM_THEMES = 10;
+const THEME_KEYS = ['id', 'name', 'base', 'stops', 'angle', 'intensity'];
+const HEX6 = /^#[0-9a-fA-F]{6}$/;
+const BAD_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+
+function invalidTheme(why) {
+  return new ApiError(`appearance.customThemes: ${why}`, { code: 'INVALID_SETTING' });
+}
+
+/** Throws INVALID_SETTING for anything that is not a well-formed theme list. */
+export function validateCustomThemes(list) {
+  if (!Array.isArray(list)) throw invalidTheme('must be an array');
+  if (list.length > MAX_CUSTOM_THEMES) throw invalidTheme(`at most ${MAX_CUSTOM_THEMES} themes`);
+  const seen = new Set();
+  return list.map((theme, index) => {
+    if (!isPlainObject(theme) || Object.getPrototypeOf(theme) !== Object.prototype) throw invalidTheme(`[${index}] must be an object`);
+    for (const key of Object.keys(theme)) {
+      if (!THEME_KEYS.includes(key)) throw invalidTheme(`[${index}] unknown key ${key}`);
+    }
+    const { id, name, base, stops, angle, intensity } = theme;
+    if (typeof id !== 'string' || !/^[a-z0-9]{4,16}$/.test(id) || seen.has(id)) throw invalidTheme(`[${index}].id`);
+    seen.add(id);
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed || trimmed.length > 32 || BAD_NAME_CHARS.test(trimmed)) throw invalidTheme(`[${index}].name`);
+    if (base !== 'light' && base !== 'dark') throw invalidTheme(`[${index}].base`);
+    if (!Array.isArray(stops) || stops.length < 1 || stops.length > 5 || !stops.every((c) => typeof c === 'string' && HEX6.test(c))) {
+      throw invalidTheme(`[${index}].stops`);
+    }
+    if (!Number.isInteger(angle) || angle < 0 || angle > 360) throw invalidTheme(`[${index}].angle`);
+    if (!Number.isInteger(intensity) || intensity < 0 || intensity > 100) throw invalidTheme(`[${index}].intensity`);
+    return { id, name: trimmed, base, stops: stops.map((c) => c.toLowerCase()), angle, intensity };
+  });
+}
+
+function validateAppearanceThemes(out) {
+  if ('customThemes' in out) out.customThemes = validateCustomThemes(out.customThemes);
+  if ('gradient' in out) {
+    const choice = out.gradient;
+    const custom = typeof choice === 'string' && /^custom:([a-z0-9]{4,16})$/.exec(choice);
+    const ok = choice === 'none' || GRADIENT_PRESET_IDS.includes(choice)
+      || (custom && (out.customThemes ?? []).some((t) => t.id === custom[1]));
+    if (!ok) {
+      throw new ApiError('appearance.gradient must be none, a preset or one of your custom themes', { code: 'INVALID_SETTING' });
+    }
+  }
 }
 
 /** Folders and order are arrays of ids; bound them so one row cannot bloat. */

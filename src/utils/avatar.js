@@ -1,3 +1,5 @@
+import { proxiedImageUrl } from './media';
+
 // A default avatar that costs no network request and cannot 404: Discord's
 // blurple circle with a neutral figure, inlined as an SVG data URI.
 const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
@@ -8,7 +10,94 @@ const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
 
 export const DEFAULT_AVATAR = `data:image/svg+xml;utf8,${encodeURIComponent(SVG)}`;
 
-/** Avatar for a user-ish object, falling back to the inline default. */
+// Discord gives avatar-less users one of a handful of colours, derived from
+// the account, so two people without a picture are still told apart.
+const PALETTE = ['#5865f2', '#757e8a', '#3ba55c', '#faa61a', '#ed4245', '#eb459f'];
+const coloured = new Map();
+
+/** The default avatar in this user's colour (stable per id). */
+export function defaultAvatar(seed) {
+  if (seed === undefined || seed === null || seed === '') return DEFAULT_AVATAR;
+  const key = String(seed);
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  const colour = PALETTE[hash % PALETTE.length];
+  if (!coloured.has(colour)) {
+    coloured.set(colour, `data:image/svg+xml;utf8,${encodeURIComponent(SVG.replace('#5865f2', colour))}`);
+  }
+  return coloured.get(colour);
+}
+
+/** Avatar for a user-ish object, falling back to its coloured default. */
 export function avatarOf(entity) {
-  return entity?.avatar_url || entity?.member_avatar_url || DEFAULT_AVATAR;
+  const own = entity?.avatar_url || entity?.member_avatar_url;
+  return (own && proxiedImageUrl(own))
+    || defaultAvatar(entity?.user_id ?? entity?.userId ?? entity?.id);
+}
+
+// Placeholder icons the backend used to generate on a third-party service.
+// Loading them leaks the server name to that service and breaks offline, and
+// the initials tile we draw ourselves carries the same information.
+const GENERATED_ICON_HOSTS = /^https?:\/\/api\.dicebear\.com\//i;
+
+/** A server's own icon URL, or null when it has none worth loading. */
+export function serverIconOf(server) {
+  const url = server?.icon_url;
+  if (!url || GENERATED_ICON_HOSTS.test(url)) return null;
+  // The backend may already hand us the proxied form of a generated icon.
+  if (url.startsWith('/api/media/proxy?url=')) {
+    try {
+      if (GENERATED_ICON_HOSTS.test(decodeURIComponent(url.slice('/api/media/proxy?url='.length)))) return null;
+    } catch { /* malformed: fall through and let onError handle it */ }
+  }
+  return proxiedImageUrl(url);
+}
+
+// Thai is written with vowels that come BEFORE the consonant they follow in
+// speech (เ แ โ ใ ไ), and with tone marks and vowels stacked above/below it.
+// An initial must be the base consonant alone: "ไรเดอร์" → "ร", not "ไ", and
+// "บ้าน" → "บ", not "บ้" with a floating tone mark.
+const THAI_LEADING_VOWEL = /^[เ-ไ]$/u;
+const COMBINING = /[\p{M}ัิ-ฺ็-๎]/gu;
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+
+let segmenter = null;
+function graphemes(text) {
+  try {
+    segmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    return Array.from(segmenter.segment(text), (s) => s.segment);
+  } catch {
+    return Array.from(text);
+  }
+}
+
+/** The initial of one word: its first letter/number, script-aware. */
+function wordInitial(word) {
+  const parts = graphemes(word);
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (THAI_LEADING_VOWEL.test(part)) continue;
+    if (/^[฀-๿]/u.test(part)) {
+      const base = part.replace(COMBINING, '');
+      if (base) return base;
+      continue;
+    }
+    if (/[\p{L}\p{N}]/u.test(part)) return part;
+  }
+  return '';
+}
+
+/**
+ * Discord's acronym for an icon-less guild: the first letter of each word,
+ * up to three. Script-aware (Thai base consonants, whole graphemes for
+ * Devanagari/Korean/emoji), and a name with an emoji in it uses the emoji —
+ * "บ้านเรา 🏠" is more recognisable as 🏠 than as "บ".
+ */
+export function serverInitials(name = '') {
+  const text = String(name ?? '').trim();
+  if (!text) return '?';
+  const emoji = graphemes(text).find((g) => PICTOGRAPH.test(g));
+  if (emoji) return emoji;
+  const letters = text.split(/\s+/u).filter(Boolean).map(wordInitial).filter(Boolean);
+  return (letters.slice(0, 3).join('') || '?').toLocaleUpperCase();
 }

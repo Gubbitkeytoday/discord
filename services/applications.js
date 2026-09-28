@@ -15,7 +15,7 @@
 // ============================================================================
 
 import crypto from 'crypto';
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission, writeAuditLog } from './guilds.js';
@@ -183,12 +183,12 @@ export async function deleteApplication({ applicationId, userId }) {
   const app = await assertOwner(applicationId, userId);
   await transaction(async () => {
     await runQuery(
-      `UPDATE applications SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), token_hash = ? WHERE id = ?`,
+      `UPDATE applications SET deleted_at = ${sql.now}, token_hash = ? WHERE id = ?`,
       [`revoked:${generateId()}`, applicationId]
     );
     // The bot leaves every server; its messages stay, as a person's would.
     await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE user_id = ? AND left_at IS NULL`,
+      `UPDATE server_members SET left_at = ${sql.now} WHERE user_id = ? AND left_at IS NULL`,
       [app.bot_user_id]
     );
     await runQuery(`DELETE FROM roles WHERE managed = 1 AND name = ?`, [app.name]);
@@ -232,7 +232,7 @@ export async function inviteBot({ applicationId, serverId, userId, permissionNam
   const roleId = generateId();
   await transaction(async () => {
     const { maxPos } = await getQuery(
-      `SELECT COALESCE(MAX(position), 0) AS maxPos FROM roles WHERE server_id = ?`, [serverId]
+      `SELECT COALESCE(MAX(position), 0) AS "maxPos" FROM roles WHERE server_id = ?`, [serverId]
     );
     await runQuery(
       `INSERT INTO roles (id, server_id, name, position, permissions, managed, mentionable)
@@ -245,11 +245,11 @@ export async function inviteBot({ applicationId, serverId, userId, permissionNam
       [serverId, app.bot_user_id]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)`,
+      `INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [serverId, app.bot_user_id, serverId]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)`,
+      `INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [serverId, app.bot_user_id, roleId]
     );
     await runQuery(
@@ -258,7 +258,7 @@ export async function inviteBot({ applicationId, serverId, userId, permissionNam
        ) WHERE id = ?`, [serverId, serverId]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO server_settings (user_id, server_id) VALUES (?, ?)`, [app.bot_user_id, serverId]
+      `INSERT INTO server_settings (user_id, server_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [app.bot_user_id, serverId]
     );
   });
   await writeAuditLog({
@@ -274,7 +274,7 @@ export async function removeBot({ applicationId, serverId, userId }) {
   await assertPermission({ userId, serverId, permission: 'MANAGE_GUILD' });
   await transaction(async () => {
     await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      `UPDATE server_members SET left_at = ${sql.now}
         WHERE server_id = ? AND user_id = ?`, [serverId, app.bot_user_id]
     );
     await runQuery(
@@ -678,7 +678,7 @@ export async function claimInteraction({ interactionId, token, applicationId }) 
 
 export async function markResponded(interactionId) {
   await runQuery(
-    `UPDATE interactions SET responded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [interactionId]
+    `UPDATE interactions SET responded_at = ${sql.now} WHERE id = ?`, [interactionId]
   );
 }
 

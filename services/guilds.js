@@ -8,15 +8,47 @@
 //  the data model underneath is the real one.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import crypto from 'crypto';
+
+import { runQuery, getQuery, allQuery, transaction, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
+import { normaliseColor } from '../lib/validate.js';
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
+import { publicStatus, maskStatus } from '../lib/presence.js'; // safety: invisible → offline
 import {
   DEFAULT_PERMISSIONS, PERMISSIONS, has, toBigInt,
   computeBasePermissions, computeChannelPermissions, applyTimeout, isActiveTimeout
 } from '../lib/permissions.js';
+import { defaultChannelNames } from './admin/defaults.js';
+import { maskExpiredStatus } from './profiles.js';
 
-const DEFAULT_CATEGORY_NAMES = { text: 'TEXT CHANNELS', voice: 'VOICE CHANNELS' };
+/**
+ * Raid protection is on for every new server, as Discord's is: a flood of
+ * joins turns membership screening on (newcomers can read but not post until
+ * they accept the rules) and alerts the moderators. It never locks real
+ * people out on its own; "Lock now" stays a moderator's decision.
+ */
+export const NEW_SERVER_RAID_DEFAULTS = Object.freeze({
+  raid_protection: 1, raid_join_threshold: 20, raid_join_window_secs: 60, raid_action: 'screen'
+});
+
+export async function applyNewServerSafetyDefaults(serverId) {
+  const d = NEW_SERVER_RAID_DEFAULTS;
+  await runQuery(
+    `UPDATE servers SET raid_protection = ?, raid_join_threshold = ?, raid_join_window_secs = ?, raid_action = ?
+      WHERE id = ?`,
+    [d.raid_protection, d.raid_join_threshold, d.raid_join_window_secs, d.raid_action, serverId]
+  );
+}
+
+/** Do two overwrite lists grant exactly the same thing? */
+function sameOverwrites(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  const key = (o) => `${o.target_type}:${o.target_id}:${toBigInt(o.allow)}:${toBigInt(o.deny)}`;
+  const set = new Set(a.map(key));
+  return b.every((o) => set.has(key(o)));
+}
 
 // --- permissions -------------------------------------------------------------
 
@@ -139,7 +171,7 @@ export async function getInitialData(userId) {
   // Friends, from either direction of the relation.
   const friends = await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
-            u.status, u.custom_status, u.bio,
+            u.status, u.custom_status, u.custom_status_expires_at, u.bio,
             f.status AS friend_status, f.requested_by, f.id AS request_id, f.nickname AS friend_nickname,
             CASE WHEN f.requested_by = ? THEN 'outgoing' ELSE 'incoming' END AS direction
        FROM friends f
@@ -148,7 +180,7 @@ export async function getInitialData(userId) {
         AND u.deleted_at IS NULL
         AND f.status != 'declined'`,
     [userId, userId, userId, userId]
-  );
+  ).then((rows) => rows.map((row) => maskStatus(maskExpiredStatus(row), userId)));
 
   const dms = await listDirectMessageChannels(userId);
   const unread = await allQuery(
@@ -228,33 +260,58 @@ export async function getServerDetail(serverId, viewerId = null) {
       .map((row) => row.channel_id)
   );
 
+  // "Synced with category": a child whose overwrites equal its category's,
+  // exactly as Discord decides it. Only computed when there are categories.
+  const overwritesOf = new Map();
+  if (categoryNames.size) {
+    const rows = await allQuery(
+      `SELECT channel_id, target_type, target_id, allow, deny FROM channel_overwrites
+        WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ? AND deleted_at IS NULL)`,
+      [serverId]
+    );
+    for (const o of rows) {
+      if (!overwritesOf.has(o.channel_id)) overwritesOf.set(o.channel_id, []);
+      overwritesOf.get(o.channel_id).push(o);
+    }
+  }
+
   const channels = allChannels
     .filter((c) => c.type !== 'category' && c.type !== 'thread')
     .map((c) => ({
       ...c,
       is_private: privateChannelIds.has(c.id),
-      // Derived compatibility field for the sidebar's grouping.
-      category: categoryNames.get(c.parent_id)
-        ?? DEFAULT_CATEGORY_NAMES[c.type]
-        ?? 'TEXT CHANNELS'
+      // Derived compatibility field for the sidebar's grouping. A channel
+      // outside any category has none (Discord lists those first, headerless).
+      category: categoryNames.get(c.parent_id) ?? null,
+      permissions_synced: categoryNames.has(c.parent_id)
+        ? sameOverwrites(overwritesOf.get(c.id), overwritesOf.get(c.parent_id))
+        : null
     }));
 
   const categories = allChannels
     .filter((c) => c.type === 'category')
-    .map((c) => ({ id: c.id, name: c.name, position: c.position }));
+    .map((c) => ({
+      id: c.id, name: c.name, position: c.position,
+      is_private: privateChannelIds.has(c.id)
+    }));
 
-  const memberRows = await allQuery(
+  // No bio here: a member list is seen by every member, and a bio set to
+  // "friends only" must not leak through it (the profile endpoint applies
+  // visibility). Status goes through publicStatus: "invisible" is shown as
+  // offline to everyone but its owner.
+  const memberRows = (await allQuery(
     `SELECT u.id, u.username, u.discriminator, u.display_name, u.avatar_url,
-            u.status, u.custom_status, u.bio, u.is_bot,
+            u.status, u.custom_status, u.custom_status_expires_at, u.is_bot,
             sm.nickname, sm.avatar_url AS member_avatar_url, sm.joined_at, sm.timeout_until
        FROM server_members sm
        JOIN users u ON u.id = sm.user_id
       WHERE sm.server_id = ? AND sm.left_at IS NULL AND u.deleted_at IS NULL`,
     [serverId]
-  );
+  )).map((m) => ({ ...maskExpiredStatus(m), status: publicStatus(m.status, viewerId, m.id) }));
 
   const roleRows = await allQuery(
-    `SELECT mr.user_id, r.id, r.name, r.color, r.position, r.permissions, r.hoist, r.managed, r.icon_url
+    `SELECT mr.user_id, r.id, r.name, r.color, r.color_secondary, r.position, r.permissions, r.hoist, r.managed, r.icon_url,
+            r.style, r.gradient_angle, r.unicode_emoji
        FROM member_roles mr JOIN roles r ON r.id = mr.role_id
       WHERE mr.server_id = ?
       ORDER BY r.position DESC`,
@@ -275,9 +332,10 @@ export async function getServerDetail(serverId, viewerId = null) {
       ...m,
       display_name: m.nickname || m.display_name,
       avatar_url: m.member_avatar_url || m.avatar_url,
-      roles: roles.map(({ id, name, color, color_secondary, position, hoist, icon_url }) => ({
+      roles: roles.map(({ id, name, color, color_secondary, position, hoist, icon_url, style, gradient_angle, unicode_emoji }) => ({
         id, name, color, color_secondary: color_secondary ?? null,
-        position, hoist: Boolean(hoist), icon_url: icon_url ?? null
+        position, hoist: Boolean(hoist), icon_url: icon_url ?? null,
+        style: style ?? 'solid', gradient_angle: gradient_angle ?? 90, unicode_emoji: unicode_emoji ?? null
       })),
       role_color: topColoured?.color ?? null,
       // Present only when that role has a second colour: the name renders as a
@@ -308,20 +366,59 @@ export async function getServerDetail(serverId, viewerId = null) {
   const hasOnboarding = Boolean(server.screening_enabled) || Boolean(server.welcome_enabled)
     || Boolean(await getQuery(`SELECT 1 FROM onboarding_prompts WHERE server_id = ? LIMIT 1`, [serverId]));
 
+  // Who is in each voice channel the viewer can see, so the sidebar can list
+  // occupants under every voice channel (kept live by `voice_roster`).
+  const voiceChannelIds = new Set(channels.filter((c) => c.type === 'voice' || c.type === 'stage').map((c) => c.id));
+  const voiceStates = {};
+  if (voiceChannelIds.size) {
+    const rows = await allQuery(
+      `SELECT vs.channel_id, vs.user_id AS "userId", vs.self_mute, vs.self_deaf, vs.self_video, vs.self_stream,
+              vs.server_mute, vs.server_deaf, vs.suppress,
+              COALESCE(sm.nickname, u.display_name, u.username) AS username,
+              COALESCE(sm.avatar_url, u.avatar_url) AS avatar_url
+         FROM voice_states vs
+         JOIN users u ON u.id = vs.user_id
+         LEFT JOIN server_members sm ON sm.server_id = vs.server_id AND sm.user_id = vs.user_id
+        WHERE vs.server_id = ?
+        ORDER BY vs.joined_at ASC`,
+      [serverId]
+    );
+    for (const r of rows) {
+      if (!voiceChannelIds.has(r.channel_id)) continue;
+      (voiceStates[r.channel_id] ??= []).push({
+        userId: r.userId, username: r.username, avatar_url: r.avatar_url ?? null,
+        isMuted: Boolean(r.self_mute), isDeafened: Boolean(r.self_deaf),
+        isVideo: Boolean(r.self_video), isStreaming: Boolean(r.self_stream),
+        isServerMuted: Boolean(r.server_mute), isServerDeafened: Boolean(r.server_deaf),
+        isSuppressed: Boolean(r.suppress)
+      });
+    }
+  }
+
   return {
     server, channels, categories, members, roles, emojis, viewerPermissions,
-    viewer_pending: onboardingRequired, has_onboarding: hasOnboarding
+    viewer_pending: onboardingRequired, has_onboarding: hasOnboarding,
+    voice_states: voiceStates
   };
 }
 
 // --- writes ------------------------------------------------------------------
 
-export async function createServer({ name, iconUrl = null, iconFileId = null, ownerId }) {
+export async function createServer({ name, iconUrl = null, iconFileId = null, ownerId, locale = null }) {
   const trimmed = String(name ?? '').trim();
   if (!trimmed) throw new ApiError('Server name is required', { code: 'INVALID_NAME' });
+  // The first category and channel names follow the creator's language: the
+  // one the client sent, else the one saved on the account.
+  let lang = locale;
+  if (!lang && ownerId) {
+    lang = (await getQuery(`SELECT locale FROM users WHERE id = ?`, [ownerId]))?.locale ?? null;
+  }
+  const names = defaultChannelNames(lang, { trustDefault: Boolean(locale) });
 
   const serverId = generateId();
-  const icon = iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`;
+  // Remote icons (including the generated default) are served through the
+  // same-origin image proxy.
+  const icon = proxiedImageUrl(iconUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(trimmed)}`);
 
   await transaction(async () => {
     await runQuery(
@@ -353,16 +450,28 @@ export async function createServer({ name, iconUrl = null, iconFileId = null, ow
     const generalText   = generateId();
     const generalVoice  = generateId();
 
-    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, 'TEXT CHANNELS', 'category', 0)`, [textCategory, serverId]);
-    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position) VALUES (?, ?, ?, 'general', 'text', 1)`, [generalText, serverId, textCategory]);
-    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, 'VOICE CHANNELS', 'category', 2)`, [voiceCategory, serverId]);
-    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position, bitrate) VALUES (?, ?, ?, 'General Voice', 'voice', 3, 64000)`, [generalVoice, serverId, voiceCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', 0)`, [textCategory, serverId, names.textCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position) VALUES (?, ?, ?, ?, 'text', 1)`, [generalText, serverId, textCategory, names.general]);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', 2)`, [voiceCategory, serverId, names.voiceCategory]);
+    await runQuery(`INSERT INTO channels (id, server_id, parent_id, name, type, position, bitrate) VALUES (?, ?, ?, ?, 'voice', 3, 64000)`, [generalVoice, serverId, voiceCategory, names.generalVoice]);
 
     await runQuery(`UPDATE servers SET system_channel_id = ? WHERE id = ?`, [generalText, serverId]);
+    await applyNewServerSafetyDefaults(serverId);
     await writeAuditLog({ serverId, userId: ownerId, actionType: 'SERVER_CREATE', targetId: serverId });
   });
 
   return getQuery(`SELECT * FROM servers WHERE id = ?`, [serverId]);
+}
+
+/** A parent must be a live category of the same server. */
+async function assertCategoryOf(serverId, parentId) {
+  const parent = await getQuery(
+    `SELECT 1 FROM channels WHERE id = ? AND server_id = ? AND type = 'category' AND deleted_at IS NULL`,
+    [parentId, serverId]
+  );
+  if (!parent) {
+    throw new ApiError('A channel can only be moved into a category of this server', { code: 'INVALID_PARENT' });
+  }
 }
 
 export async function createChannel({
@@ -381,10 +490,13 @@ export async function createChannel({
 
   // Text-ish channel names are slugs; voice, category and forum names are not.
   const finalName = ['text', 'announcement', 'forum'].includes(type)
-    ? trimmed.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '')
+    ? trimmed.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '')
     : trimmed;
 
-  let resolvedParent = parentId;
+  let resolvedParent = type === 'category' ? null : parentId;
+  if (type === 'category') categoryName = null;
+  if (resolvedParent) await assertCategoryOf(serverId, resolvedParent);
+  if (typeof categoryName === 'string') categoryName = categoryName.trim().slice(0, 100) || null;
   if (!resolvedParent && categoryName) {
     const existing = await getQuery(
       `SELECT id FROM channels WHERE server_id = ? AND type = 'category' AND name = ? AND deleted_at IS NULL`,
@@ -395,7 +507,7 @@ export async function createChannel({
     } else {
       resolvedParent = generateId();
       const { maxPos } = await getQuery(
-        `SELECT COALESCE(MAX(position), -1) AS maxPos FROM channels WHERE server_id = ?`, [serverId]
+        `SELECT COALESCE(MAX(position), -1) AS "maxPos" FROM channels WHERE server_id = ?`, [serverId]
       );
       await runQuery(
         `INSERT INTO channels (id, server_id, name, type, position) VALUES (?, ?, ?, 'category', ?)`,
@@ -405,7 +517,7 @@ export async function createChannel({
   }
 
   const { maxPos } = await getQuery(
-    `SELECT COALESCE(MAX(position), -1) AS maxPos FROM channels WHERE server_id = ?`, [serverId]
+    `SELECT COALESCE(MAX(position), -1) AS "maxPos" FROM channels WHERE server_id = ?`, [serverId]
   );
   const channelId = generateId();
 
@@ -422,7 +534,7 @@ export async function createChannel({
     ? await getQuery(`SELECT name FROM channels WHERE id = ?`, [resolvedParent])
     : null;
 
-  return { ...channel, category: category?.name ?? DEFAULT_CATEGORY_NAMES[type] ?? 'TEXT CHANNELS' };
+  return { ...channel, category: category?.name ?? null, is_private: false };
 }
 
 export async function updateChannel({ channelId, patch, userId }) {
@@ -455,11 +567,17 @@ export async function updateChannel({ channelId, patch, userId }) {
       value = String(value).trim();
       if (!value) throw new ApiError('Channel name is required', { code: 'INVALID_NAME' });
       if (['text', 'announcement', 'forum'].includes(channel.type)) {
-        value = value.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '');
+        value = value.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{M}\p{N}_-]/gu, '');
       }
       value = value.slice(0, 100);
     }
     if (key === 'topic') value = value === null ? null : String(value).slice(0, 1024);
+    if (key === 'parent_id' && value !== null) {
+      if (channel.type === 'thread' || channel.type === 'category' || !channel.server_id) {
+        throw new ApiError('This channel cannot be re-parented', { code: 'INVALID_PARENT' });
+      }
+      await assertCategoryOf(channel.server_id, value);
+    }
     if (key === 'rate_limit_per_user') value = Math.max(0, Math.min(21600, Number(value) || 0));
     if (key === 'user_limit') value = Math.max(0, Math.min(99, Number(value) || 0));
     if (['nsfw', 'spoiler', 'locked', 'archived'].includes(key)) value = value ? 1 : 0;
@@ -467,7 +585,7 @@ export async function updateChannel({ channelId, patch, userId }) {
   }
   if (!sets.length) return channel;
 
-  sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+  sets.push(`updated_at = ${sql.now}`);
   params.push(channelId);
   await runQuery(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`, params);
 
@@ -482,7 +600,7 @@ export async function updateChannel({ channelId, patch, userId }) {
   const category = updated.parent_id
     ? await getQuery(`SELECT name FROM channels WHERE id = ? AND type = 'category'`, [updated.parent_id])
     : null;
-  return { ...updated, category: category?.name ?? DEFAULT_CATEGORY_NAMES[updated.type] ?? (updated.type === 'thread' ? null : 'TEXT CHANNELS') };
+  return { ...updated, category: category?.name ?? null };
 }
 
 export async function deleteChannel({ channelId, userId }) {
@@ -497,14 +615,23 @@ export async function deleteChannel({ channelId, userId }) {
       await assertPermission({ userId, serverId: channel.server_id, channelId, permission: 'MANAGE_CHANNELS' });
     }
   }
+  // Deleting a category keeps its channels, as on Discord: they move out to
+  // the top level (and keep their own permission overwrites).
+  if (channel.type === 'category') {
+    await runQuery(
+      `UPDATE channels SET parent_id = NULL, updated_at = ${sql.now}
+        WHERE parent_id = ? AND type != 'thread' AND deleted_at IS NULL`,
+      [channelId]
+    );
+  }
   // Threads die with their parent, as on Discord.
   await runQuery(
-    `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    `UPDATE channels SET deleted_at = ${sql.now}
       WHERE parent_id = ? AND type = 'thread' AND deleted_at IS NULL`,
     [channelId]
   );
   await runQuery(
-    `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+    `UPDATE channels SET deleted_at = ${sql.now} WHERE id = ?`,
     [channelId]
   );
   if (channel.server_id) {
@@ -557,7 +684,11 @@ export async function assertVerificationLevel(serverId, userId) {
   }
 }
 
-export async function joinServer({ serverId, userId }) {
+/**
+ * `claim` (optional) runs first inside the membership transaction — the
+ * invite-use counter — so it commits or rolls back with the join itself.
+ */
+export async function joinServer({ serverId, userId, claim = null }) {
   const banned = await getQuery(
     `SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?`, [serverId, userId]
   );
@@ -568,41 +699,41 @@ export async function joinServer({ serverId, userId }) {
   const { guardJoin } = await import('./insights.js');
   await guardJoin(serverId);
 
-  const existing = await getQuery(
-    `SELECT * FROM server_members WHERE server_id = ? AND user_id = ?`, [serverId, userId]
-  );
-
+  // READ COMMITTED, with every write atomic on its own: a burst of people
+  // accepting the same invite must not serialise on (and fail over) the
+  // guild row. The invite claim is a conditional UPDATE and the member count
+  // moves by exactly the rows this join changed, so no read-then-write is left.
   await transaction(async () => {
-    if (existing) {
-      await runQuery(
-        `UPDATE server_members SET left_at = NULL, joined_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          WHERE server_id = ? AND user_id = ?`,
-        [serverId, userId]
-      );
-    } else {
-      await runQuery(`INSERT INTO server_members (server_id, user_id) VALUES (?, ?)`, [serverId, userId]);
-    }
-    // Membership screening: the new member is pending until they accept the
-    // rules / finish onboarding. Rejoining members are screened again.
-    const gate = await getQuery(`SELECT screening_enabled FROM servers WHERE id = ?`, [serverId]);
-    await runQuery(
-      `UPDATE server_members SET pending = ? WHERE server_id = ? AND user_id = ?`,
-      [gate?.screening_enabled ? 1 : 0, serverId, userId]
+    if (claim) await claim();
+    // One statement for join and re-join, so two concurrent joins by the same
+    // person cannot both take the INSERT path and collide on the primary key.
+    // It changes a row only when the person was not already an active member.
+    const joined = await runQuery(
+      `INSERT INTO server_members (server_id, user_id) VALUES (?, ?)
+       ON CONFLICT (server_id, user_id) DO UPDATE SET left_at = NULL, joined_at = ${sql.now}
+       WHERE server_members.left_at IS NOT NULL`,
+      [serverId, userId]
     );
+    const isNew = Number(joined?.changes ?? 0) > 0;
+    // Membership screening: the new member is pending until they accept the
+    // rules / finish onboarding. Rejoining members are screened again; an
+    // active member following another invite keeps their state.
+    if (isNew) {
+      const gate = await getQuery(`SELECT screening_enabled FROM servers WHERE id = ?`, [serverId]);
+      await runQuery(
+        `UPDATE server_members SET pending = ? WHERE server_id = ? AND user_id = ?`,
+        [gate?.screening_enabled ? 1 : 0, serverId, userId]
+      );
+      await runQuery(`UPDATE servers SET member_count = member_count + 1 WHERE id = ?`, [serverId]);
+    }
     await runQuery(
-      `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?)`,
+      `INSERT INTO member_roles (server_id, user_id, role_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [serverId, userId, serverId]
     );
     await runQuery(
-      `INSERT OR IGNORE INTO server_settings (user_id, server_id) VALUES (?, ?)`, [userId, serverId]
+      `INSERT INTO server_settings (user_id, server_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [userId, serverId]
     );
-    await runQuery(
-      `UPDATE servers SET member_count = (
-         SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
-       ) WHERE id = ?`,
-      [serverId, serverId]
-    );
-  });
+  }, { isolation: 'read committed' });
 
   return getServerDetail(serverId, userId);
 }
@@ -614,34 +745,69 @@ export async function leaveServer({ serverId, userId }) {
     throw ApiError.conflict('Transfer ownership before leaving your own server');
   }
   await transaction(async () => {
-    await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        WHERE server_id = ? AND user_id = ?`,
-      [serverId, userId]
-    );
-    await runQuery(`DELETE FROM member_roles WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
-    await runQuery(
-      `UPDATE servers SET member_count = (
-         SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
-       ) WHERE id = ?`,
-      [serverId, serverId]
-    );
-  });
+    await endMembership(serverId, userId);
+  }, { isolation: 'read committed' });
   return { success: true };
 }
 
 // --- roles -------------------------------------------------------------------
 
+/** Highest role position a member holds (0 = only @everyone). */
+async function highestRolePosition(serverId, userId) {
+  const rows = await allQuery(
+    `SELECT r.position FROM member_roles mr JOIN roles r ON r.id = mr.role_id
+      WHERE mr.server_id = ? AND mr.user_id = ?`,
+    [serverId, userId]
+  );
+  return rows.reduce((max, r) => Math.max(max, r.position), 0);
+}
+
+/**
+ * Discord's role hierarchy for MANAGE_ROLES: a member may only hand out, take
+ * away or create roles that sit strictly below their own highest role, and may
+ * never create a role carrying a permission they do not hold. Without this,
+ * MANAGE_ROLES is a one-step path to ADMINISTRATOR (create an admin role, give
+ * it to yourself). The owner is exempt.
+ */
+async function assertCanManageRole({ serverId, actorId, role = null, permissions = undefined }) {
+  if (!actorId) return;
+  const actor = await resolvePermissions({ userId: actorId, serverId });
+  if (!actor.isMember) throw ApiError.forbidden('You are not a member of this server');
+  if (actor.isOwner) return;
+  if (role) {
+    if (role.managed) throw ApiError.forbidden('Managed roles cannot be assigned manually');
+    if (role.position >= await highestRolePosition(serverId, actorId)) {
+      throw ApiError.forbidden('You cannot manage a role at or above your highest role');
+    }
+  }
+  if (permissions !== undefined) {
+    const granting = toBigInt(permissions) & ~toBigInt(actor.permissions);
+    if (granting !== 0n) throw ApiError.forbidden('You cannot grant permissions you do not have');
+  }
+}
+
 export async function createRole({ serverId, name, color = null, permissions = '0', hoist = false, mentionable = false, userId }) {
-  const { maxPos } = await getQuery(
-    `SELECT COALESCE(MAX(position), 0) AS maxPos FROM roles WHERE server_id = ?`, [serverId]
-  );
+  const trimmed = String(name ?? 'new role').trim().slice(0, 100) || 'new role';
+  if (!/^\d+$/.test(String(permissions))) {
+    throw new ApiError('permissions must be a decimal bitfield string', { code: 'INVALID_PERMISSIONS' });
+  }
+  await assertCanManageRole({ serverId, actorId: userId, permissions });
+  name = trimmed;
+  color = normaliseColor(color, 'color') ?? null;
+  // Discord puts a new role at the bottom, just above @everyone: it starts
+  // with no power over anyone, and the creator drags it up if they mean to.
   const roleId = generateId();
-  await runQuery(
-    `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [roleId, serverId, name, color, maxPos + 1, String(permissions), hoist ? 1 : 0, mentionable ? 1 : 0]
-  );
+  await transaction(async () => {
+    await runQuery(
+      `UPDATE roles SET position = position + 1 WHERE server_id = ? AND position >= 1 AND is_everyone = 0`,
+      [serverId]
+    );
+    await runQuery(
+      `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+      [roleId, serverId, name, color, String(permissions), hoist ? 1 : 0, mentionable ? 1 : 0]
+    );
+  });
   await writeAuditLog({ serverId, userId, actionType: 'ROLE_CREATE', targetType: 'role', targetId: roleId });
   return getQuery(`SELECT * FROM roles WHERE id = ?`, [roleId]);
 }
@@ -649,8 +815,15 @@ export async function createRole({ serverId, name, color = null, permissions = '
 export async function assignRole({ serverId, userId: targetId, roleId, actorId }) {
   const role = await getQuery(`SELECT * FROM roles WHERE id = ? AND server_id = ?`, [roleId, serverId]);
   if (!role) throw ApiError.notFound('Role');
+  if (role.is_everyone || role.id === serverId) return { success: true };
+  await assertCanManageRole({ serverId, actorId, role });
+  const member = await getQuery(
+    `SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? AND left_at IS NULL`,
+    [serverId, targetId]
+  );
+  if (!member) throw ApiError.notFound('Member');
   await runQuery(
-    `INSERT OR IGNORE INTO member_roles (server_id, user_id, role_id, assigned_by) VALUES (?, ?, ?, ?)`,
+    `INSERT INTO member_roles (server_id, user_id, role_id, assigned_by) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
     [serverId, targetId, roleId, actorId]
   );
   await writeAuditLog({
@@ -662,6 +835,9 @@ export async function assignRole({ serverId, userId: targetId, roleId, actorId }
 
 export async function removeRole({ serverId, userId: targetId, roleId, actorId }) {
   if (roleId === serverId) throw ApiError.conflict('@everyone cannot be removed');
+  const role = await getQuery(`SELECT * FROM roles WHERE id = ? AND server_id = ?`, [roleId, serverId]);
+  if (!role) throw ApiError.notFound('Role');
+  await assertCanManageRole({ serverId, actorId, role });
   await runQuery(
     `DELETE FROM member_roles WHERE server_id = ? AND user_id = ? AND role_id = ?`,
     [serverId, targetId, roleId]
@@ -683,10 +859,12 @@ export async function openDirectMessage({ userId, recipientId }) {
     `SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)`,
     [recipientId, userId, userId, recipientId]
   );
-  if (blocked) throw ApiError.forbidden('Cannot message this user');
+  // The same refusal as every other "can't reach" reason, so a block cannot
+  // be told apart from a privacy setting.
+  const { assertCanDirectMessage, unreachable } = await import('./users.js');
+  if (blocked) throw unreachable();
 
   // Privacy & Safety › who can direct-message you.
-  const { assertCanDirectMessage } = await import('./users.js');
   await assertCanDirectMessage({ senderId: userId, recipientId });
 
   // A DM is the channel of type 'dm' whose recipient set is exactly these two.
@@ -722,7 +900,7 @@ export async function openDirectMessage({ userId, recipientId }) {
 export async function createGroupDM({ userId, recipientIds = [], name = null }) {
   const unique = [...new Set(recipientIds.filter((id) => id && id !== userId))];
   if (unique.length === 0) throw new ApiError('A group needs at least one other person', { code: 'INVALID_RECIPIENTS' });
-  if (unique.length > 9) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  if (unique.length > 9) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
 
   // A block works both ways here too — you cannot pull someone who blocked you
   // into a group, and you cannot be pulled into one with someone you blocked.
@@ -733,8 +911,8 @@ export async function createGroupDM({ userId, recipientIds = [], name = null }) 
       `SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)`,
       [recipientId, userId, userId, recipientId]
     );
-    if (blocked) throw ApiError.forbidden('Cannot start a group with this user');
-    const { assertCanDirectMessage } = await import('./users.js');
+    const { assertCanDirectMessage, unreachable } = await import('./users.js');
+    if (blocked) throw unreachable();
     await assertCanDirectMessage({ senderId: userId, recipientId });
   }
   recipientIds = unique;
@@ -760,11 +938,12 @@ export async function getDirectMessageChannel(channelId, viewerId) {
   );
   if (!channel) throw ApiError.notFound('Channel');
   const recipients = await allQuery(
-    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.status, u.custom_status
+    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.status, u.custom_status,
+            u.custom_status_expires_at
        FROM channel_recipients cr JOIN users u ON u.id = cr.user_id
       WHERE cr.channel_id = ? AND u.id != ?`,
     [channelId, viewerId]
-  );
+  ).then((rows) => rows.map((row) => maskStatus(maskExpiredStatus(row), viewerId)));
   return {
     ...channel,
     recipients,
@@ -793,9 +972,11 @@ export async function listDirectMessageChannels(userId) {
 const INVITE_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 function generateInviteCode(length = 8) {
+  // crypto.randomInt, not Math.random: an invite code is a bearer credential
+  // for a private server, so it must not be predictable from earlier ones.
   let out = '';
   for (let i = 0; i < length; i += 1) {
-    out += INVITE_ALPHABET[Math.floor(Math.random() * INVITE_ALPHABET.length)];
+    out += INVITE_ALPHABET[crypto.randomInt(INVITE_ALPHABET.length)];
   }
   return out;
 }
@@ -915,10 +1096,25 @@ export async function addGroupRecipients({ channelId, userId, recipientIds = [] 
   const { n } = await getQuery(
     `SELECT count(*) AS n FROM channel_recipients WHERE channel_id = ?`, [channelId]
   );
-  if (n + recipientIds.length > 10) throw new ApiError('กลุ่มรับได้สูงสุด 10 คน', { code: 'GROUP_FULL' });
+  recipientIds = [...new Set(recipientIds.filter((id) => id && id !== userId))];
+  if (n + recipientIds.length > 10) throw new ApiError('A group DM holds at most 10 people', { code: 'GROUP_FULL' });
+  // The same consent rules as starting a group: nobody can be pulled into a
+  // conversation with someone they blocked (or who blocked them), or against
+  // their DM privacy setting.
+  const { assertCanDirectMessage } = await import('./users.js');
+  for (const rid of recipientIds) {
+    const exists = await getQuery(`SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL`, [rid]);
+    if (!exists) throw ApiError.notFound('User');
+    const blocked = await getQuery(
+      `SELECT 1 FROM blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?)`,
+      [rid, userId, userId, rid]
+    );
+    if (blocked) throw ApiError.forbidden('Cannot add this user to the group');
+    await assertCanDirectMessage({ senderId: userId, recipientId: rid });
+  }
   for (const rid of recipientIds) {
     await runQuery(
-      `INSERT OR IGNORE INTO channel_recipients (channel_id, user_id) VALUES (?, ?)`, [channelId, rid]
+      `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [channelId, rid]
     );
   }
   return getDirectMessageChannel(channelId, userId);
@@ -939,7 +1135,7 @@ export async function removeGroupRecipient({ channelId, userId, targetId }) {
   // An empty group is dead weight; Discord deletes it once the last person leaves.
   if ((remaining?.n ?? 0) === 0) {
     await runQuery(
-      `UPDATE channels SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, [channelId]
+      `UPDATE channels SET deleted_at = ${sql.now} WHERE id = ?`, [channelId]
     );
   }
   return { success: true, channel_id: channelId, user_id: targetId };
@@ -960,8 +1156,30 @@ export async function acceptInvite({ code, userId }) {
     throw new ApiError('This invite has been used up', { status: 410, code: 'INVITE_EXHAUSTED' });
   }
 
-  await runQuery(`UPDATE invites SET uses = uses + 1 WHERE code = ?`, [code]);
-  return joinServer({ serverId: invite.server_id, userId });
+  const banned = await getQuery(
+    `SELECT 1 FROM bans WHERE server_id = ? AND user_id = ?`, [invite.server_id, userId]
+  );
+  if (banned) throw ApiError.forbidden('You are banned from this server');
+  // Check-and-increment in one statement, so two concurrent accepts cannot
+  // both squeeze through the last use of a limited invite (on Postgres the
+  // row lock the UPDATE takes serialises them). It runs inside the join's own
+  // write transaction, after every refusal check, so a refused join never
+  // burns a use and a use is never claimed without the membership it paid for.
+  const claim = async () => {
+    const claimed = await runQuery(
+      `UPDATE invites SET uses = uses + 1
+        WHERE code = ? AND revoked_at IS NULL AND (max_uses = 0 OR uses < max_uses)`,
+      [code]
+    );
+    if (!claimed.changes) {
+      throw new ApiError('This invite has been used up', { status: 410, code: 'INVITE_EXHAUSTED' });
+    }
+  };
+  const detail = await joinServer({ serverId: invite.server_id, userId, claim });
+  // Land where the invite points — when the new member can see that channel
+  // (detail.channels holds only the visible ones).
+  const visible = Array.isArray(detail?.channels) && detail.channels.some((c) => c.id === invite.channel_id);
+  return { ...detail, channel_id: visible ? invite.channel_id : null };
 }
 
 // --- moderation --------------------------------------------------------------
@@ -997,25 +1215,68 @@ export async function assertMemberHierarchy({ serverId, actorId, targetId, actio
   }
 }
 
+/**
+ * End a membership the way Discord does: roles are dropped (a kicked or banned
+ * member who comes back via an invite starts over as @everyone), any timeout
+ * is cleared with them, and the member count is recomputed.
+ */
+async function removeMembership(serverId, userId) {
+  await endMembership(serverId, userId);
+}
+
+/**
+ * Mark a membership ended and drop its roles. The member count moves only if
+ * this call actually ended an active membership, atomically, so concurrent
+ * leaves/kicks never conflict on (or double-count against) the guild row.
+ */
+async function endMembership(serverId, userId) {
+  const left = await runQuery(
+    `UPDATE server_members SET left_at = ${sql.now}
+      WHERE server_id = ? AND user_id = ? AND left_at IS NULL`,
+    [serverId, userId]
+  );
+  await runQuery(`DELETE FROM member_roles WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
+  if (Number(left?.changes ?? 0) > 0) {
+    await runQuery(
+      `UPDATE servers SET member_count = CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END WHERE id = ?`,
+      [serverId]
+    );
+  }
+}
+
+/**
+ * Recompute a guild's member count from the membership rows — for an
+ * operator repairing a count, not for the hot paths above.
+ */
+export async function recountMembers(serverId) {
+  await runQuery(
+    `UPDATE servers SET member_count = (
+       SELECT count(*) FROM server_members WHERE server_id = ? AND left_at IS NULL
+     ) WHERE id = ?`,
+    [serverId, serverId]
+  );
+  return (await getQuery(`SELECT member_count FROM servers WHERE id = ?`, [serverId]))?.member_count ?? 0;
+}
+
 export async function banMember({ serverId, userId: targetId, moderatorId, reason = null, deleteMessageSeconds = 0 }) {
   if (moderatorId) {
     await assertMemberHierarchy({ serverId, actorId: moderatorId, targetId, action: 'ban' });
   }
   await transaction(async () => {
     await runQuery(
-      `INSERT OR REPLACE INTO bans (server_id, user_id, moderator_id, reason, delete_message_seconds)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO bans (server_id, user_id, moderator_id, reason, delete_message_seconds)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (server_id, user_id) DO UPDATE SET
+         moderator_id = excluded.moderator_id, reason = excluded.reason,
+         delete_message_seconds = excluded.delete_message_seconds,
+         expires_at = NULL, created_at = ${sql.now}`,
       [serverId, targetId, moderatorId, reason, deleteMessageSeconds]
     );
-    await runQuery(
-      `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        WHERE server_id = ? AND user_id = ?`,
-      [serverId, targetId]
-    );
+    await removeMembership(serverId, targetId);
     if (deleteMessageSeconds > 0) {
       const cutoff = new Date(Date.now() - deleteMessageSeconds * 1000).toISOString();
       await runQuery(
-        `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        `UPDATE messages SET deleted_at = ${sql.now}
           WHERE server_id = ? AND user_id = ? AND created_at > ?`,
         [serverId, targetId, cutoff]
       );
@@ -1032,11 +1293,7 @@ export async function kickMember({ serverId, userId: targetId, moderatorId, reas
   if (moderatorId) {
     await assertMemberHierarchy({ serverId, actorId: moderatorId, targetId, action: 'kick' });
   }
-  await runQuery(
-    `UPDATE server_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      WHERE server_id = ? AND user_id = ?`,
-    [serverId, targetId]
-  );
+  await removeMembership(serverId, targetId);
   await writeAuditLog({
     serverId, userId: moderatorId, actionType: 'MEMBER_KICK',
     targetType: 'user', targetId, reason
@@ -1083,18 +1340,68 @@ export async function writeAuditLog({
   );
 }
 
-export async function listAuditLog(serverId, { limit = 50, before = null } = {}) {
+/**
+ * The audit log, newest first. Each entry names its actor *and* its target —
+ * "nat banned freenitro_3", not "nat banned a member" — with the target's
+ * current name resolved from the user, channel or role it points at.
+ * Filters: `actionType` (exact, or a prefix ending in '*', e.g. 'MEMBER_*'),
+ * `userId` (the actor) and `targetId`.
+ */
+export async function listAuditLog(serverId, { limit = 50, before = null, actionType = null, userId = null, targetId = null } = {}) {
   const params = [serverId];
   let where = 'al.server_id = ?';
   if (before) { where += ' AND al.id < ?'; params.push(before); }
-  params.push(Math.min(limit, 100));
+  if (actionType) {
+    const clean = String(actionType).toUpperCase().replace(/[^A-Z_*]/g, '').slice(0, 60);
+    if (clean.endsWith('*')) { where += ' AND al.action_type LIKE ?'; params.push(`${clean.slice(0, -1)}%`); }
+    else if (clean) { where += ' AND al.action_type = ?'; params.push(clean); }
+  }
+  if (userId) { where += ' AND al.user_id = ?'; params.push(String(userId)); }
+  if (targetId) { where += ' AND al.target_id = ?'; params.push(String(targetId)); }
+  params.push(Math.min(Math.max(Number(limit) || 50, 1), 100));
   const rows = await allQuery(
-    `SELECT al.*, u.username, u.display_name, u.avatar_url
-       FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id
+    `SELECT al.*, u.username, u.display_name, u.avatar_url,
+            tu.username AS target_username, tu.display_name AS target_display_name,
+            tu.avatar_url AS target_avatar_url,
+            tc.name AS target_channel_name, tc.type AS target_channel_type,
+            tr.name AS target_role_name, tr.color AS target_role_color
+       FROM audit_logs al
+       LEFT JOIN users u ON u.id = al.user_id
+       LEFT JOIN users tu ON al.target_type = 'user' AND tu.id = al.target_id
+       LEFT JOIN channels tc ON al.target_type = 'channel' AND tc.id = al.target_id
+       LEFT JOIN roles tr ON al.target_type = 'role' AND tr.id = al.target_id
       WHERE ${where} ORDER BY al.id DESC LIMIT ?`,
     params
   );
-  return rows.map((r) => ({ ...r, changes: JSON.parse(r.changes || '[]') }));
+  return rows.map((r) => {
+    const changes = typeof r.changes === 'string' ? JSON.parse(r.changes || '[]') : (r.changes ?? []);
+    let target = null;
+    if (r.target_type === 'user' && r.target_id) {
+      target = {
+        type: 'user', id: r.target_id,
+        name: r.target_display_name || r.target_username || null,
+        username: r.target_username ?? null, avatar_url: r.target_avatar_url ?? null
+      };
+    } else if (r.target_type === 'channel' && r.target_id) {
+      target = { type: 'channel', id: r.target_id, name: r.target_channel_name ?? null, channel_type: r.target_channel_type ?? null };
+    } else if (r.target_type === 'role' && r.target_id) {
+      target = { type: 'role', id: r.target_id, name: r.target_role_name ?? null, color: r.target_role_color ?? null };
+    } else if (r.target_id) {
+      target = { type: r.target_type ?? null, id: r.target_id, name: null };
+    }
+    // A deleted channel or role no longer resolves; its name is usually in
+    // the change list of the entry that deleted or created it.
+    if (target && !target.name) {
+      const named = changes.find((c) => c?.key === 'name');
+      if (named) target.name = named.old ?? named.new ?? null;
+    }
+    const {
+      target_username: _a, target_display_name: _b, target_avatar_url: _c,
+      target_channel_name: _d, target_channel_type: _e, target_role_name: _f, target_role_color: _g, ...rest
+    } = r;
+    // `target_name` is the flat form for simple API consumers (bots, exports).
+    return { ...rest, changes, target, target_name: target?.name ?? null };
+  });
 }
 
 /**
@@ -1138,7 +1445,7 @@ export async function reorderChannels({ serverId, userId, order }) {
     for (const [index, entry] of order.entries()) {
       await runQuery(
         `UPDATE channels SET position = ?, parent_id = ?,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                updated_at = ${sql.now}
           WHERE id = ? AND server_id = ?`,
         [entry.position ?? index, entry.parent_id ?? null, entry.id, serverId]
       );

@@ -14,10 +14,11 @@ import {
   ChevronDown, Image as ImageIcon, MessageSquare, Check, Pencil, Trash2, Settings2, Lock, Users, List, LayoutGrid
 } from 'lucide-react';
 import { get, post, put, patch, del, upload } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useDialog } from './settings/primitives';
 import { formatRelativeShort } from '../utils/messageGrouping';
 import { avatarOf } from '../utils/avatar';
 import { t } from '../i18n/index.jsx';
+import { proxiedImageUrl, filePreviewUrl } from '../utils/media';
 
 const SORTS = () => [
   { key: 'latest_activity', label: t('forum.sortActivity') },
@@ -42,9 +43,9 @@ function TagChip({ tag, active = false, onClick, removable = false, size = 'sm' 
         ${active ? 'bg-d-brand/20 border-d-brand text-d-strong' : 'bg-d-surface border-d-edge text-d-text2'}
         ${onClick ? 'hover:border-d-text4 hover:text-d-strong' : ''}`}
     >
-      {tag.emoji && <span aria-hidden="true">{tag.emoji}</span>}
+      {Boolean(tag.emoji) && <span aria-hidden="true">{tag.emoji}</span>}
       <span className="truncate max-w-[9rem]">{tag.name}</span>
-      {tag.moderated && <Lock className="w-2.5 h-2.5 opacity-70" aria-label={t('forum.moderatedTag')} />}
+      {Boolean(tag.moderated) && <Lock className="w-2.5 h-2.5 opacity-70" aria-label={t('forum.moderatedTag')} />}
       {removable && <X className="w-3 h-3" aria-hidden="true" />}
     </Comp>
   );
@@ -65,18 +66,18 @@ function PostCard({ post, onOpen, canModerate, onTogglePin, onEditTags, isNew })
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 mb-1 text-[11px] text-d-text3">
-            {post.pinned && (
+            {Boolean(post.pinned) && (
               <span className="inline-flex items-center gap-1 text-d-brand font-semibold">
                 <Pin className="w-3 h-3" aria-hidden="true" />{t('forum.pinned')}
               </span>
             )}
-            {post.archived && (
+            {Boolean(post.archived) && (
               <span className="bg-d-surface text-d-text3 px-1.5 py-0.5 rounded">{t('chat.archived')}</span>
             )}
-            {post.locked && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
+            {Boolean(post.locked) && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
           </div>
           <h3 className="font-bold text-d-strong text-[15px] leading-snug break-words">{post.name}</h3>
-          {post.preview && (
+          {Boolean(post.preview) && (
             <p className="text-sm text-d-text2 mt-1 line-clamp-2 break-words whitespace-pre-line">{post.preview}</p>
           )}
           {post.tags.length > 0 && (
@@ -109,9 +110,9 @@ function PostCard({ post, onOpen, canModerate, onTogglePin, onEditTags, isNew })
             )}
           </div>
         </div>
-        {post.thumbnail_url && (
+        {Boolean(post.thumbnail_url) && (
           <img
-            src={post.thumbnail_url}
+            src={proxiedImageUrl(post.thumbnail_url)}
             alt=""
             className="w-20 h-20 sm:w-24 sm:h-24 rounded-md object-cover shrink-0 bg-d-canvas"
             loading="lazy"
@@ -161,15 +162,15 @@ function GalleryCard({ post, onOpen, canModerate, onTogglePin, onEditTags }) {
       >
         <div className="aspect-[4/3] w-full bg-d-canvas flex items-center justify-center overflow-hidden">
           {post.thumbnail_url ? (
-            <img src={post.thumbnail_url} alt="" className="w-full h-full object-cover" loading="lazy" />
+            <img src={proxiedImageUrl(post.thumbnail_url)} alt="" className="w-full h-full object-cover" loading="lazy" />
           ) : (
             <p className="text-sm text-d-text2 p-4 line-clamp-5 whitespace-pre-line break-words">{post.preview}</p>
           )}
         </div>
         <div className="p-3 min-w-0">
           <div className="flex items-center gap-1.5 text-[11px] text-d-text3 mb-0.5">
-            {post.pinned && <Pin className="w-3 h-3 text-d-brand" aria-label={t('forum.pinned')} />}
-            {post.locked && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
+            {Boolean(post.pinned) && <Pin className="w-3 h-3 text-d-brand" aria-label={t('forum.pinned')} />}
+            {Boolean(post.locked) && <Lock className="w-3 h-3" aria-label={t('forum.locked')} />}
             {post.tags.slice(0, 2).map((tag) => <TagChip key={tag.id} tag={tag} />)}
           </div>
           <h3 className="font-bold text-d-strong text-sm leading-snug line-clamp-2 break-words">{post.name}</h3>
@@ -225,7 +226,7 @@ function TagPicker({ tags, selected, onChange, canModerate, requireTag }) {
             tag={tag}
             size="md"
             active={selected.includes(tag.id)}
-            onClick={tag.moderated && !canModerate ? undefined : () => toggle(tag.id)}
+            onClick={Boolean(tag.moderated) && !canModerate ? undefined : () => toggle(tag.id)}
           />
         ))}
       </div>
@@ -242,12 +243,12 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
   const [files, setFiles] = useState([]);       // File[]
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
   const fileInput = useRef(null);
   const requireTag = Boolean(channel?.require_tag);
 
-  const previews = useMemo(() => files.map((f) => ({ file: f, url: URL.createObjectURL(f) })), [files]);
-  useEffect(() => () => previews.forEach((p) => URL.revokeObjectURL(p.url)), [previews]);
+  const previews = useMemo(() => files.map((f) => ({ file: f, url: filePreviewUrl(f) })), [files]);
+  useEffect(() => () => previews.forEach((p) => { if (p.url) URL.revokeObjectURL(p.url); }), [previews]);
 
   const canSubmit = title.trim().length > 0 && (body.trim().length > 0 || files.length > 0)
     && (!requireTag || selected.length > 0) && !busy;
@@ -350,8 +351,8 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
             {previews.length > 0 && (
               <ul className="flex flex-wrap gap-2 mt-2" aria-label={t('forum.attachments')}>
                 {previews.map(({ file, url }, i) => (
-                  <li key={url} className="relative w-20 h-20 rounded-md overflow-hidden bg-d-surface border border-d-edge">
-                    {file.type.startsWith('image/') ? (
+                  <li key={url ?? `${file.name}-${i}`} className="relative w-20 h-20 rounded-md overflow-hidden bg-d-surface border border-d-edge">
+                    {file.type.startsWith('image/') && url ? (
                       <img src={url} alt="" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[10px] text-d-text2 p-1 text-center break-all">{file.name}</div>
@@ -396,7 +397,7 @@ function NewPostModal({ channel, tags, canModerate, onClose, onCreated, onToast 
 function EditTagsModal({ post, tags, canModerate, onClose, onSaved, onToast }) {
   const [selected, setSelected] = useState(post.tags.map((tag) => tag.id));
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const save = async () => {
     setBusy(true);
@@ -451,7 +452,7 @@ function ManageTagsModal({ channel, tags, onClose, onChanged, onToast }) {
     default_layout: channel.default_layout || 'list',
     require_tag: Boolean(channel.require_tag)
   });
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   const run = async (fn) => {
     setBusy(true);
@@ -548,7 +549,7 @@ function ManageTagsModal({ channel, tags, onClose, onChanged, onToast }) {
                     <>
                       <span className="w-6 text-center" aria-hidden="true">{tag.emoji || '🏷️'}</span>
                       <span className="flex-1 text-sm text-d-strong truncate">{tag.name}</span>
-                      {tag.moderated && (
+                      {Boolean(tag.moderated) && (
                         <span className="text-[10px] uppercase tracking-wide text-d-text3 inline-flex items-center gap-1">
                           <Lock className="w-3 h-3" aria-hidden="true" />{t('forum.modOnly')}
                         </span>
@@ -755,8 +756,8 @@ export default function ForumView({
         <div className="flex items-center gap-2 min-w-0">
           <MessagesSquare className="w-6 h-6 text-d-text4 shrink-0" aria-hidden="true" />
           <span className="font-bold text-d-strong text-[15px] truncate">{channel.name}</span>
-          {channel.is_private && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
-          {channel.topic && (
+          {Boolean(channel.is_private) && <Lock className="w-3.5 h-3.5 text-d-text4 shrink-0" />}
+          {Boolean(channel.topic) && (
             <>
               <div className="w-[1px] h-4 bg-d-divider mx-2 hidden sm:block" />
               <span className="text-xs text-d-text3 truncate hidden sm:block" title={channel.topic}>{channel.topic}</span>
@@ -940,7 +941,7 @@ export default function ForumView({
       {modal === 'manage' && (
         <ManageTagsModal channel={channel} tags={tags} onClose={() => setModal(null)} onChanged={loadTags} onToast={onToast} />
       )}
-      {modal?.editTags && (
+      {Boolean(modal?.editTags) && (
         <EditTagsModal
           post={modal.editTags}
           tags={tags}

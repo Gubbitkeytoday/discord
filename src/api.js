@@ -9,6 +9,8 @@
 //    the server ignores it whenever a real session is present.
 // ============================================================================
 
+import { t } from './i18n/index.jsx';
+
 let currentUserId = null;
 let bearerToken = null;
 
@@ -38,12 +40,52 @@ export class ApiRequestError extends Error {
   }
 }
 
+const THAI = /[\u0E00-\u0E7F]/;
+
+// Stable error codes the backend sends. Each is looked up as `apiError.<CODE>`
+// in the dictionaries; this English text is only the last resort for a code
+// whose translation has not shipped yet (and the server gave no message).
+export const API_ERROR_FALLBACKS = Object.freeze({
+  USERNAME_TAKEN: 'That username is already taken.',
+  PASSWORD_REQUIRED: 'Enter your current password to continue.',
+  MFA_REQUIRED: 'Enter your two-factor authentication code.',
+  INVALID_MFA_CODE: 'That code is not valid. Try again.',
+  MAIL_NOT_CONFIGURED: 'E-mail is not set up on this server, so that could not be sent.',
+  INVALID_COLOR: 'That colour is not valid. Use a hex colour like #5865F2.',
+  REFERENCE_CONFLICT: 'That conflicts with something that changed meanwhile. Refresh and try again.',
+  BUSY: 'The server is busy. Try again in a moment.',
+  TIMEOUT: 'That took too long. Try again.',
+  INVALID_URL: 'That link is not a valid URL.',
+  URL_NOT_ALLOWED: 'That address is not allowed.',
+  NOT_AN_IMAGE: 'That file is not an image.'
+});
+
+/**
+ * Turn an error body into a message in the reader's language. The server
+ * sends a stable `code`; a known code wins, then the server's own text —
+ * unless that text is in a script the reader did not choose (the backend has
+ * historically answered in Thai), in which case a generic line naming the
+ * code is more useful than an unreadable one.
+ */
+export function localizeError(data, status) {
+  const code = data?.code;
+  // t() returns the key itself for a string no dictionary defines.
+  const known = code ? t(`apiError.${code}`) : null;
+  if (known && known !== `apiError.${code}`) return known;
+  if (status === 429) return t('apiError.RATE_LIMITED');
+  const message = data?.error;
+  const readerLocale = (typeof document !== 'undefined' && document.documentElement.lang) || 'en';
+  if (message && !(!readerLocale.startsWith('th') && THAI.test(message))) return message;
+  if (code && API_ERROR_FALLBACKS[code]) return API_ERROR_FALLBACKS[code];
+  return t('apiError.generic', { code: code ?? `HTTP ${status}` });
+}
+
 /**
  * api('/api/servers/1')                         GET
  * api('/api/servers', { method: 'POST', body })  JSON body
  * api('/api/upload/avatar', { method: 'POST', body: formData })  multipart
  */
-export async function api(path, { method = 'GET', body, headers = {}, signal } = {}) {
+export async function api(path, { method = 'GET', body, headers = {}, signal, withHeaders = false } = {}) {
   const isForm = typeof FormData !== 'undefined' && body instanceof FormData;
   const res = await fetch(path, {
     method,
@@ -64,11 +106,13 @@ export async function api(path, { method = 'GET', body, headers = {}, signal } =
   }
 
   if (!res.ok) {
-    throw new ApiRequestError(data?.error ?? `HTTP ${res.status}`, {
+    throw new ApiRequestError(localizeError(data, res.status), {
       status: res.status, code: data?.code, details: data?.details
     });
   }
-  return data;
+  // `withHeaders` is for the few endpoints that page through a response
+  // header (search's X-Next-Cursor).
+  return withHeaders ? { data, headers: res.headers } : data;
 }
 
 export const get  = (path, opts) => api(path, { ...opts, method: 'GET' });

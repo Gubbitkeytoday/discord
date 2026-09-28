@@ -44,12 +44,16 @@ import ChatTab from './settings/ChatTab';
 import StreamerModeTab from './settings/StreamerModeTab';
 import ActivityTab from './settings/ActivityTab';
 import ProfileTab from './settings/ProfileTab';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import SupportTab from './settings/SupportTab';
+import { usePaymentsConfig } from '../payments/usePaymentsConfig.js';
+import { useDialog, PageHeader, Section } from './settings/primitives';
+import ConfirmModal from './ConfirmModal';
 import {
-  X, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
-  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot
+  X, ArrowLeft, User, Palette, Volume2, ShieldCheck, Bell, Keyboard, Search,
+  Accessibility, MessageSquare, Radio, Activity, Lock, LogOut, Bot, Languages, HandHeart
 } from 'lucide-react';
-import { t } from '../i18n/index.jsx';
+import { LanguageList } from '../i18n/LanguagePicker.jsx';
+import { t, useLocaleCode } from '../i18n/index.jsx';
 
 const APP_VERSION = import.meta.env?.VITE_APP_VERSION ?? '1.0.0';
 
@@ -57,14 +61,16 @@ const APP_VERSION = import.meta.env?.VITE_APP_VERSION ?? '1.0.0';
  * Two groups, the way Discord splits User Settings from App Settings.
  * `keywords` feeds the search box — people look for "microphone", not "voice".
  */
-const tabGroups = () => [
+const tabGroups = ({ support = false } = {}) => [
   {
     title: t('settings.groupUser'),
     tabs: [
       { key: 'profile',  icon: User,        label: t('settings.profileTab'),  keywords: t('settings.kwProfile') },
       { key: 'account',  icon: ShieldCheck, label: t('settings.accountTab'),  keywords: t('settings.kwAccount') },
       { key: 'privacy',  icon: Lock,        label: t('settings.privacyTab'),  keywords: t('settings.kwPrivacy') },
-      { key: 'activity', icon: Activity,    label: t('settings.activityTab'), keywords: t('settings.kwActivity') }
+      { key: 'activity', icon: Activity,    label: t('settings.activityTab'), keywords: t('settings.kwActivity') },
+      // Only when the instance takes donations (PROMPTPAY_ID / Stripe keys).
+      ...(support ? [{ key: 'support', icon: HandHeart, label: t('settings.supportTab'), keywords: t('settings.kwSupport') }] : [])
     ]
   },
   {
@@ -72,6 +78,11 @@ const tabGroups = () => [
     tabs: [
       { key: 'appearance',    icon: Palette,       label: t('settings.appearanceTab'),    keywords: t('settings.kwAppearance') },
       { key: 'accessibility', icon: Accessibility, label: t('settings.accessibilityTab'), keywords: t('settings.kwAccessibility') },
+      // Its own page, as in Discord: under "Appearance" (ja: テーマ, "Theme")
+      // people never found it. The keywords include the word "language" in
+      // the big languages, so someone stuck in a UI they cannot read can still
+      // search their way here.
+      { key: 'language',      icon: Languages,     label: t('settings.languageTab'),      keywords: `${t('settings.kwLanguage')} ${LANGUAGE_WORDS}` },
       { key: 'voice',         icon: Volume2,       label: t('settings.voiceTab'),         keywords: t('settings.kwVoice') },
       { key: 'notifications', icon: Bell,          label: t('settings.notificationsTab'), keywords: t('settings.kwNotifications') },
       { key: 'keybinds',      icon: Keyboard,      label: t('settings.keybindsTab'),      keywords: t('settings.kwKeybinds') },
@@ -87,25 +98,62 @@ const tabGroups = () => [
   }
 ];
 
+const LANGUAGE_WORDS = 'language lang locale idioma langue lingua sprache taal språk język jazyk kieli язык мова ' +
+  'γλώσσα dil ngôn ngữ bahasa भाषा ภาษา 言語 语言 語言 언어';
+
 const matches = (tab, query) => {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   return `${tab.label} ${tab.keywords ?? ''}`.toLowerCase().includes(needle);
 };
 
+/** Settings › Language: the app language, on its own page as in Discord. */
+function LanguageTab() {
+  return (
+    <div>
+      <PageHeader title={t('settings.languageTitle')} description={t('settings.languageLead')} />
+      <Section>
+        <LanguageList />
+      </Section>
+    </div>
+  );
+}
+
 export default function UserSettingsModal({
   currentUser, servers = [], initialTab = 'profile', onClose, onSaveProfile, onSetStatus, onSignOut, onToast
 }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [query, setQuery] = useState('');
-  const dialogRef = useFocusTrap(true, onClose);
+  // Leaving Profile with unsaved edits is refused, not silently discarded:
+  // the save bar turns red and shakes, as on Discord.
+  const [dirty, setDirty] = useState(false);
+  const [nudge, setNudge] = useState(0);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const guarded = (fn) => {
+    // On a phone the page may be hidden behind the list; show it so the
+    // warning is actually seen.
+    if (dirty) { setNudge((n) => n + 1); setMobilePane('content'); return false; }
+    fn();
+    return true;
+  };
+  // Phones cannot fit a 240px rail beside the page (the page was squeezed to
+  // ~110px and scrolled sideways), so below `md` it is Discord-mobile style:
+  // the list, then the page full-width with a Back button.
+  const [mobilePane, setMobilePane] = useState(initialTab !== 'profile' ? 'content' : 'nav');
+  const goTo = (key) => guarded(() => { setActiveTab(key); setMobilePane('content'); });
+  const requestClose = () => guarded(onClose);
+  const dialogRef = useDialog(requestClose);
   const navRef = useRef(null);
 
+  // Translated labels are memoised; recompute when the language changes.
+  const locale = useLocaleCode();
+  const payments = usePaymentsConfig();
+  const support = Boolean(payments?.enabled);
   const groups = useMemo(() => {
-    return tabGroups()
+    return tabGroups({ support })
       .map((group) => ({ ...group, tabs: group.tabs.filter((tab) => matches(tab, query)) }))
       .filter((group) => group.tabs.length > 0);
-  }, [query]);
+  }, [query, locale, support]);
 
   const visible = groups.flatMap((group) => group.tabs);
 
@@ -113,8 +161,8 @@ export default function UserSettingsModal({
   // hidden — so follow the first result once the current tab drops out.
   useEffect(() => {
     if (!query.trim() || visible.length === 0) return;
-    if (!visible.some((tab) => tab.key === activeTab)) setActiveTab(visible[0].key);
-  }, [query, visible, activeTab]);
+    if (!dirty && !visible.some((tab) => tab.key === activeTab)) setActiveTab(visible[0].key);
+  }, [query, visible, activeTab, dirty]);
 
   /** ↑/↓ walk the nav, the way Discord's settings sidebar does. */
   const onNavKeyDown = (event) => {
@@ -126,7 +174,7 @@ export default function UserSettingsModal({
       : Math.max(index - 1, 0);
     const target = visible[next];
     if (!target) return;
-    setActiveTab(target.key);
+    if (!goTo(target.key)) return;
     navRef.current?.querySelector(`[data-tab="${target.key}"]`)?.focus();
   };
 
@@ -146,8 +194,18 @@ export default function UserSettingsModal({
           the left. The sidebar colour still bleeds to the window edge; that is
           painted by the gradient on `.settings-surface`. */}
       <div className="flex w-full max-w-[var(--settings-max)]">
-        <div className="w-[var(--settings-rail)] shrink-0 overflow-y-auto overscroll-contain">
-        <div className="py-15 pr-2 pl-5 flex flex-col min-h-full">
+        <div className={`w-[var(--settings-rail)] max-md:w-full max-md:bg-d-surface shrink-0 overflow-y-auto overscroll-contain ${mobilePane === 'content' ? 'max-md:hidden' : ''}`}>
+        <div className="py-15 max-md:pt-4 pr-2 max-md:pr-4 pl-5 max-md:pl-4 flex flex-col min-h-full">
+          <div className="md:hidden mb-3 flex justify-end">
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label={t('common.close')}
+              className="rounded-full p-2 text-d-text2 hover:bg-d-hover hover:text-d-strong"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
           <div className="relative mb-4">
             <Search
               className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-d-text3"
@@ -176,7 +234,7 @@ export default function UserSettingsModal({
                   <button
                     key={tab.key}
                     data-tab={tab.key}
-                    onClick={() => setActiveTab(tab.key)}
+                    onClick={() => goTo(tab.key)}
                     aria-current={activeTab === tab.key ? 'page' : undefined}
                     className={`mb-0.5 flex w-full items-start gap-3 rounded px-2.5 py-1.5 text-left
                       text-base font-medium transition-colors focus:outline-none
@@ -201,7 +259,7 @@ export default function UserSettingsModal({
 
             <div className="my-4 h-px bg-d-divider" />
             <button
-              onClick={onSignOut}
+              onClick={() => guarded(() => setConfirmSignOut(true))}
               className="flex w-full items-center gap-3 rounded px-2.5 py-1.5 text-base font-medium
                 text-d-text2 transition-colors hover:bg-d-danger hover:text-white"
             >
@@ -210,31 +268,43 @@ export default function UserSettingsModal({
             </button>
           </nav>
 
-          <p className="mt-6 px-2.5 pb-4 text-[11px] text-d-text4">
+          <p className="mt-6 px-2.5 pb-4 text-xs text-d-text4">
             {t('settings.version', { version: APP_VERSION })}
           </p>
         </div>
       </div>
 
       {/* --- content ---------------------------------------------------------- */}
-      <div className="relative flex flex-1 min-w-0 justify-start overflow-y-auto overscroll-contain">
-        <div className="w-full max-w-[740px] min-w-0 py-15 pl-10 pr-2">
+      <div className={`relative flex flex-1 min-w-0 justify-start max-md:bg-d-canvas overflow-y-auto overscroll-contain ${mobilePane === 'nav' ? 'max-md:hidden' : ''}`}>
+        <div className="w-full max-w-[740px] min-w-0 py-15 pl-10 pr-2 max-md:px-4 max-md:pt-14">
+          <button
+            type="button"
+            onClick={() => setMobilePane('nav')}
+            className="md:hidden absolute left-2 top-4 flex items-center gap-1 rounded px-2 py-2 text-sm font-medium
+              text-d-text2 hover:bg-d-hover hover:text-d-strong"
+          >
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {t('common.back')}
+          </button>
           {activeTab === 'profile' && (
             <ProfileTab
               currentUser={currentUser}
               onSaveProfile={onSaveProfile}
               onSetStatus={onSetStatus}
               onToast={onToast}
+              onDirtyChange={setDirty}
+              nudge={nudge}
             />
           )}
           {activeTab === 'account' && (
             <AccountSecurityTab currentUser={currentUser} onToast={onToast} onSignOut={onSignOut} />
           )}
-          {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} />}
+          {activeTab === 'privacy' && <PrivacyTab currentUser={currentUser} onSaveProfile={onSaveProfile} onToast={onToast} />}
           {activeTab === 'developer' && <ApplicationsTab servers={servers} onToast={onToast} />}
           {activeTab === 'activity' && <ActivityTab currentUser={currentUser} onSetStatus={onSetStatus} />}
-          {activeTab === 'appearance' && <AppearanceTab />}
+          {activeTab === 'support' && support && <SupportTab onToast={onToast} />}
+          {activeTab === 'appearance' && <AppearanceTab onToast={onToast} />}
           {activeTab === 'accessibility' && <AccessibilityTab onToast={onToast} />}
+          {activeTab === 'language' && <LanguageTab />}
           {activeTab === 'voice' && <VoiceSettings onToast={onToast} />}
           {activeTab === 'notifications' && <NotificationsTab onToast={onToast} />}
           {activeTab === 'keybinds' && <KeybindsTab onToast={onToast} />}
@@ -245,7 +315,7 @@ export default function UserSettingsModal({
         {/* Discord's close affordance: outlined circle with ESC written under it. */}
         <div className="sticky top-15 shrink-0 pr-6 pl-2 hidden md:block">
           <button
-            onClick={onClose}
+            onClick={requestClose}
             aria-label={t('common.close')}
             className="group flex w-9 flex-col items-center gap-1"
           >
@@ -256,7 +326,7 @@ export default function UserSettingsModal({
             >
               <X className="h-4 w-4" strokeWidth={2.5} />
             </span>
-            <span className="text-[11px] font-bold text-d-text3 transition-colors group-hover:text-d-strong">
+            <span className="text-xs font-bold text-d-text3 transition-colors group-hover:text-d-strong">
               ESC
             </span>
           </button>
@@ -264,7 +334,7 @@ export default function UserSettingsModal({
 
         {/* Narrow windows lose the gutter, so the close button moves inline. */}
         <button
-          onClick={onClose}
+          onClick={requestClose}
           aria-label={t('common.close')}
           className="absolute right-4 top-4 rounded-full p-2 text-d-text2 hover:bg-d-hover
             hover:text-d-strong md:hidden"
@@ -273,6 +343,16 @@ export default function UserSettingsModal({
         </button>
       </div>
       </div>
+
+      {confirmSignOut && (
+        <ConfirmModal
+          title={t('auth.signOut')}
+          body={t('settings.signOutConfirm')}
+          confirmLabel={t('auth.signOut')}
+          onConfirm={() => onSignOut?.()}
+          onClose={() => setConfirmSignOut(false)}
+        />
+      )}
     </div>
   );
 }

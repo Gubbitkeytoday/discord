@@ -44,6 +44,8 @@ export function formatBinding(binding) {
       if (part === 'Alt') return isMac ? '⌥' : 'Alt';
       if (part === 'Shift') return isMac ? '⇧' : 'Shift';
       if (part === 'Space') return 'Space';
+      if (part === 'Slash') return '/';
+      if (part === 'Comma') return ',';
       if (part.startsWith('Arrow')) return { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' }[part] ?? part;
       return part;
     })

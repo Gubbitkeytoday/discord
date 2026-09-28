@@ -5,7 +5,7 @@ import { describeKeyEvent, formatBinding, findConflicts } from '../../hooks/useK
 import { t } from '../../i18n/index.jsx';
 import { PageHeader, Section, Row, ResetButton, Note } from './primitives';
 
-const GROUPS = () => [
+export const keybindGroups = () => [
   {
     title: t('keys.groupVoice'),
     actions: [
@@ -21,6 +21,8 @@ const GROUPS = () => [
       { key: 'quickSwitcher',       label: t('keys.quickSwitcher') },
       { key: 'navigateChannelUp',   label: t('keys.navigateChannelUp') },
       { key: 'navigateChannelDown', label: t('keys.navigateChannelDown') },
+      { key: 'navigateUnreadUp',    label: t('keybinds.navigateUnreadUp') },
+      { key: 'navigateUnreadDown',  label: t('keybinds.navigateUnreadDown') },
       { key: 'markServerRead',      label: t('keys.markServerRead') },
       { key: 'markChannelRead',     label: t('keys.markChannelRead') },
       { key: 'navigateServerUp',    label: t('keys.navigateServerUp') },
@@ -43,7 +45,8 @@ const GROUPS = () => [
     actions: [
       { key: 'openSettings',       label: t('keys.openSettings') },
       { key: 'openEvents',         label: t('keys.openEvents') },
-      { key: 'toggleStreamerMode', label: t('keys.toggleStreamerMode') }
+      { key: 'toggleStreamerMode', label: t('keys.toggleStreamerMode') },
+      { key: 'openShortcuts',      label: t('shortcuts.title') }
     ]
   }
 ];
@@ -80,7 +83,7 @@ export default function KeybindsTab({ onToast }) {
         </div>
       )}
 
-      {GROUPS().map((group) => (
+      {keybindGroups().map((group) => (
         <Section key={group.title} title={group.title}>
           {group.actions.map((action, index) => {
             const isCapturing = capturing === action.key;

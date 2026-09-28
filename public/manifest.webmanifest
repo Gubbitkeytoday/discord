@@ -1,0 +1,70 @@
+{
+  "id": "/",
+  "name": "Antigravity Discord",
+  "short_name": "Antigravity",
+  "description": "Self-hosted chat: servers, channels, direct messages, voice.",
+  "lang": "en",
+  "dir": "auto",
+  "start_url": "/channels/@me?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": [
+    "window-controls-overlay",
+    "standalone"
+  ],
+  "orientation": "any",
+  "background_color": "#121214",
+  "theme_color": "#121214",
+  "categories": [
+    "social",
+    "communication"
+  ],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Direct Messages",
+      "short_name": "DMs",
+      "description": "Open your direct messages",
+      "url": "/channels/@me?source=shortcut",
+      "icons": [
+        {
+          "src": "/icons/shortcut-96.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

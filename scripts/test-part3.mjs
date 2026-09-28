@@ -13,7 +13,7 @@ import {
 
 import {
   generateCode, verifyCode, base32Encode, base32Decode, generateSecret,
-  buildOtpAuthUri, generateRecoveryCodes
+  buildOtpAuthUri, generateRecoveryCodes, hashRecoveryCode, normaliseRecoveryCode
 } from '../lib/totp.js';
 import { signRequest, uriEncode, S3Client } from '../lib/s3Client.js';
 import { probeDuration } from '../lib/mediaDuration.js';
@@ -81,7 +81,26 @@ describe('TOTP (RFC 6238 vectors)', () => {
     const codes = generateRecoveryCodes(10);
     assert.equal(codes.length, 10);
     assert.equal(new Set(codes).size, 10);
-    for (const code of codes) assert.match(code, /^[0-9A-F]{5}-[0-9A-F]{5}$/);
+    // Crockford base32, 50 bits: no I, L, O or U to misread.
+    for (const code of codes) assert.match(code, /^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$/);
+  });
+
+  test('recovery codes are stored as a keyed scrypt derivation, not a fast hash', async () => {
+    const [code] = generateRecoveryCodes(1);
+    const stored = await hashRecoveryCode(code);
+    assert.match(stored, /^rc2\$[0-9a-f]{64}$/);
+    assert.notEqual(stored.slice(4), crypto.createHash('sha256').update(code.replace('-', '')).digest('hex'));
+    // Deterministic (it is the lookup key), and forgiving about how it is typed.
+    assert.equal(await hashRecoveryCode(code.toLowerCase().replace('-', ' ')), stored);
+    assert.equal(normaliseRecoveryCode('abcde-fghij'), 'ABCDEFGH1J');
+    assert.equal(normaliseRecoveryCode('0O1Il-22222'), '0011122222');
+    // Something that cannot be a recovery code (a TOTP code) costs no scrypt.
+    assert.equal(await hashRecoveryCode('123456'), null);
+    // The pepper keys it: a different server secret gives a different value.
+    const saved = process.env.MFA_RECOVERY_PEPPER;
+    process.env.MFA_RECOVERY_PEPPER = 'another-deployment';
+    try { assert.notEqual(await hashRecoveryCode(code), stored); }
+    finally { if (saved === undefined) delete process.env.MFA_RECOVERY_PEPPER; else process.env.MFA_RECOVERY_PEPPER = saved; }
   });
 });
 
@@ -131,7 +150,7 @@ describe('MFA enrolment', () => {
 
   test('a recovery code works once and only once', async () => {
     const code = recoveryCodes[0];
-    const first = await asSession(token, 'POST', '/api/auth/mfa/disable', { code });
+    const first = await asSession(token, 'POST', '/api/auth/mfa/disable', { code, password: 'antigravity123' });
     assert.equal(first.status, 200);
     assert.equal(first.body.enabled, false);
 
@@ -140,13 +159,36 @@ describe('MFA enrolment', () => {
     await asSession(token, 'POST', '/api/auth/mfa/confirm', {
       code: generateCode(begun.body.secret)
     });
-    const reused = await asSession(token, 'POST', '/api/auth/mfa/disable', { code });
+    const reused = await asSession(token, 'POST', '/api/auth/mfa/disable', { code, password: 'antigravity123' });
     assert.equal(reused.status, 401, 'a used recovery code was accepted again');
 
     // Clean up so later tests see a normal account.
     await asSession(token, 'POST', '/api/auth/mfa/disable', {
-      code: generateCode(begun.body.secret)
+      code: generateCode(begun.body.secret), password: 'antigravity123'
     });
+  });
+
+  test('codes stored by older releases (bare SHA-256) are re-hashed in place and still work once', async () => {
+    const { runQuery, getQuery } = await import('../db.js');
+    const begun = await asSession(token, 'POST', '/api/auth/mfa/begin');
+    await asSession(token, 'POST', '/api/auth/mfa/confirm', { code: generateCode(begun.body.secret) });
+    const legacyCode = 'A1B2C-3D4E5';
+    const digest = crypto.createHash('sha256').update('A1B2C3D4E5').digest('hex');
+    const rowId = `legacy-${Date.now()}`;
+    await runQuery(
+      `INSERT INTO account_tokens (id, user_id, kind, token_hash, expires_at) VALUES (?, 'user-me', 'recovery', ?, NULL)`,
+      [rowId, digest]
+    );
+    // Opening the security settings (MFA status) upgrades the row; no plaintext needed.
+    const status = await asSession(token, 'GET', '/api/auth/mfa/status');
+    assert.equal(status.body.recovery_codes_remaining, 11);
+    const upgraded = await getQuery(`SELECT token_hash FROM account_tokens WHERE id = ?`, [rowId]);
+    assert.match(upgraded.token_hash, /^rc1w\$[0-9a-f]{64}$/, 'no bare SHA-256 digest left in the table');
+
+    const used = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: legacyCode.toLowerCase(), password: 'antigravity123' });
+    assert.equal(used.status, 200, JSON.stringify(used.body));
+    const burned = await getQuery(`SELECT used_at FROM account_tokens WHERE id = ?`, [rowId]);
+    assert.ok(!burned || burned.used_at, 'burned (or cleared with MFA off)');
   });
 
   test('disabling MFA requires a code', async () => {
@@ -155,11 +197,11 @@ describe('MFA enrolment', () => {
       code: generateCode(begun.body.secret)
     });
 
-    const noCode = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: '111111' });
+    const noCode = await asSession(token, 'POST', '/api/auth/mfa/disable', { code: '111111', password: 'antigravity123' });
     assert.equal(noCode.status, 401, 'MFA was removed without proof');
 
     await asSession(token, 'POST', '/api/auth/mfa/disable', {
-      code: generateCode(begun.body.secret)
+      code: generateCode(begun.body.secret), password: 'antigravity123'
     });
   });
 });
@@ -1226,7 +1268,7 @@ describe('role icons', () => {
 
 describe('AFK sweep', () => {
   test('idle users are moved to the AFK channel; fresh and unknown users are not', async () => {
-    const { runQuery, getQuery } = await import('../db.js');
+    const { runQuery, getQuery, sql } = await import('../db.js');
     const { sweepAfk, __markIdle } = await import('../realtime.js');
     const emitted = [];
     const fakeIo = {
@@ -1235,8 +1277,9 @@ describe('AFK sweep', () => {
     };
 
     // server-1: chan-104 is a voice channel; create a dedicated AFK channel.
-    await runQuery(`INSERT OR IGNORE INTO channels (id, server_id, name, type, position, created_at)
-                    VALUES ('chan-afk', 'server-1', 'AFK', 'voice', 99, datetime('now'))`);
+    await runQuery(`INSERT INTO channels (id, server_id, name, type, position, created_at)
+                    VALUES ('chan-afk', 'server-1', 'AFK', 'voice', 99, ${sql.now})
+                    ON CONFLICT DO NOTHING`);
     await runQuery(`UPDATE servers SET afk_channel_id = 'chan-afk', afk_timeout = 60 WHERE id = 'server-1'`);
     await runQuery(`DELETE FROM voice_states WHERE user_id IN ('user-2', 'user-3')`);
     await runQuery(`INSERT INTO voice_states (user_id, server_id, channel_id, session_id) VALUES ('user-2', 'server-1', 'chan-104', 's2')`);
@@ -2133,11 +2176,11 @@ describe('search operators', () => {
   });
 
   test('an unusable operator value is left in the text rather than silently dropped', () => {
-    const { term, filters, unknown } = parseSearchQuery('before:yesterday has:vibes hello');
+    const { term, filters, unknown } = parseSearchQuery('before:someday has:vibes hello');
     assert.equal(filters.before, null);
     assert.deepEqual(filters.has, []);
-    assert.deepEqual(unknown, ['before:yesterday', 'has:vibes']);
-    assert.equal(term, 'before:yesterday has:vibes hello');
+    assert.deepEqual(unknown, ['before:someday', 'has:vibes']);
+    assert.equal(term, 'before:someday has:vibes hello');
   });
 
   test('during: accepts a day, a month or a year', () => {
@@ -2340,7 +2383,7 @@ describe('data export and account deletion', () => {
   });
 
   test('deleting an account that owns a server is refused, with the servers named', async () => {
-    const { status, body } = await api('DELETE', '/api/users/@me', undefined);
+    const { status, body } = await api('DELETE', '/api/users/@me', { password: 'antigravity123' });
     assert.equal(status, 409);
     assert.equal(body.code, 'OWNS_SERVERS');
     assert.ok(body.details.servers.length > 0);
@@ -2357,7 +2400,14 @@ describe('data export and account deletion', () => {
       channel_id: 'chan-102', content: 'still here after I go'
     }, { 'x-user-id': id });
 
-    const gone = await api('DELETE', '/api/users/@me', undefined, { 'x-user-id': id });
+    // Irreversible, so it needs the password again, not just a session.
+    const unconfirmed = await api('DELETE', '/api/users/@me', undefined, { 'x-user-id': id });
+    assert.equal(unconfirmed.status, 401);
+    assert.equal(unconfirmed.body.code, 'PASSWORD_REQUIRED');
+    const wrong = await api('DELETE', '/api/users/@me', { password: 'not the password' }, { 'x-user-id': id });
+    assert.equal(wrong.status, 401);
+
+    const gone = await api('DELETE', '/api/users/@me', { password: 'correct horse battery staple' }, { 'x-user-id': id });
     assert.equal(gone.status, 200);
 
     const history = await get('/api/messages/chan-102?limit=100');

@@ -32,7 +32,8 @@ export const SLASH_COMMANDS = () => [
     name: 'shrug',
     description: t('slash.shrug'),
     usage: '/shrug [message]',
-    run: (rest) => ({ content: `${rest} ¯\\_(ツ)_/¯`.trim() })
+    // Escaped so Markdown does not turn _(ツ)_ into italics: renders ¯\_(ツ)_/¯.
+    run: (rest) => ({ content: `${rest} ¯\\\\\\_(ツ)\\_/¯`.trim() })
   },
   {
     name: 'tableflip',

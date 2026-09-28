@@ -1,19 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   User, MessageSquare, UserPlus, UserMinus, Ban, Shield, Pencil, Clock,
-  LogOut, Copy, ShieldAlert, ShieldOff
+  LogOut, Copy, ShieldAlert, ShieldOff, Eraser
 } from 'lucide-react';
 import ContextMenu from './ContextMenu';
+import ModerationDialog, { TIMEOUT_OPTIONS } from './admin/ModerationDialog';
 import { getPreferences } from '../hooks/useUserSettings';
 import { t } from '../i18n/index.jsx';
-
-const TIMEOUT_OPTIONS = () => [
-  { minutes: 60,     label: t('members.timeout60m') },
-  { minutes: 5,      label: t('members.timeout5m') },
-  { minutes: 10,     label: t('members.timeout10m') },
-  { minutes: 1440,   label: t('members.timeout1d') },
-  { minutes: 10080,  label: t('members.timeout1w') }
-];
 
 /**
  * Right-click a member — the same action set Discord offers, with every entry
@@ -22,8 +15,11 @@ const TIMEOUT_OPTIONS = () => [
 export default function MemberContextMenu({
   user, x, y, currentUser, isGuild, server, roles = [], members = [], friends = [], blocked = [],
   can, onClose, onProfile, onMessage, onAddFriend, onRemoveFriend, onBlock, onUnblock,
-  onChangeNickname, onToggleRole, onTimeout, onRemoveTimeout, onKick, onBan, onToast
+  onChangeNickname, onToggleRole, onTimeout, onRemoveTimeout, onKick, onBan, onResetProfile, onToast
 }) {
+  // Ban opens Discord's full dialog (reason + "delete message history")
+  // right here, in place of the menu, instead of a bare confirm.
+  const [banning, setBanning] = useState(false);
   const isSelf = user.id === currentUser?.id;
   const isOwnerTarget = server?.owner_id === user.id;
   const friend = friends.find((f) => f.id === user.id);
@@ -52,6 +48,11 @@ export default function MemberContextMenu({
     ((isGuild && isSelf && can('CHANGE_NICKNAME')) || (canModerate && can('MANAGE_NICKNAMES'))) && {
       icon: Pencil, label: t('members.changeNickname'), action: () => onChangeNickname(member ?? user)
     },
+    // Clears their collectibles here and hides their worn tag (audit-logged);
+    // the same permission as renaming them.
+    canModerate && can('MANAGE_NICKNAMES') && onResetProfile && {
+      icon: Eraser, label: t('profiles.resetMenu'), action: () => onResetProfile(member ?? user)
+    },
     isGuild && can('MANAGE_ROLES') && !isOwnerTarget && {
       icon: Shield,
       label: t('members.roles'),
@@ -76,7 +77,7 @@ export default function MemberContextMenu({
           }))
         }),
     canModerate && can('KICK_MEMBERS') && { icon: LogOut, label: t('members.kick'), danger: true, action: () => onKick(user) },
-    canModerate && can('BAN_MEMBERS') && { icon: Ban, label: t('members.ban'), danger: true, action: () => onBan(user) },
+    canModerate && can('BAN_MEMBERS') && { icon: Ban, label: t('members.ban'), danger: true, keepOpen: true, action: () => setBanning(true) },
 
     getPreferences().chat.developerMode && { separator: true },
     getPreferences().chat.developerMode && {
@@ -88,6 +89,19 @@ export default function MemberContextMenu({
       }
     }
   ];
+
+  if (banning && server?.id) {
+    const name = member?.nickname || member?.display_name || user.display_name || user.username;
+    return (
+      <ModerationDialog
+        kind="ban"
+        serverId={server.id}
+        targets={[{ id: user.id, name }]}
+        onDone={({ done }) => { if (done.length) onToast?.(t('members.banned', { name }), { type: 'success', ttl: 3000 }); }}
+        onClose={onClose}
+      />
+    );
+  }
 
   return <ContextMenu x={x} y={y} items={items} onClose={onClose} />;
 }

@@ -1,0 +1,95 @@
+/* ==========================================================================
+   Profile cosmetics — motion is opt-in per surface and always stops under
+   reduced motion (OS setting or Accessibility › Reduced motion).
+   ========================================================================== */
+
+/* Gradient names pan slowly, only where the component asked for it. */
+.pf-name-pan {
+  animation: pf-name-pan 6s linear infinite;
+}
+@keyframes pf-name-pan {
+  to { background-position: 200% 0; }
+}
+
+/* Nameplate: a static art strip; a soft sheen passes over it on hover. */
+.pf-nameplate {
+  position: relative;
+  isolation: isolate;
+}
+/* The art, masked: invisible under the avatar and the start of the name
+   (0–22%), a faint 18% by the middle, full strength from 88%. The row's own
+   background (surface, gradient theme, hover/selected wash) is what text sits
+   on, so the theme's contrast guarantees hold. */
+.pf-nameplate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--pf-nameplate-art) right center / cover no-repeat;
+  -webkit-mask-image: linear-gradient(90deg, transparent 22%, rgb(0 0 0 / 0.18) 50%, #000 88%);
+  mask-image: linear-gradient(90deg, transparent 22%, rgb(0 0 0 / 0.18) 50%, #000 88%);
+}
+.pf-nameplate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(100deg, transparent 30%, rgb(255 255 255 / 0.18) 45%, transparent 60%);
+  background-size: 250% 100%;
+  background-position: 120% 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.pf-nameplate:hover::after,
+.pf-nameplate:focus-within::after {
+  opacity: 1;
+  animation: pf-sheen 1.6s ease-out 1 both;
+}
+@keyframes pf-sheen {
+  to { background-position: -40% 0; }
+}
+
+/* The profile frame: a 9-slice SVG around the whole card. */
+.pf-frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 14px solid transparent;
+  border-image-slice: 24;
+  border-image-width: 14px;
+  border-image-repeat: round;
+  z-index: 3;
+}
+
+/* The status "thought bubble" beside the avatar. */
+.pf-bubble {
+  position: relative;
+}
+.pf-bubble::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: inherit;
+  border: inherit;
+}
+
+:root[data-reduced-motion="true"] :is(.pf-name-pan, .pf-nameplate:hover::after, .pf-nameplate::after) {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduced-motion="false"]) :is(.pf-name-pan, .pf-nameplate::after) {
+    animation: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .pf-nameplate, .pf-frame { background-image: none !important; border-image: none !important; }
+  .pf-nameplate::before { display: none; }
+  .pf-gradient-name { color: CanvasText !important; background: none !important; }
+}

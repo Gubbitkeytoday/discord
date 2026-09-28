@@ -10,9 +10,10 @@ import {
   Bot, Plus, Copy, RefreshCw, Trash2, Loader2, Check, ShieldAlert, Server as ServerIcon, X
 } from 'lucide-react';
 import { get, post, patch, del } from '../../api';
-import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { t } from '../../i18n/index.jsx';
-import { PageHeader, Section, Note, Divider } from './primitives';
+import ConfirmModal from '../ConfirmModal';
+import { PageHeader, Section, Note, Divider, useDialog } from './primitives';
+import { proxiedImageUrl } from '../../utils/media';
 
 const inputClass = 'w-full bg-d-input text-d-strong rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-d-brand';
 
@@ -25,6 +26,7 @@ export default function ApplicationsTab({ servers = [], onToast }) {
   const [busy, setBusy] = useState(false);
   const [freshToken, setFreshToken] = useState(null);   // { id, token }
   const [inviting, setInviting] = useState(null);       // application being invited
+  const [confirm, setConfirm] = useState(null);         // { kind: 'token' | 'delete', app }
 
   const load = () => get('/api/applications')
     .then((list) => setApps(Array.isArray(list) ? list : []))
@@ -98,7 +100,7 @@ export default function ApplicationsTab({ servers = [], onToast }) {
                 <div className="flex items-start gap-3">
                   <div className="w-10 h-10 rounded-full bg-d-brand/20 flex items-center justify-center shrink-0">
                     {app.icon_url
-                      ? <img src={app.icon_url} alt="" className="w-full h-full rounded-full object-cover" />
+                      ? <img src={proxiedImageUrl(app.icon_url)} alt="" className="w-full h-full rounded-full object-cover" />
                       : <Bot className="w-5 h-5 text-d-brand" aria-hidden="true" />}
                   </div>
                   <div className="min-w-0 flex-1">
@@ -139,26 +141,14 @@ export default function ApplicationsTab({ servers = [], onToast }) {
                       </button>
                       <button
                         type="button"
-                        onClick={async () => {
-                          try {
-                            const { token } = await post(`/api/applications/${app.id}/token`, {});
-                            setFreshToken({ id: app.id, token });
-                            onToast?.(t('dev.tokenReset'), { type: 'success' });
-                          } catch (err) { onToast?.(err.message, { type: 'error' }); }
-                        }}
+                        onClick={() => setConfirm({ kind: 'token', app })}
                         className="inline-flex items-center gap-1.5 text-xs font-semibold bg-d-surface hover:bg-d-hover text-d-strong px-3 py-1.5 rounded-md"
                       >
                         <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />{t('dev.resetToken')}
                       </button>
                       <button
                         type="button"
-                        onClick={async () => {
-                          try {
-                            await del(`/api/applications/${app.id}`);
-                            onToast?.(t('dev.deleted', { name: app.name }), { type: 'success' });
-                            await load();
-                          } catch (err) { onToast?.(err.message, { type: 'error' }); }
-                        }}
+                        onClick={() => setConfirm({ kind: 'delete', app })}
                         className="inline-flex items-center gap-1.5 text-xs font-semibold text-d-danger hover:underline px-2 py-1.5"
                       >
                         <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />{t('common.delete')}
@@ -173,6 +163,35 @@ export default function ApplicationsTab({ servers = [], onToast }) {
       </Section>
 
       <Note>{t('dev.docsHint')}</Note>
+
+      {/* Both are irreversible: a reset token disconnects the running bot, and
+          deleting removes the bot from every server it was added to. */}
+      {confirm?.kind === 'token' && (
+        <ConfirmModal
+          title={t('dev.resetTokenTitle', { name: confirm.app.name })}
+          body={t('dev.resetTokenBody')}
+          confirmLabel={t('dev.resetToken')}
+          onConfirm={async () => {
+            const { token } = await post(`/api/applications/${confirm.app.id}/token`, {});
+            setFreshToken({ id: confirm.app.id, token });
+            onToast?.(t('dev.tokenReset'), { type: 'success' });
+          }}
+          onClose={() => setConfirm(null)}
+        />
+      )}
+      {confirm?.kind === 'delete' && (
+        <ConfirmModal
+          title={t('dev.deleteTitle', { name: confirm.app.name })}
+          body={t('dev.deleteBody')}
+          confirmLabel={t('common.delete')}
+          onConfirm={async () => {
+            await del(`/api/applications/${confirm.app.id}`);
+            onToast?.(t('dev.deleted', { name: confirm.app.name }), { type: 'success' });
+            await load();
+          }}
+          onClose={() => setConfirm(null)}
+        />
+      )}
 
       {inviting && (
         <InviteBotModal
@@ -192,7 +211,7 @@ function InviteBotModal({ application, servers, onClose, onToast }) {
   const [selected, setSelected] = useState(DEFAULT_PERMISSIONS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const dialogRef = useFocusTrap(true, onClose);
+  const dialogRef = useDialog(onClose);
 
   useEffect(() => {
     get('/api/meta/bot-permissions')

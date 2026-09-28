@@ -6,17 +6,19 @@
 //  what a chat client needs to render a row without extra round trips.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery, transaction } from '../db.js';
+import { runQuery, getQuery, allQuery, transaction, sql, isPostgres } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
-import { getFile, addReference, releaseReference, formatBytes } from '../storageService.js';
+import { withUrls, addReference, releaseReference, formatBytes } from '../storageService.js';
 import { validateEmbeds, validateComponents } from './applications.js';
 import { getFileType } from '../lib/mediaProbe.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { computeBasePermissions, ALL_PERMISSIONS, has } from '../lib/permissions.js';
 import * as automod from './automod.js';
-import { assertChannelAccess, canInChannel } from './access.js';
+import { assertChannelAccess, canInChannel, readableChannelIds } from './access.js';
 import { validatePollInput, writePollRows, attachPolls } from './polls.js';
 import { parseSearchQuery, hasFilters, periodBounds } from '../lib/searchQuery.js';
+import { fanOutMessageNotifications, visibleChannelIds } from './notifications.js';
+import { consumeShared } from '../lib/rateLimit.js';
 
 const MENTION_USER    = /<@!?(\d+|user-[\w-]+)>/g;
 const MENTION_ROLE    = /<@&([\w-]+)>/g;
@@ -112,27 +114,94 @@ function normaliseWaveform(input) {
   return points.join(',');
 }
 
-function attachmentToWire(row) {
+/**
+ * The wire shape of one attachment. `row` is the attachments row; `file` is
+ * the files row resolved through storageService.withUrls (null when the file
+ * is gone). Media fields come from the file, because the media pipeline fills
+ * them in *after* the message is posted (dimensions of a HEIC, a video's
+ * poster, renditions finishing in the background) — the copies on the
+ * attachments row are only what was known at send time.
+ *
+ * Everything the client needs to render without layout shift and at the right
+ * size, matching the /api/upload descriptor (routes/files.js toDescriptor):
+ *   width/height    display size, EXIF orientation applied
+ *   thumbhash       ~25-byte placeholder (base64), `placeholder` the older data URI
+ *   renditions      [{ format, width, height, url, … }] and `srcset` per format
+ *   display_url     /api/media/<id>: best format for the browser (?w=<px>)
+ *   poster_url      first frame of a video
+ *   media_status    'ready' | 'processing' | 'failed' | 'unsupported' | null
+ *   download_url    the original, as an attachment
+ */
+function attachmentToWire(row, file = null) {
+  const variants = file?.variants ?? {};
   return {
     id: row.id,
     file_id: row.file_id,
-    url: row.url,
-    thumbnail_url: row.thumbnail_url ?? row.url,
+    url: file?.url ?? null,
+    thumbnail_url: variants.thumb?.url ?? variants.medium?.url ?? file?.url ?? null,
+    download_url: file?.download_url ?? (row.file_id ? `/api/files/${row.file_id}?download=1` : null),
+    display_url: file?.display_url ?? null,
+    poster_url: variants.poster?.url ?? null,
     filename: row.filename,
-    file_type: getFileType(row.content_type),
+    // withUrls downgrades undisplayable media (HEIC without a decoder) to 'file'.
+    file_type: file?.file_type ?? getFileType(row.content_type),
     mimetype: row.content_type,
     size: row.size,
     size_human: formatBytes(row.size ?? 0),
-    width: row.width,
-    height: row.height,
-    duration_secs: row.duration_secs,
+    width: file?.width ?? row.width,
+    height: file?.height ?? row.height,
+    duration_secs: file?.duration_secs ?? row.duration_secs,
+    is_animated: Boolean(file?.is_animated),
     // Present only on a voice note; its presence is what tells the client to
     // render a player instead of a file chip.
     waveform: row.waveform ? row.waveform.split(',').map(Number) : null,
-    placeholder: row.placeholder ?? null,
+    placeholder: file?.blurhash ?? null,
+    thumbhash: file?.thumbhash ?? null,
+    media_status: file?.media_status ?? null,
+    renditions: file?.renditions ?? [],
+    srcset: file?.srcset ?? {},
     description: row.description,
     is_spoiler: Boolean(row.is_spoiler)
   };
+}
+
+/**
+ * files + file_variants + file_renditions for many ids in three queries —
+ * the same result as storageService.getFile() per id (which is three queries
+ * *each*, and was the N+1 in hydrate: docs/PERFORMANCE.md, "Smaller items").
+ */
+async function loadFilesWithUrls(fileIds) {
+  const ids = [...new Set(fileIds.filter(Boolean))];
+  const byId = new Map();
+  if (!ids.length) return byId;
+  const marks = ids.map(() => '?').join(',');
+  const [files, variants, renditions] = await Promise.all([
+    allQuery(`SELECT * FROM files WHERE id IN (${marks}) AND deleted_at IS NULL`, ids),
+    allQuery(
+      `SELECT file_id, kind, storage_key, mime_type, width, height, size
+         FROM file_variants WHERE file_id IN (${marks})`,
+      ids
+    ),
+    allQuery(
+      `SELECT file_id, bucket, format, storage_key, mime_type, width, height, size, animated
+         FROM file_renditions WHERE file_id IN (${marks}) ORDER BY format, bucket`,
+      ids
+    )
+  ]);
+  const group = (rows) => {
+    const map = new Map();
+    for (const { file_id: fileId, ...rest } of rows) {
+      if (!map.has(fileId)) map.set(fileId, []);
+      map.get(fileId).push(rest);
+    }
+    return map;
+  };
+  const variantsByFile = group(variants);
+  const renditionsByFile = group(renditions);
+  for (const file of files) {
+    byId.set(file.id, withUrls(file, variantsByFile.get(file.id) ?? [], renditionsByFile.get(file.id) ?? []));
+  }
+  return byId;
 }
 
 /**
@@ -159,16 +228,12 @@ async function hydrate(rows, viewerId = null) {
     )
   ]);
 
-  // Resolve URLs through the storage layer so visibility rules are respected.
+  // Resolve URLs through the storage layer (withUrls) so visibility rules are
+  // respected — batched: three queries for every attachment on the page.
+  const filesById = await loadFilesWithUrls(attachmentRows.map((row) => row.file_id));
   const attachmentsByMessage = new Map();
   for (const row of attachmentRows) {
-    const file = await getFile(row.file_id);
-    const wire = attachmentToWire({
-      ...row,
-      url: file?.url ?? null,
-      placeholder: file?.blurhash ?? null,
-      thumbnail_url: file?.variants?.thumb?.url ?? file?.variants?.medium?.url ?? file?.url ?? null
-    });
+    const wire = attachmentToWire(row, filesById.get(row.file_id) ?? null);
     if (!attachmentsByMessage.has(row.message_id)) attachmentsByMessage.set(row.message_id, []);
     attachmentsByMessage.get(row.message_id).push(wire);
   }
@@ -217,6 +282,9 @@ async function hydrate(rows, viewerId = null) {
         ? { id: row.sticker_id, name: row.sticker_name, url: row.sticker_url, format: row.sticker_format }
         : null,
       pinned: Boolean(row.pinned),
+      // Forwarding v2: where a forwarded copy came from (snapshot metadata
+      // taken at send time, after the sender's read access was checked).
+      forwarded_from: safeParse(row.forwarded_from, null),
       crossposted: Boolean(Number(row.flags ?? 0) & 1),
       edited_at: row.edited_at,
       created_at: row.created_at
@@ -333,7 +401,8 @@ async function assertExternalEmojiAllowed({ content, userId, channel, senderPerm
 export async function createMessage({
   channelId, userId, content = '', attachments = [], replyToId = null,
   nonce = null, type = 'default', tts = false, skipModeration = false, stickerId = null,
-  poll = null, embeds = null, components = null, applicationId = null, ephemeralUserId = null
+  poll = null, embeds = null, components = null, applicationId = null, ephemeralUserId = null,
+  forwardedFrom = null, allowedMentions = null
 }) {
   const channel = await getQuery(
     `SELECT id, server_id, rate_limit_per_user, locked, archived, type AS channel_type
@@ -347,15 +416,32 @@ export async function createMessage({
     throw new ApiError('Create a post instead of sending a message in a forum', { code: 'FORUM_NEEDS_POST' });
   }
   if (channel.locked) {
-    throw new ApiError('ห้องนี้ถูกล็อก ส่งข้อความไม่ได้', { status: 403, code: 'CHANNEL_LOCKED' });
+    throw new ApiError('This channel is locked', { status: 403, code: 'CHANNEL_LOCKED' });
   }
   if (channel.archived) {
-    throw new ApiError('เธรดนี้ถูกเก็บถาวรแล้ว', { status: 403, code: 'THREAD_ARCHIVED' });
+    throw new ApiError('This thread is archived', { status: 403, code: 'THREAD_ARCHIVED' });
+  }
+
+  // Forwarding: the copy is built from the *source* message on the server,
+  // never from what the client says it contained, and only once the sender
+  // has shown they can read the source. See loadForwardSource.
+  let forward = null;
+  if (forwardedFrom) {
+    forward = await loadForwardSource({ forwardedFrom, userId });
+    content = forward.content;
+    attachments = forward.attachments;
+    stickerId = forward.stickerId;
+    poll = null;
   }
 
   // Webhooks and system messages skip moderation and carry no user; every real
   // sender must be able to see the channel and hold SEND_MESSAGES in it.
+  if (!Array.isArray(attachments)) attachments = [];
+  if (attachments.length > 10) {
+    throw new ApiError('A message can carry at most 10 attachments', { code: 'TOO_MANY_ATTACHMENTS' });
+  }
   let senderPermissions = '0';
+  let senderRoleIds = null;
   if (!skipModeration && userId) {
     const access = await assertChannelAccess({
       channelId, userId,
@@ -363,6 +449,7 @@ export async function createMessage({
       permission: channel.channel_type === 'thread' ? 'SEND_MESSAGES_IN_THREADS' : 'SEND_MESSAGES'
     });
     senderPermissions = access.isDm ? String(ALL_PERMISSIONS) : access.permissions;
+    senderRoleIds = access.isDm ? [] : access.roleIds ?? null;
     if (!access.isDm && attachments.length > 0 && !has(access.permissions, 'ATTACH_FILES')) {
       throw ApiError.forbidden('Missing permission: ATTACH_FILES');
     }
@@ -406,30 +493,49 @@ export async function createMessage({
   }
 
   // Client-supplied nonce makes retries idempotent: a dropped ack must not
-  // produce a duplicate message.
-  if (nonce) {
+  // produce a duplicate message. The unique index idx_messages_nonce
+  // (channel_id, user_id, nonce) is the check: the INSERT below does nothing
+  // on a conflict, so an ordinary send no longer pays a SELECT first. This
+  // looks up the original only once we know there is one.
+  const replayOf = async () => {
+    if (!nonce) return null;
     const existing = await getQuery(
       `SELECT id FROM messages WHERE channel_id = ? AND user_id = ? AND nonce = ?`,
       [channelId, userId, nonce]
     );
-    if (existing) {
-      // A retried send must not fan out again — the first attempt already did.
-      return withDelivery(await getMessage(existing.id, userId), {
-        notifications: [], audience: [], duplicate: true
-      });
+    if (!existing) return null;
+    // A retried send must not fan out again — the first attempt already did.
+    return withDelivery(await getMessage(existing.id, userId), {
+      notifications: [], audience: [], duplicate: true
+    });
+  };
+
+  // Moderation runs before anything is written, so a blocked message never
+  // exists — not even as a soft-deleted row. A retry of a send that already
+  // went through can trip slowmode (the original *is* the last message); it
+  // gets the original back rather than an error.
+  if (!skipModeration) {
+    try {
+      await moderate();
+    } catch (err) {
+      const replay = await replayOf();
+      if (replay) return replay;
+      throw err;
     }
   }
 
-  // Moderation runs before anything is written, so a blocked message never
-  // exists — not even as a soft-deleted row.
-  if (!skipModeration) {
-    const { roleIds } = channel.server_id
+  async function moderate() {
+    // The access check above already resolved the sender's roles.
+    const { roleIds } = senderRoleIds
+      ? { roleIds: senderRoleIds }
+      : channel.server_id
       ? await resolveSenderContext(channel.server_id, userId)
       : { roleIds: [] };
     const permissions = senderPermissions;
 
     await automod.assertCanSpeak({
-      serverId: channel.server_id, channelId, userId, permissions
+      serverId: channel.server_id, channelId, userId, permissions,
+      slowmodeSeconds: Number(channel.rate_limit_per_user) || 0
     });
 
     const verdict = await automod.evaluate({
@@ -441,42 +547,61 @@ export async function createMessage({
         serverId: channel.server_id, userId, channelId,
         rule: verdict.rule, reason: verdict.reason, content: trimmed
       });
-      throw new ApiError(`ข้อความถูกบล็อกโดย AutoMod: ${verdict.reason}`, {
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
         status: 403, code: 'AUTOMOD_BLOCKED',
         details: { rule: verdict.rule?.name, reason: verdict.reason }
       });
     }
   }
 
+  let repliedUserId = null;
   if (replyToId) {
     const target = await getQuery(
-      `SELECT id FROM messages WHERE id = ? AND channel_id = ? AND deleted_at IS NULL`, [replyToId, channelId]
+      `SELECT id, user_id FROM messages WHERE id = ? AND channel_id = ? AND deleted_at IS NULL`, [replyToId, channelId]
     );
     // Replying to a message that is gone is allowed on Discord too — the reply
     // just renders without its quote — but a reply must stay inside its channel.
     if (!target) replyToId = null;
+    else repliedUserId = target.user_id ?? null;
   }
 
-  const mentions = parseMentions(trimmed);
+  // A forwarded copy pings nobody: the words are someone else's, quoted.
+  const mentions = forward
+    ? { users: [], roles: [], channels: [], everyone: false, here: false }
+    : parseMentions(trimmed);
+  // allowed_mentions.replied_user: a reply pings the author of the message it
+  // answers unless the sender turned the "@ mention" toggle off. Without an
+  // allowed_mentions object at all it pings, as Discord's client does.
+  const pingReplied = allowedMentions && typeof allowedMentions === 'object'
+    ? Boolean(allowedMentions.replied_user)
+    : true;
+  if (repliedUserId && pingReplied && repliedUserId !== userId && !mentions.users.includes(repliedUserId)) {
+    mentions.users.push(repliedUserId);
+  }
   const messageId = generateId();
   let notifications = [];
 
+  let duplicateNonce = false;
   await transaction(async () => {
-    await runQuery(
+    duplicateNonce = false;   // the callback can be retried
+    const inserted = await runQuery(
       `INSERT INTO messages (id, channel_id, server_id, user_id, content, type,
                              reply_to_id, mention_everyone, tts, nonce, sticker_id,
-                             embeds, components, application_id, ephemeral_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             embeds, components, application_id, ephemeral_user_id, forwarded_from)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${nonce ? ' ON CONFLICT DO NOTHING' : ''}`,
       [messageId, channelId, channel.server_id, userId, trimmed,
        replyToId ? 'reply' : type, replyToId, mentions.everyone ? 1 : 0, tts ? 1 : 0, nonce,
        sticker?.id ?? null, JSON.stringify(richEmbeds), JSON.stringify(messageComponents),
-       applicationId, ephemeralUserId]
+       applicationId, ephemeralUserId, forward ? JSON.stringify(forward.snapshot) : null]
     );
+    // Same (channel, author, nonce) already stored: this is a retry. Write
+    // nothing else; the original is returned below.
+    if (nonce && Number(inserted?.changes) === 0) {
+      duplicateNonce = true;
+      return;
+    }
 
-    await runQuery(
-      `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-      [trimmed, messageId, channelId]
-    );
+    await indexForSearch(messageId, channelId, trimmed);
 
     let position = 0;
     for (const descriptor of attachments) {
@@ -489,6 +614,12 @@ export async function createMessage({
         `SELECT * FROM files WHERE id = ? AND deleted_at IS NULL`, [fileId]
       );
       if (!file) continue; // silently drop unknown ids rather than 500
+      // Someone else's private upload cannot be re-posted by id: that would
+      // publish its name, size and dimensions and pin it against GC.
+      // A forward may carry the source's files: the sender was just shown to
+      // be able to read the message they are attached to.
+      if (file.visibility === 'private' && file.uploader_id !== userId
+          && !forward?.fileIds.has(file.id)) continue;
 
       // The waveform is the one field the client is the authority on — it is a
       // visual summary of audio the browser already decoded, and re-deriving it
@@ -517,25 +648,30 @@ export async function createMessage({
     for (const [targetType, list] of [['user', mentions.users], ['role', mentions.roles], ['channel', mentions.channels]]) {
       for (const targetId of list) {
         await runQuery(
-          `INSERT OR IGNORE INTO mentions (message_id, target_type, target_id) VALUES (?, ?, ?)`,
+          `INSERT INTO mentions (message_id, target_type, target_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
           [messageId, targetType, targetId]
         );
       }
     }
 
+    // Monotonic: when two sends commit out of order, the pointer still ends
+    // on the newest id (ids are same-length snowflakes, so text order is
+    // numeric order).
     await runQuery(
       `UPDATE channels
-          SET last_message_id = ?, message_count = message_count + 1,
-              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          SET last_message_id = CASE WHEN last_message_id IS NULL OR last_message_id < ?
+                                     THEN ? ELSE last_message_id END,
+              message_count = message_count + 1,
+              updated_at = ${sql.now}
         WHERE id = ?`,
-      [messageId, channelId]
+      [messageId, messageId, channelId]
     );
 
     // Posting in a thread joins it, so you receive its later messages —
     // Discord does the same.
     if (channel.channel_type === 'thread' && userId) {
       await runQuery(
-        `INSERT OR IGNORE INTO channel_recipients (channel_id, user_id) VALUES (?, ?)`,
+        `INSERT INTO channel_recipients (channel_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
         [channelId, userId]
       );
       await runQuery(
@@ -557,26 +693,38 @@ export async function createMessage({
     if (userId) {
       await runQuery(
         `INSERT INTO read_states (user_id, channel_id, last_read_message_id, mention_count, last_viewed_at)
-         VALUES (?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+         VALUES (?, ?, ?, 0, ${sql.now})
          ON CONFLICT(user_id, channel_id)
          DO UPDATE SET last_read_message_id = excluded.last_read_message_id,
                        last_viewed_at = excluded.last_viewed_at`,
         [userId, channelId, messageId]
       );
     }
-  });
+    // The hot path. Every statement above is an insert, an upsert or an atomic
+    // update of a counter/pointer, so READ COMMITTED is enough; SERIALIZABLE
+    // would make every concurrent send in a busy channel conflict on the
+    // channel row and retry.
+  }, { isolation: 'read committed' });
 
-  // Everyone else in the channel gains an unread, and a mention if named.
+  if (duplicateNonce) {
+    const replay = await replayOf();
+    if (replay) return replay;
+    // Unreachable unless the original was hard-deleted in between.
+    throw new ApiError('A message with this nonce is already being sent', { status: 409, code: 'DUPLICATE_NONCE' });
+  }
+
+  // Everyone else in the channel gains an unread (lazily: last_message_id
+  // moved past their marker), a mention badge if named, and whatever their
+  // notification settings ask for — see services/notifications.js.
   //
-  // Deliberately outside the transaction above: resolving VIEW_CHANNEL for each
-  // member is several queries per person, and holding SQLite's single write
-  // lock for a 500-member guild would serialise every other write behind one
-  // message. A failure here must also not un-send a message that was accepted.
+  // Deliberately outside the transaction above: a failure here must not
+  // un-send a message that was accepted, and the send's write lock is not
+  // held while the audience is resolved. The fan-out itself is set-based: a
+  // fixed number of queries however large the guild.
   try {
-    notifications = await bumpUnreadCounters({
-      channelId, serverId: channel.server_id, authorId: userId, mentions,
-      messageId, preview: trimmed.slice(0, 200), authorPermissions: senderPermissions,
-      channelType: channel.channel_type
+    notifications = await fanOutMessageNotifications({
+      channelId, authorId: userId, mentions, messageId,
+      content: trimmed, authorPermissions: senderPermissions
     });
   } catch (err) {
     console.error('unread fan-out failed for', messageId, err.message);
@@ -590,118 +738,74 @@ export async function createMessage({
   return withDelivery(message, { notifications, audience: notifications.reached ?? [] });
 }
 
+/** Destinations one message may be forwarded to per minute (per sender). */
+export const FORWARD_DESTINATIONS_MAX = 5;
+
 /**
- * Bump unread/mention counters and write a notification row per mentioned user.
- *
- * This lives in the service, not the socket layer, so a message created over
- * REST produces exactly the same side effects as one created over the gateway.
- * Returns the notification rows so the caller can push them to live clients.
+ * Resolve `forwarded_from` ({ message_id } or an id) into what the copy is
+ * made of. The sender must be able to read the source (READ_MESSAGE_HISTORY
+ * in a guild, recipient in a DM, and not refused by age); anything else looks
+ * like a missing message, so a forward cannot probe for ids. Forwarding one
+ * message is capped at FORWARD_DESTINATIONS_MAX destinations a minute.
  */
-async function bumpUnreadCounters({
-  channelId, serverId, authorId, mentions, messageId, preview, authorPermissions = '0',
-  channelType = 'text'
-}) {
-  // A thread notifies the people in it, not the whole guild — otherwise every
-  // member collects an unread for every thread anyone opens.
-  const isThread = channelType === 'thread';
-  const audience = isThread
-    ? await allQuery(
-        `SELECT cr.user_id, u.status FROM channel_recipients cr
-           JOIN users u ON u.id = cr.user_id
-          WHERE cr.channel_id = ?`,
-        [channelId]
-      )
-    : serverId
-    ? await allQuery(
-        `SELECT sm.user_id, u.status FROM server_members sm
-           JOIN users u ON u.id = sm.user_id
-          WHERE sm.server_id = ? AND sm.left_at IS NULL`,
-        [serverId]
-      )
-    : await allQuery(
-        `SELECT cr.user_id, u.status FROM channel_recipients cr
-           JOIN users u ON u.id = cr.user_id
-          WHERE cr.channel_id = ?`,
-        [channelId]
-      );
-
-  const mentionedUsers = new Set(mentions.users);
-  const mentionedRoles = new Set(mentions.roles);
-  // @everyone / @here are only mentions when the author may actually use them.
-  const canMentionEveryone = has(authorPermissions, 'MENTION_EVERYONE');
-  const notifications = [];
-  const reached = [];
-
-  for (const { user_id: uid, status } of audience) {
-    if (uid === authorId) continue;
-
-    // Nobody gets an unread for a channel they cannot see — the unread marker
-    // alone would leak the existence of a private channel, and the notification
-    // body would leak its content.
-    if (serverId && !(await canInChannel({ channelId, userId: uid, permission: 'VIEW_CHANNEL' }))) {
-      continue;
-    }
-    reached.push(uid);
-
-    let isMention = !serverId || mentionedUsers.has(uid);
-    if (!isMention && canMentionEveryone) {
-      if (mentions.everyone) isMention = true;
-      else if (mentions.here && status && status !== 'offline' && status !== 'invisible') isMention = true;
-    }
-    if (!isMention && mentionedRoles.size > 0 && serverId) {
-      const hit = await getQuery(
-        `SELECT 1 FROM member_roles
-          WHERE server_id = ? AND user_id = ? AND role_id IN (${[...mentionedRoles].map(() => '?').join(',')})
-          LIMIT 1`,
-        [serverId, uid, ...mentionedRoles]
-      );
-      if (hit) isMention = true;
-    }
-
-    await runQuery(
-      `INSERT INTO read_states (user_id, channel_id, mention_count)
-       VALUES (?, ?, ?)
-       ON CONFLICT(user_id, channel_id)
-       DO UPDATE SET mention_count = mention_count + ?`,
-      [uid, channelId, isMention ? 1 : 0, isMention ? 1 : 0]
-    );
-
-    if (!isMention) continue;
-
-    // Muting the channel or the whole server both suppress the notification.
-    const muted = await getQuery(
-      `SELECT 1 FROM channel_settings
-        WHERE user_id = ? AND channel_id = ? AND muted = 1
-          AND (muted_until IS NULL OR muted_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
-      [uid, channelId]
-    );
-    if (muted) continue;
-    if (serverId) {
-      const serverMuted = await getQuery(
-        `SELECT 1 FROM server_settings WHERE user_id = ? AND server_id = ? AND muted = 1`,
-        [uid, serverId]
-      );
-      if (serverMuted) continue;
-    }
-
-    const id = generateId();
-    const type = serverId ? 'mention' : 'dm';
-    await runQuery(
-      `INSERT INTO notifications (id, user_id, type, server_id, channel_id, message_id, actor_id, body)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, uid, type, serverId, channelId, messageId, authorId, preview]
-    );
-    notifications.push({
-      id, user_id: uid, type, server_id: serverId, channel_id: channelId,
-      message_id: messageId, actor_id: authorId, body: preview, preview
+async function loadForwardSource({ forwardedFrom, userId }) {
+  if (!userId) throw ApiError.unauthorized();
+  const sourceId = typeof forwardedFrom === 'object' ? forwardedFrom?.message_id : forwardedFrom;
+  if (!sourceId || typeof sourceId !== 'string' || sourceId.length > 64) {
+    throw new ApiError('forwarded_from.message_id is required', { code: 'INVALID_FORWARD' });
+  }
+  const source = await getQuery(
+    `SELECT m.id, m.channel_id, m.server_id, m.content, m.created_at, m.sticker_id,
+            m.ephemeral_user_id, m.forwarded_from, m.type,
+            c.name AS channel_name, c.type AS channel_type,
+            u.username, u.display_name, sm.nickname
+       FROM messages m
+       JOIN channels c ON c.id = m.channel_id
+       LEFT JOIN users u ON u.id = m.user_id
+       LEFT JOIN server_members sm ON sm.user_id = m.user_id AND sm.server_id = m.server_id
+      WHERE m.id = ? AND m.deleted_at IS NULL`,
+    [sourceId]
+  );
+  if (!source || (source.ephemeral_user_id && source.ephemeral_user_id !== userId)) {
+    throw ApiError.notFound('Message');
+  }
+  try {
+    await assertChannelAccess({ channelId: source.channel_id, userId, permission: 'READ_MESSAGE_HISTORY' });
+  } catch {
+    throw ApiError.notFound('Message');
+  }
+  if (source.type === 'poll') {
+    throw new ApiError('Polls cannot be forwarded', { code: 'FORWARD_UNSUPPORTED' });
+  }
+  const budget = await consumeShared(`forward:${userId}:${source.id}`, {
+    limit: FORWARD_DESTINATIONS_MAX, windowMs: 60_000
+  });
+  if (!budget.allowed) {
+    throw new ApiError(`A message can be forwarded to at most ${FORWARD_DESTINATIONS_MAX} places at a time`, {
+      status: 429, code: 'FORWARD_LIMIT', details: { retry_after_ms: budget.retryAfterMs }
     });
   }
-
-  // `reached` is who may see the channel — the gateway uses it so a private
-  // channel's activity ping does not go to the whole guild. Non-enumerable so
-  // it cannot be mistaken for a notification row by anything iterating this.
-  Object.defineProperty(notifications, 'reached', { value: reached, enumerable: false });
-  return notifications;
+  const files = await allQuery(
+    `SELECT file_id, description, is_spoiler FROM attachments WHERE message_id = ? ORDER BY position ASC`,
+    [source.id]
+  );
+  // A forward of a forward still points at where the words first appeared.
+  const origin = safeParse(source.forwarded_from, null);
+  const snapshot = origin?.message_id ? origin : {
+    message_id: source.id,
+    channel_id: source.channel_id,
+    channel_name: source.server_id ? source.channel_name ?? null : null,
+    guild_id: source.server_id ?? null,
+    author_name: source.nickname || source.display_name || source.username || null,
+    created_at: source.created_at
+  };
+  return {
+    content: source.content ?? '',
+    stickerId: source.sticker_id ?? null,
+    attachments: files.map((f) => ({ file_id: f.file_id, description: f.description, is_spoiler: Boolean(f.is_spoiler) })),
+    fileIds: new Set(files.map((f) => f.file_id)),
+    snapshot
+  };
 }
 
 export async function editMessage({ messageId, userId, content, embeds = undefined, components = undefined }) {
@@ -710,6 +814,9 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
   );
   if (!message) throw ApiError.notFound('Message');
   if (message.user_id !== userId) throw ApiError.forbidden('You can only edit your own messages');
+  // The author must still be able to see the channel — someone kicked, or
+  // hidden from it by an overwrite, cannot keep rewriting what others read.
+  const access = await assertChannelAccess({ channelId: message.channel_id, userId });
 
   // An edit may change the text, the embeds, the components, or any mix. A
   // bot updating only its buttons should not have to resend the text.
@@ -724,6 +831,26 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
   }
   const mentions = parseMentions(trimmed);
 
+  // AutoMod applies to edits exactly as to sends; otherwise posting something
+  // harmless and editing the blocked words in afterwards defeats every rule.
+  if (!keepsContent && trimmed !== message.content && message.server_id) {
+    const { roleIds } = await resolveSenderContext(message.server_id, userId);
+    const verdict = await automod.evaluate({
+      serverId: message.server_id, channelId: message.channel_id, userId,
+      content: trimmed, memberRoleIds: roleIds, permissions: access.permissions ?? '0'
+    });
+    if (verdict.blocked) {
+      await automod.logHit({
+        serverId: message.server_id, userId, channelId: message.channel_id,
+        rule: verdict.rule, reason: verdict.reason, content: trimmed
+      });
+      throw new ApiError(`Blocked by AutoMod: ${verdict.reason}`, {
+        status: 403, code: 'AUTOMOD_BLOCKED',
+        details: { rule: verdict.rule?.name, reason: verdict.reason }
+      });
+    }
+  }
+
   await transaction(async () => {
     // Keep the previous revision so an edit history is possible later.
     await runQuery(
@@ -734,15 +861,12 @@ export async function editMessage({ messageId, userId, content, embeds = undefin
       `UPDATE messages
           SET content = ?, mention_everyone = ?,
               embeds = COALESCE(?, embeds), components = COALESCE(?, components),
-              edited_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+              edited_at = ${sql.now}
         WHERE id = ?`,
       [trimmed, mentions.everyone ? 1 : 0, nextEmbeds, nextComponents, messageId]
     );
-    await runQuery(`DELETE FROM messages_fts WHERE message_id = ?`, [messageId]);
-    await runQuery(
-      `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-      [trimmed, messageId, message.channel_id]
-    );
+    await unindexForSearch([messageId]);
+    await indexForSearch(messageId, message.channel_id, trimmed);
   });
 
   return getMessage(messageId, userId);
@@ -776,12 +900,12 @@ export async function deleteMessage({ messageId, userId, canManageMessages = fal
     for (const a of attachments) await releaseReference(a.file_id);
 
     await runQuery(
-      `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      `UPDATE messages SET deleted_at = ${sql.now} WHERE id = ?`,
       [messageId]
     );
-    await runQuery(`DELETE FROM messages_fts WHERE message_id = ?`, [messageId]);
+    await unindexForSearch([messageId]);
     await runQuery(
-      `UPDATE channels SET message_count = MAX(0, message_count - 1) WHERE id = ?`,
+      `UPDATE channels SET message_count = ${sql.greatest(0, 'message_count - 1')} WHERE id = ?`,
       [message.channel_id]
     );
   });
@@ -790,7 +914,16 @@ export async function deleteMessage({ messageId, userId, canManageMessages = fal
 }
 
 /** Toggle one user's reaction. Returns the fresh aggregate for broadcasting. */
+// Discord allows 20 distinct reactions per message; the emoji key itself is a
+// unicode sequence or `name:id`, never kilobytes of text.
+const MAX_UNIQUE_REACTIONS = 20;
+const MAX_EMOJI_LENGTH = 64;
+
 export async function toggleReaction({ messageId, userId, emoji, emojiId = null }) {
+  emoji = String(emoji ?? '').trim();
+  if (!emoji || emoji.length > MAX_EMOJI_LENGTH) {
+    throw new ApiError('Invalid emoji', { code: 'INVALID_EMOJI' });
+  }
   const message = await getQuery(
     `SELECT id, channel_id FROM messages WHERE id = ? AND deleted_at IS NULL`, [messageId]
   );
@@ -825,6 +958,20 @@ export async function toggleReaction({ messageId, userId, emoji, emojiId = null 
     `SELECT 1 FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?`,
     [messageId, userId, emoji]
   );
+
+  if (!existing) {
+    const known = await getQuery(
+      `SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ? LIMIT 1`, [messageId, emoji]
+    );
+    if (!known) {
+      const { n } = await getQuery(
+        `SELECT count(DISTINCT emoji) AS n FROM reactions WHERE message_id = ?`, [messageId]
+      );
+      if (n >= MAX_UNIQUE_REACTIONS) {
+        throw new ApiError('Maximum number of reactions reached', { code: 'MAX_REACTIONS' });
+      }
+    }
+  }
 
   if (existing) {
     await runQuery(
@@ -866,17 +1013,17 @@ export async function setPinned({ messageId, channelId, userId, pinned }) {
   }
   if (pinned) {
     const { n } = await getQuery(`SELECT count(*) AS n FROM pins WHERE channel_id = ?`, [channelId]);
-    if (n >= 50) throw new ApiError('ปักหมุดได้สูงสุด 50 ข้อความต่อห้อง', { code: 'MAX_PINS' });
+    if (n >= 50) throw new ApiError('A channel can have at most 50 pinned messages', { code: 'MAX_PINS' });
   }
   await transaction(async () => {
     await runQuery(`UPDATE messages SET pinned = ? WHERE id = ?`, [pinned ? 1 : 0, messageId]);
     if (pinned) {
       await runQuery(
-        `INSERT OR IGNORE INTO pins (channel_id, message_id, pinned_by) VALUES (?, ?, ?)`,
+        `INSERT INTO pins (channel_id, message_id, pinned_by) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
         [channelId, messageId, userId]
       );
       await runQuery(
-        `UPDATE channels SET last_pin_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+        `UPDATE channels SET last_pin_at = ${sql.now} WHERE id = ?`,
         [channelId]
       );
     } else {
@@ -902,10 +1049,36 @@ export async function listPins(channelId, viewerId = null) {
   return hydrate(rows, viewerId);
 }
 
+// --- search index ------------------------------------------------------------
+//
+// SQLite searches through messages_fts, an FTS5 trigram table that has to be
+// kept in step with messages by hand. Postgres searches messages.content
+// directly through a pg_trgm GIN index that the database maintains itself, so
+// both helpers are no-ops there.
+
+async function indexForSearch(messageId, channelId, content) {
+  if (isPostgres) return;
+  await runQuery(
+    `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
+    [content, messageId, channelId]
+  );
+}
+
+async function unindexForSearch(messageIds) {
+  if (isPostgres || !messageIds.length) return;
+  await runQuery(
+    `DELETE FROM messages_fts WHERE message_id IN (${messageIds.map(() => '?').join(',')})`,
+    messageIds
+  );
+}
+
+/** Escape LIKE wildcards so user text matches literally (with ESCAPE '\'). */
+const escapeLike = (text) => text.replace(/[\\%_]/g, '\\$&');
+
 /** Full-text search, optionally scoped to a channel or a server. */
 export async function searchMessages({
   query, channelId = null, serverId = null, authorId = null, hasAttachment = false,
-  limit = 25, viewerId = null
+  limit = 25, viewerId = null, before = null
 }) {
   // `from:`, `in:`, `has:` and the date operators are part of the query string
   // itself, exactly as they are on Discord.
@@ -915,12 +1088,30 @@ export async function searchMessages({
   // ever posted here" is a perfectly ordinary thing to ask for.
   if (!term && !hasFilters(parsed.filters)) return [];
 
-  const where = ['m.deleted_at IS NULL'];
-  const filterParams = [];
+  // An ephemeral reply exists for exactly one person; search must not surface
+  // it to anyone else.
+  const where = ['m.deleted_at IS NULL', '(m.ephemeral_user_id IS NULL OR m.ephemeral_user_id = ?)'];
+  const filterParams = [viewerId ?? ''];
   if (channelId) { where.push('m.channel_id = ?'); filterParams.push(channelId); }
   if (serverId)  { where.push('m.server_id = ?');  filterParams.push(serverId); }
   if (authorId)  { where.push('m.user_id = ?');    filterParams.push(authorId); }
   if (hasAttachment) where.push('EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)');
+  // Cursor pagination: the next page is everything older than the last id of
+  // this one. Ids are snowflakes, so this is stable under concurrent inserts.
+  if (before) { where.push('m.id < ?'); filterParams.push(String(before)); }
+
+  // Permissions are applied *inside* the query, before LIMIT: the viewer's
+  // readable channels are computed in bulk and the rows are restricted to
+  // them. Filtering after LIMIT (as this used to) returned short or empty
+  // pages whenever the newest matches sat in channels the viewer cannot see,
+  // and made "load more" impossible to implement correctly.
+  if (viewerId) {
+    let readable = await readableChannelIds(viewerId, { serverId });
+    if (channelId) readable = readable.filter((id) => id === channelId);
+    if (!readable.length) return [];
+    where.push(`m.channel_id IN (${readable.map(() => '?').join(',')})`);
+    filterParams.push(...readable);
+  }
 
   // --- operator filters ------------------------------------------------------
   // Names are resolved to ids here rather than in the parser, because a name
@@ -969,7 +1160,7 @@ export async function searchMessages({
   for (const kind of parsed.filters.has) {
     if (kind === 'link' || kind === 'embed') {
       where.push(kind === 'link'
-        ? `m.content LIKE '%http%'`
+        ? `m.content ${sql.like} '%http%'`
         : `(m.embeds IS NOT NULL AND m.embeds <> '[]')`);
     } else if (kind === 'poll') {
       where.push(`EXISTS (SELECT 1 FROM polls p WHERE p.message_id = m.id)`);
@@ -978,7 +1169,7 @@ export async function searchMessages({
     } else if (kind === 'image' || kind === 'video' || kind === 'sound') {
       const prefix = kind === 'sound' ? 'audio/' : `${kind}/`;
       where.push(`EXISTS (SELECT 1 FROM attachments a JOIN files f ON f.id = a.file_id
-                           WHERE a.message_id = m.id AND f.mime_type LIKE ?)`);
+                           WHERE a.message_id = m.id AND f.mime_type ${sql.like} ?)`);
       filterParams.push(`${prefix}%`);
     } else {
       where.push(`EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)`);
@@ -1017,8 +1208,20 @@ export async function searchMessages({
         WHERE ${where.join(' AND ')} ORDER BY m.id DESC LIMIT ?`,
       [...filterParams, cap]
     );
+  } else if (isPostgres) {
+    // Postgres: one path for every length. The pg_trgm GIN index on
+    // messages.content serves ILIKE '%term%' once the term has three
+    // characters; shorter terms are a scan bounded by the same filters.
+    rows = await allQuery(
+      `${projection}
+         FROM messages m
+         ${joins}
+        WHERE m.content ILIKE ? ESCAPE '\\' AND ${where.join(' AND ')}
+        ORDER BY m.id DESC LIMIT ?`,
+      [`%${escapeLike(term)}%`, ...filterParams, cap]
+    );
   } else if (term.length >= 3) {
-    // The trigram tokenizer treats a double-quoted string as a literal
+    // SQLite: the trigram tokenizer treats a double-quoted string as a literal
     // substring, so no FTS operators can leak in from user input.
     const ftsQuery = `"${term.replace(/"/g, '""')}"`;
     rows = await allQuery(
@@ -1039,23 +1242,8 @@ export async function searchMessages({
          ${joins}
         WHERE m.content LIKE ? ESCAPE '\\' AND ${where.join(' AND ')}
         ORDER BY m.id DESC LIMIT ?`,
-      [`%${term.replace(/[\\%_]/g, '\\$&')}%`, ...filterParams, cap]
+      [`%${escapeLike(term)}%`, ...filterParams, cap]
     );
-  }
-  // Results are filtered to channels the viewer can actually see — a search
-  // must never leak content from a private channel or someone else's DM.
-  if (viewerId) {
-    const verdicts = new Map();
-    const visible = [];
-    for (const row of rows) {
-      if (!verdicts.has(row.channel_id)) {
-        verdicts.set(row.channel_id, await canInChannel({
-          channelId: row.channel_id, userId: viewerId, permission: 'READ_MESSAGE_HISTORY'
-        }));
-      }
-      if (verdicts.get(row.channel_id)) visible.push(row);
-    }
-    rows = visible;
   }
   return hydrate(rows, viewerId);
 }
@@ -1089,7 +1277,7 @@ export async function markRead({ userId, channelId, messageId }) {
   }
   await runQuery(
     `INSERT INTO read_states (user_id, channel_id, last_read_message_id, mention_count, last_viewed_at)
-     VALUES (?, ?, ?, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, 0, ${sql.now})
      ON CONFLICT(user_id, channel_id)
      DO UPDATE SET last_read_message_id = COALESCE(excluded.last_read_message_id, read_states.last_read_message_id),
                    mention_count = 0,
@@ -1104,7 +1292,7 @@ export async function markUnread({ userId, channelId, beforeMessageId = null }) 
   if (userId) await assertChannelAccess({ channelId, userId });
   await runQuery(
     `INSERT INTO read_states (user_id, channel_id, last_read_message_id, last_viewed_at)
-     VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+     VALUES (?, ?, ?, ${sql.now})
      ON CONFLICT(user_id, channel_id)
      DO UPDATE SET last_read_message_id = excluded.last_read_message_id`,
     [userId, channelId, beforeMessageId]
@@ -1115,7 +1303,7 @@ export async function markUnread({ userId, channelId, beforeMessageId = null }) 
 /** Unread counts for every channel the user can see — drives the sidebar badges. */
 export async function getUnreadSummary(userId) {
   const rows = await allQuery(
-    `SELECT c.id AS channel_id, c.server_id,
+    `SELECT c.id AS channel_id, c.server_id, c.type AS channel_type, c.parent_id,
             rs.last_read_message_id, rs.mention_count,
             c.last_message_id,
             CASE WHEN c.last_message_id IS NOT NULL
@@ -1141,15 +1329,12 @@ export async function getUnreadSummary(userId) {
   );
 
   // Filter to what the member may actually view, so the sidebar cannot reveal
-  // the existence of a private channel through an unread badge.
-  const visible = [];
-  for (const row of rows) {
-    if (!row.server_id) { visible.push(row); continue; }
-    if (await canInChannel({ channelId: row.channel_id, userId, permission: 'VIEW_CHANNEL' })) {
-      visible.push(row);
-    }
-  }
-  return visible;
+  // the existence of a private channel through an unread badge. Resolved per
+  // guild in bulk (a few queries per server, not per channel).
+  const viewable = await visibleChannelIds(userId, rows);
+  return rows
+    .filter((row) => !row.server_id || viewable.has(row.channel_id))
+    .map(({ channel_type: _type, parent_id: _parent, ...row }) => row);
 }
 
 /**
@@ -1224,10 +1409,25 @@ export async function bulkDeleteMessages({ channelId, messageIds, userId }) {
   const deletable = rows.map((r) => r.id);
   if (!deletable.length) return { channel_id: channelId, ids: [] };
 
-  await runQuery(
-    `UPDATE messages SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      WHERE id IN (${deletable.map(() => '?').join(',')})`,
-    deletable
-  );
+  const marks = deletable.map(() => '?').join(',');
+  // Same bookkeeping as a single delete: attachment references are released
+  // (or the bytes are never garbage-collected) and the search index forgets
+  // the text.
+  await transaction(async () => {
+    const attachments = await allQuery(
+      `SELECT file_id FROM attachments WHERE message_id IN (${marks})`, deletable
+    );
+    for (const a of attachments) await releaseReference(a.file_id);
+    await runQuery(
+      `UPDATE messages SET deleted_at = ${sql.now}
+        WHERE id IN (${marks})`,
+      deletable
+    );
+    await unindexForSearch(deletable);
+    await runQuery(
+      `UPDATE channels SET message_count = ${sql.greatest(0, 'message_count - ?')} WHERE id = ?`,
+      [deletable.length, channelId]
+    );
+  });
   return { channel_id: channelId, ids: deletable };
 }

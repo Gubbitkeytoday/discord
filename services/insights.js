@@ -8,10 +8,11 @@
 //  is honest about where the figures come from.
 // ============================================================================
 
-import { runQuery, getQuery, allQuery } from '../db.js';
+import { runQuery, getQuery, allQuery, sql } from '../db.js';
 import { generateId } from '../lib/snowflake.js';
 import { ApiError } from '../lib/httpUtils.js';
 import { assertPermission, writeAuditLog } from './guilds.js';
+import { postModAlert } from './admin/modAlerts.js';
 
 export const RAID_LIMITS = Object.freeze({
   minThreshold: 3, maxThreshold: 200,
@@ -58,13 +59,13 @@ export async function getInsights({ serverId, userId, days = 30 }) {
   // Daily series, zero-filled so a quiet day is a gap in the line rather than
   // a missing point that the chart would silently close over.
   const rows = await allQuery(
-    `SELECT substr(created_at, 1, 10) AS day, count(*) AS messages, count(DISTINCT user_id) AS authors
+    `SELECT ${sql.day('created_at')} AS day, count(*) AS messages, count(DISTINCT user_id) AS authors
        FROM messages
       WHERE server_id = ? AND deleted_at IS NULL AND created_at >= ?
       GROUP BY day ORDER BY day`, [serverId, since]
   );
   const joins = await allQuery(
-    `SELECT substr(joined_at, 1, 10) AS day, count(*) AS joins
+    `SELECT ${sql.day('joined_at')} AS day, count(*) AS joins
        FROM server_members WHERE server_id = ? AND joined_at >= ? GROUP BY day ORDER BY day`, [serverId, since]
   );
   const byDay = new Map(rows.map((r) => [r.day, r]));
@@ -158,7 +159,7 @@ export async function getWidget(serverId) {
   if (server.widget_channel_id) {
     const invite = await getQuery(
       `SELECT code FROM invites
-        WHERE channel_id = ? AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        WHERE channel_id = ? AND (expires_at IS NULL OR expires_at > ${sql.now})
         ORDER BY created_at DESC LIMIT 1`, [server.widget_channel_id]
     );
     instantInvite = invite?.code ? `/invite/${invite.code}` : null;
@@ -202,16 +203,26 @@ export async function updateWidget({ serverId, userId, enabled, channelId }) {
 export async function getRaidSettings(serverId, userId) {
   await assertPermission({ userId, serverId, permission: 'MANAGE_GUILD' });
   const server = await getQuery(
-    `SELECT raid_protection, raid_join_threshold, raid_join_window_secs, raid_action
+    `SELECT raid_protection, raid_join_threshold, raid_join_window_secs, raid_action,
+            mod_alert_channel_id, system_channel_id, verification_level
        FROM servers WHERE id = ? AND deleted_at IS NULL`, [serverId]
   );
   if (!server) throw ApiError.notFound('Server');
   const active = await activeLockdown(serverId);
+  const recent = await getQuery(
+    `SELECT count(*) AS n FROM server_members WHERE server_id = ? AND joined_at >= ? AND left_at IS NULL`,
+    [serverId, iso(Date.now() - 10 * 60 * 1000)]
+  );
   return {
     enabled: Boolean(server.raid_protection),
     join_threshold: server.raid_join_threshold,
     join_window_secs: server.raid_join_window_secs,
     action: server.raid_action,
+    // Where join-spike and AutoMod alerts go when a rule names no channel.
+    alert_channel_id: server.mod_alert_channel_id ?? null,
+    effective_alert_channel_id: server.mod_alert_channel_id ?? server.system_channel_id ?? null,
+    verification_level: Number(server.verification_level ?? 0),
+    joins_last_10_min: Number(recent?.n ?? 0),
     lockdown: active
   };
 }
@@ -240,6 +251,17 @@ export async function updateRaidSettings({ serverId, userId, patch }) {
     }
     sets.push('raid_action = ?'); params.push(patch.action);
   }
+  if (patch.alert_channel_id !== undefined) {
+    const id = patch.alert_channel_id || null;
+    if (id) {
+      const channel = await getQuery(
+        `SELECT id FROM channels WHERE id = ? AND server_id = ? AND deleted_at IS NULL AND type IN ('text', 'announcement')`,
+        [String(id), serverId]
+      );
+      if (!channel) throw new ApiError('The alert channel must be a text channel of this server', { code: 'RAID_INVALID' });
+    }
+    sets.push('mod_alert_channel_id = ?'); params.push(id);
+  }
   if (sets.length) await runQuery(`UPDATE servers SET ${sets.join(', ')} WHERE id = ?`, [...params, serverId]);
   return getRaidSettings(serverId, userId);
 }
@@ -249,6 +271,8 @@ export async function activeLockdown(serverId) {
     `SELECT * FROM guild_lockdowns WHERE server_id = ? AND lifted_at IS NULL ORDER BY started_at DESC LIMIT 1`,
     [serverId]
   );
+  // `joins`: joins that tripped an automatic lockdown plus every join refused
+  // while it has been active — the number the "Locked" banner reports.
   return row ? { id: row.id, reason: row.reason, joins: row.joins, started_at: row.started_at } : null;
 }
 
@@ -265,14 +289,16 @@ export async function guardJoin(serverId) {
     `SELECT raid_protection, raid_join_threshold, raid_join_window_secs, raid_action, screening_enabled
        FROM servers WHERE id = ?`, [serverId]
   );
-  if (!server?.raid_protection) return { allowed: true };
-
+  // A lockdown started by hand ("Lock now") applies whether or not automatic
+  // raid protection is switched on, so check it before that early return.
   const existing = await activeLockdown(serverId);
   if (existing) {
+    await runQuery(`UPDATE guild_lockdowns SET joins = joins + 1 WHERE id = ?`, [existing.id]);
     throw new ApiError('This server is locked down against a raid — try again later', {
       status: 403, code: 'SERVER_LOCKDOWN'
     });
   }
+  if (!server?.raid_protection) return { allowed: true };
 
   const since = iso(Date.now() - server.raid_join_window_secs * 1000);
   const recent = await getQuery(
@@ -281,18 +307,53 @@ export async function guardJoin(serverId) {
   // The joiner about to be written counts too, so compare against >= threshold.
   if (recent.n + 1 < server.raid_join_threshold) return { allowed: true };
 
+  const joins = recent.n + 1;
   if (server.raid_action === 'screen') {
     await runQuery(`UPDATE servers SET screening_enabled = 1 WHERE id = ?`, [serverId]);
-    return { allowed: true, triggered: 'screen', joins: recent.n + 1 };
+    // One alert per spike, not one per joiner in it.
+    const last = lastSpikeAlert.get(serverId) ?? 0;
+    if (Date.now() - last > SPIKE_ALERT_COOLDOWN_MS) {
+      lastSpikeAlert.set(serverId, Date.now());
+      await reportJoinSpike(serverId, { joins, windowSecs: server.raid_join_window_secs, action: 'screen' });
+    }
+    return { allowed: true, triggered: 'screen', joins };
   }
 
   const id = generateId();
   await runQuery(
     `INSERT INTO guild_lockdowns (id, server_id, reason, joins) VALUES (?, ?, ?, ?)`,
-    [id, serverId, `${recent.n + 1} joins in ${server.raid_join_window_secs}s`, recent.n + 1]
+    [id, serverId, `${joins} joins in ${server.raid_join_window_secs}s`, joins]
   );
+  await reportJoinSpike(serverId, { joins, windowSecs: server.raid_join_window_secs, action: 'lockdown' });
   throw new ApiError('This server just locked down against a raid — try again later', {
     status: 403, code: 'SERVER_LOCKDOWN'
+  });
+}
+
+const SPIKE_ALERT_COOLDOWN_MS = 10 * 60 * 1000;
+const lastSpikeAlert = new Map();   // serverId -> ms of the last alert
+
+/**
+ * Tell the moderators a join flood arrived: an audit entry, and a message in
+ * the alert channel saying what raid protection already did about it.
+ */
+async function reportJoinSpike(serverId, { joins, windowSecs, action }) {
+  await writeAuditLog({
+    serverId, userId: null, actionType: 'RAID_DETECTED', targetType: 'server', targetId: serverId,
+    changes: [{ key: 'joins', new: joins }, { key: 'window_secs', new: windowSecs }, { key: 'action', new: action }]
+  });
+  await postModAlert({
+    serverId,
+    title: `Join spike: ${joins} people joined in ${windowSecs} seconds`,
+    description: action === 'lockdown'
+      ? 'Raid protection locked the server. Nobody new can join until a moderator lifts the lockdown (Server Settings → Safety).'
+      : 'Raid protection turned on membership screening: newcomers can read but cannot post until they accept the rules. Review new members in Server Settings → Members, or lock the server from Server Settings → Safety.',
+    color: '#faa61a',
+    fields: [
+      { name: 'Joins', value: String(joins), inline: true },
+      { name: 'Window', value: `${windowSecs}s`, inline: true },
+      { name: 'Action taken', value: action === 'lockdown' ? 'Locked down' : 'Screening on', inline: true }
+    ]
   });
 }
 
@@ -301,7 +362,7 @@ export async function liftLockdown({ serverId, userId }) {
   const active = await activeLockdown(serverId);
   if (!active) throw new ApiError('This server is not locked down', { code: 'NO_LOCKDOWN' });
   await runQuery(
-    `UPDATE guild_lockdowns SET lifted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), lifted_by = ? WHERE id = ?`,
+    `UPDATE guild_lockdowns SET lifted_at = ${sql.now}, lifted_by = ? WHERE id = ?`,
     [userId, active.id]
   );
   await writeAuditLog({ serverId, userId, actionType: 'LOCKDOWN_LIFT', targetType: 'server', targetId: serverId });

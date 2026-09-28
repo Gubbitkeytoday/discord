@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+<defs></defs>
+<style>.o1{animation:or-s 6s linear infinite;transform-origin:60px 60px}.o2{animation:or-s 10s linear infinite reverse;transform-origin:60px 60px}@keyframes or-s{to{transform:rotate(360deg)}}@media (prefers-reduced-motion: reduce){*{animation:none!important}}</style>
+<circle cx="60" cy="60" r="55" fill="none" stroke="#818cf8" stroke-width="1.2" opacity=".7"/>
+<circle cx="60" cy="60" r="51" fill="none" stroke="#c7d2fe" stroke-width=".6" stroke-dasharray="1 4"/>
+<g class="o1"><circle cx="60" cy="5" r="4" fill="#6366f1"/><circle cx="60" cy="5" r="1.6" fill="#e0e7ff"/><circle cx="60" cy="115" r="2.6" fill="#a5b4fc"/></g>
+<g class="o2"><circle cx="5" cy="60" r="3.2" fill="#f472b6"/><circle cx="104" cy="99" r="2" fill="#fbcfe8"/></g>
+</svg>

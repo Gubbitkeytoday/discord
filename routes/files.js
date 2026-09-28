@@ -7,14 +7,14 @@
 // ============================================================================
 
 import express from 'express';
-import fs from 'fs';
+import crypto from 'crypto';
 
-import { ApiError, asyncRoute, parseLimit } from '../lib/httpUtils.js';
+import { ApiError, asyncRoute, parseLimit, requireUser } from '../lib/httpUtils.js';
 import { getFileType } from '../lib/mediaProbe.js';
 import {
   storeFile, getFile, getVariant, deleteFile, listFilesForUser,
   getStorageUsage, collectGarbage, verifyIntegrity, recordAccess,
-  verifyFileSignature, signFileUrl, resolveStoragePath, formatBytes,
+  verifyFileSignature, signFileUrl, sendStoredObject, formatBytes,
   addReference, releaseReference,
   DEFAULT_ORPHAN_GRACE_MS, DEFAULT_GC_LIMIT,
   uploadAvatar, uploadBanner, uploadServerIcon, uploadEmoji, uploadSticker, uploadAttachment,
@@ -24,11 +24,21 @@ import { getQuery, allQuery } from '../db.js';
 
 const router = express.Router();
 
-/** Shape a files row into the descriptor the frontend consumes. */
+/**
+ * Shape a files row into the descriptor the frontend consumes.
+ *
+ * Images carry everything a client needs to render without layout shift and
+ * at the right size: display `width`/`height` (EXIF orientation applied),
+ * a `thumbhash` placeholder (and the older `placeholder` data URI), and
+ * responsive `renditions` with ready `srcset` strings per format. `url` stays
+ * the original (sanitised) file; `display_url` negotiates the best format.
+ */
 function toDescriptor(file) {
   return {
     id: file.id,
     url: file.url,
+    download_url: file.download_url ?? `/api/files/${file.id}?download=1`,
+    display_url: file.display_url ?? null,
     filename: file.original_name,
     file_type: file.file_type ?? getFileType(file.mime_type),
     mimetype: file.mime_type,
@@ -36,14 +46,42 @@ function toDescriptor(file) {
     size_human: formatBytes(file.size),
     width: file.width,
     height: file.height,
+    duration_secs: file.duration_secs ?? null,
     is_animated: Boolean(file.is_animated),
     placeholder: file.blurhash ?? null,
+    thumbhash: file.thumbhash ?? null,
+    media_status: file.media_status ?? null,
     category: file.category,
     variants: file.variants ?? {},
+    renditions: file.renditions ?? [],
+    srcset: file.srcset ?? {},
+    poster_url: file.variants?.poster?.url ?? null,
     thumbnail_url: file.variants?.thumb?.url ?? file.variants?.medium?.url ?? file.url,
     created_at: file.created_at,
     deduped: file.deduped ?? false
   };
+}
+
+/**
+ * The client's filename, decoded as UTF-8.
+ *
+ * Browsers send `filename="สลิป.png"` as raw UTF-8 bytes, but busboy (under
+ * multer) decodes multipart parameters as latin1 unless the uploader is built
+ * with `defParamCharset: 'utf8'`, so Thai, CJK or emoji names arrived as
+ * mojibake ("à¸ªà¸¥à¸´à¸›.png"). Re-read those latin1 code units as UTF-8 bytes.
+ * Only when every code unit is a byte and the bytes are valid UTF-8, so a name
+ * that was already decoded correctly (or is genuinely latin1) is unchanged.
+ */
+const utf8Strict = new TextDecoder('utf-8', { fatal: true });
+export function decodeUploadFilename(name) {
+  const value = String(name ?? '');
+  // eslint-disable-next-line no-control-regex
+  if (!/[\u0080-ÿ]/.test(value) || /[^\u0000-ÿ]/.test(value)) return value;
+  try {
+    return utf8Strict.decode(Buffer.from(value, 'latin1'));
+  } catch {
+    return value;
+  }
 }
 
 function uploadOptions(req, category) {
@@ -61,43 +99,58 @@ async function handleSingle(req, res, category, field) {
   if (!req.file) throw new ApiError(`No ${field} uploaded`, { code: 'NO_FILE' });
   const file = await storeFile({
     buffer: req.file.buffer,
-    originalName: req.file.originalname,
+    originalName: decodeUploadFilename(req.file.originalname),
     declaredMime: req.file.mimetype,
     ...uploadOptions(req, category)
   });
   res.json(toDescriptor(file));
 }
 
+/** The caller's own id; a `userId` query naming someone else is refused. */
+function ownUserId(req) {
+  if (req.query.userId && req.query.userId !== req.userId) {
+    throw ApiError.forbidden('You can only list your own files');
+  }
+  return req.userId;
+}
+
+/** A private file is visible only to its uploader (or via a signed URL). */
+function assertCanSeeFile(req, file) {
+  if (file.visibility === 'private' && file.uploader_id !== req.userId) {
+    throw ApiError.forbidden('This file is private');
+  }
+}
+
 // --- upload endpoints --------------------------------------------------------
 
 // Legacy generic endpoint. Kept because the original client calls it.
-router.post('/upload', uploadAttachment.single('file'), asyncRoute(async (req, res) => {
+router.post('/upload', requireUser, uploadAttachment.single('file'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'attachments', 'file');
 }));
 
-router.post('/upload/avatar', uploadAvatar.single('avatar'), asyncRoute(async (req, res) => {
+router.post('/upload/avatar', requireUser, uploadAvatar.single('avatar'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'avatars', 'avatar');
 }));
 
-router.post('/upload/banner', uploadBanner.single('banner'), asyncRoute(async (req, res) => {
+router.post('/upload/banner', requireUser, uploadBanner.single('banner'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'banners', 'banner');
 }));
 
-router.post('/upload/server-icon', uploadServerIcon.single('icon'), asyncRoute(async (req, res) => {
+router.post('/upload/server-icon', requireUser, uploadServerIcon.single('icon'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'icons', 'icon');
 }));
 
-router.post('/upload/emoji', uploadEmoji.single('emoji'), asyncRoute(async (req, res) => {
+router.post('/upload/emoji', requireUser, uploadEmoji.single('emoji'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'emojis', 'emoji');
 }));
 
-router.post('/upload/sticker', uploadSticker.single('sticker'), asyncRoute(async (req, res) => {
+router.post('/upload/sticker', requireUser, uploadSticker.single('sticker'), asyncRoute(async (req, res) => {
   await handleSingle(req, res, 'stickers', 'sticker');
 }));
 
 // Multi-file message attachments. Partial success is reported per file rather
 // than failing the whole batch — one oversized image should not lose the rest.
-router.post('/upload/attachments', uploadAttachment.array('files', 10), asyncRoute(async (req, res) => {
+router.post('/upload/attachments', requireUser, uploadAttachment.array('files', 10), asyncRoute(async (req, res) => {
   if (!req.files?.length) throw new ApiError('No files uploaded', { code: 'NO_FILE' });
 
   const attachments = [];
@@ -106,13 +159,13 @@ router.post('/upload/attachments', uploadAttachment.array('files', 10), asyncRou
     try {
       const stored = await storeFile({
         buffer: f.buffer,
-        originalName: f.originalname,
+        originalName: decodeUploadFilename(f.originalname),
         declaredMime: f.mimetype,
         ...uploadOptions(req, 'attachments')
       });
       attachments.push(toDescriptor(stored));
     } catch (err) {
-      failed.push({ filename: f.originalname, error: err.message, code: err.code ?? 'STORAGE_ERROR' });
+      failed.push({ filename: decodeUploadFilename(f.originalname), error: err.message, code: err.code ?? 'STORAGE_ERROR' });
     }
   }
 
@@ -139,9 +192,10 @@ router.get('/files/limits', (_req, res) => {
 });
 
 /** Current user's quota. */
-router.get('/files/usage', asyncRoute(async (req, res) => {
-  const userId = req.query.userId ?? req.userId;
-  if (!userId) throw ApiError.unauthorized();
+router.get('/files/usage', requireUser, asyncRoute(async (req, res) => {
+  // Only ever your own: `?userId=` is accepted for older clients but must
+  // name the caller, or anyone could read anyone's upload inventory.
+  const userId = ownUserId(req);
   const usage = await getStorageUsage(userId);
   if (!usage) throw ApiError.notFound('User');
 
@@ -158,9 +212,8 @@ router.get('/files/usage', asyncRoute(async (req, res) => {
 }));
 
 /** Paginated list of a user's uploads — powers a media gallery / storage manager. */
-router.get('/files', asyncRoute(async (req, res) => {
-  const userId = req.query.userId ?? req.userId;
-  if (!userId) throw ApiError.unauthorized();
+router.get('/files', requireUser, asyncRoute(async (req, res) => {
+  const userId = ownUserId(req);
   const rows = await listFilesForUser(userId, {
     category: req.query.category ?? null,
     limit: parseLimit(req.query.limit, { fallback: 50, max: 200 }),
@@ -173,9 +226,10 @@ router.get('/files', asyncRoute(async (req, res) => {
   });
 }));
 
-router.get('/files/:fileId/meta', asyncRoute(async (req, res) => {
+router.get('/files/:fileId/meta', requireUser, asyncRoute(async (req, res) => {
   const file = await getFile(req.params.fileId);
   if (!file) throw ApiError.notFound('File');
+  assertCanSeeFile(req, file);
   const refs = await allQuery(
     `SELECT message_id FROM attachments WHERE file_id = ? LIMIT 20`, [req.params.fileId]
   );
@@ -183,7 +237,7 @@ router.get('/files/:fileId/meta', asyncRoute(async (req, res) => {
 }));
 
 /** Mint a time-limited URL for a private file. */
-router.post('/files/:fileId/signed-url', asyncRoute(async (req, res) => {
+router.post('/files/:fileId/signed-url', requireUser, asyncRoute(async (req, res) => {
   const file = await getFile(req.params.fileId);
   if (!file) throw ApiError.notFound('File');
   if (file.visibility === 'private' && file.uploader_id !== req.userId) {
@@ -221,82 +275,56 @@ router.get('/files/:fileId', asyncRoute(async (req, res) => {
 
   let storageKey = file.storage_key;
   let mime = file.mime_type;
-  let size = file.size;
   if (variantKind) {
     const variant = await getVariant(file.id, variantKind);
     if (!variant) throw ApiError.notFound(`Variant '${variantKind}'`);
     storageKey = variant.storage_key;
     mime = variant.mime_type;
-    size = variant.size;
+  } else if (String(storageKey).startsWith('incoming/')) {
+    // A direct upload that has not been verified and stripped yet.
+    res.setHeader('Retry-After', '2');
+    throw new ApiError('This upload is still being processed', { status: 409, code: 'MEDIA_PROCESSING' });
   }
 
-  const absolute = resolveStoragePath(storageKey);
-  let stat;
-  try { stat = fs.statSync(absolute); }
-  catch { throw new ApiError('File bytes are missing from storage', { status: 410, code: 'BYTES_GONE' }); }
-
-  // Content-addressed keys are immutable, so this may be cached forever.
-  res.setHeader('Content-Type', mime);
-  res.setHeader('Cache-Control', file.visibility === 'public'
-    ? 'public, max-age=31536000, immutable'
-    : 'private, max-age=300');
-  res.setHeader('ETag', `"${file.hash}${variantKind ? `-${variantKind}` : ''}"`);
-  res.setHeader('Accept-Ranges', 'bytes');
-  // Never let an uploaded SVG or HTML-ish blob execute in our origin.
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-  res.setHeader(
-    'Content-Disposition',
-    `${getFileType(mime) === 'file' ? 'attachment' : 'inline'}; ` +
-    `filename*=UTF-8''${encodeURIComponent(file.original_name)}`
-  );
-
-  if (req.headers['if-none-match'] === res.getHeader('ETag')) return res.status(304).end();
-
-  // Range support so <video>/<audio> can seek.
-  const range = req.headers.range;
-  if (range) {
-    const match = /bytes=(\d*)-(\d*)/.exec(range);
-    if (match) {
-      const start = match[1] ? Number(match[1]) : 0;
-      const end = match[2] ? Number(match[2]) : stat.size - 1;
-      if (start >= stat.size || end >= stat.size || start > end) {
-        res.setHeader('Content-Range', `bytes */${stat.size}`);
-        return res.status(416).end();
-      }
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-      res.setHeader('Content-Length', end - start + 1);
-      recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: end - start + 1 })
-        .catch(() => {});
-      return fs.createReadStream(absolute, { start, end }).pipe(res);
-    }
+  // Content-addressed keys are immutable, so a public file may be cached forever.
+  const result = await sendStoredObject(req, res, {
+    storageKey,
+    backend: file.backend,
+    mime,
+    etag: `"${file.hash}${variantKind ? `-${variantKind}` : ''}"`,
+    cacheControl: file.visibility === 'public' ? 'public, max-age=31536000, immutable' : 'private, max-age=300',
+    filename: file.original_name,
+    download: req.query.download === '1' || req.query.download === 'true'
+  });
+  if (result?.bytes) {
+    recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: result.bytes })
+      .catch(() => {});
   }
-
-  res.setHeader('Content-Length', stat.size);
-  recordAccess(file.id, { userId: req.userId, ip: req.ip, variant: variantKind, bytes: size })
-    .catch(() => {});
-  fs.createReadStream(absolute).pipe(res);
 }));
 
 // --- mutation ----------------------------------------------------------------
 
-router.delete('/files/:fileId', asyncRoute(async (req, res) => {
+router.delete('/files/:fileId', requireUser, asyncRoute(async (req, res) => {
   const file = await getQuery(`SELECT * FROM files WHERE id = ?`, [req.params.fileId]);
   if (!file) throw ApiError.notFound('File');
-  if (file.uploader_id && file.uploader_id !== req.userId) {
+  // A file with no uploader (legacy/anonymous) belongs to nobody, so nobody
+  // but maintenance may delete it.
+  if (file.uploader_id !== req.userId) {
     throw ApiError.forbidden('Only the uploader can delete this file');
   }
   await deleteFile(file.id, { force: req.query.force === 'true' });
   res.json({ success: true, id: file.id });
 }));
 
-router.post('/files/:fileId/reference', asyncRoute(async (req, res) => {
+// Raw reference-count manipulation. Releasing a reference makes a file
+// GC-eligible, so an open endpoint would let anyone get someone else's bytes
+// deleted by the next sweep. Maintenance only.
+router.post('/files/:fileId/reference', requireAdmin, asyncRoute(async (req, res) => {
   await addReference(req.params.fileId, Number(req.body?.count) || 1);
   res.json({ success: true });
 }));
 
-router.delete('/files/:fileId/reference', asyncRoute(async (req, res) => {
+router.delete('/files/:fileId/reference', requireAdmin, asyncRoute(async (req, res) => {
   await releaseReference(req.params.fileId, Number(req.query?.count) || 1);
   res.json({ success: true });
 }));
@@ -307,7 +335,11 @@ router.delete('/files/:fileId/reference', asyncRoute(async (req, res) => {
 function requireAdmin(req, _res, next) {
   const token = process.env.ADMIN_TOKEN;
   if (!token) return next(ApiError.forbidden('Maintenance endpoints require ADMIN_TOKEN to be set'));
-  if (req.get('x-admin-token') !== token) return next(ApiError.forbidden());
+  const given = Buffer.from(String(req.get('x-admin-token') ?? ''));
+  const expected = Buffer.from(token);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+    return next(ApiError.forbidden());
+  }
   next();
 }
 

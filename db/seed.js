@@ -3,12 +3,23 @@
 // Seed IDs are intentionally human-readable ('user-me', 'chan-102') rather than
 // snowflakes — the frontend boots with currentUserId = 'user-me'. Everything
 // created at runtime uses generateId().
+//
+// Also the `npm run seed` entry point — see main() at the bottom.
 
+// First: .env must be in process.env before db.js (imported via lib/auth.js)
+// picks SQLite or PostgreSQL from DATABASE_URL.
+import '../lib/dotenv.js';
 import { generateId, snowflakeForDate } from '../lib/snowflake.js';
 import { hashPassword } from '../lib/auth.js';
 import { DEFAULT_PERMISSIONS, ALL_PERMISSIONS, fromNames } from '../lib/permissions.js';
+import { isPostgres } from './dialect.js';
+// Remote images are stored as same-origin proxy URLs, as the services do.
+import { proxiedImageUrl } from '../lib/mediaUrls.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const now = () => new Date().toISOString();
+const daysAgo = (days) => new Date(Date.now() - days * 86400e3).toISOString();
 
 /** Dev-only password for every seeded account. */
 export const SEED_PASSWORD = 'antigravity123';
@@ -30,32 +41,41 @@ const SEED_SERVERS = [
 // role key -> definition. `everyone` is created for every server automatically.
 const SEED_ROLES = {
   'server-1': [
-    { id: 'role-1-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
-    { id: 'role-1-mod',   name: 'Moderator', color: '#faa61a', position: 60, hoist: 1, mentionable: 1, permissions: fromNames(['KICK_MEMBERS','BAN_MEMBERS','MANAGE_MESSAGES','MODERATE_MEMBERS','MANAGE_THREADS','VIEW_AUDIT_LOG','MUTE_MEMBERS','DEAFEN_MEMBERS','MOVE_MEMBERS']) },
+    // Role name styles (v46): a gradient, an emoji role icon, a shimmer (VIP).
+    { id: 'role-1-admin', name: 'Admin', color: '#f04747', color_secondary: '#faa61a', style: 'gradient', gradient_angle: 90, position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
+    { id: 'role-1-mod',   name: 'Moderator', color: '#faa61a', unicode_emoji: '🛡️', position: 60, hoist: 1, mentionable: 1, permissions: fromNames(['KICK_MEMBERS','BAN_MEMBERS','MANAGE_MESSAGES','MODERATE_MEMBERS','MANAGE_THREADS','VIEW_AUDIT_LOG','MUTE_MEMBERS','DEAFEN_MEMBERS','MOVE_MEMBERS']) },
     { id: 'role-1-bot',   name: 'Bot', color: '#5865f2', position: 40, hoist: 0, mentionable: 0, managed: 1, permissions: fromNames(['SEND_MESSAGES','EMBED_LINKS','ATTACH_FILES','READ_MESSAGE_HISTORY','ADD_REACTIONS','VIEW_CHANNEL']) },
     { id: 'role-1-dev',   name: 'Developer', color: '#43b581', position: 20, hoist: 1, mentionable: 1, permissions: '0' }
   ],
   'server-2': [
     { id: 'role-2-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) },
-    { id: 'role-2-vip',   name: 'VIP', color: '#e91e63', position: 30, hoist: 1, mentionable: 1, permissions: '0' }
+    { id: 'role-2-vip',   name: 'VIP', color: '#e91e63', style: 'holographic', position: 30, hoist: 1, mentionable: 1, permissions: '0' }
   ],
   'server-3': [
     { id: 'role-3-admin', name: 'Admin', color: '#f04747', position: 90, hoist: 1, mentionable: 1, permissions: fromNames(['ADMINISTRATOR']) }
   ]
 };
 
+// `days`: how long ago the member joined. A real community is not all brand
+// new: everyone joined months ago except CodeMaster, who joined HQ yesterday
+// and so wears the 🌱 new-member mark there (servers default to 7 days).
+// Within a server, earlier rows joined earlier, so join order is unchanged.
 const SEED_MEMBERS = [
-  { server_id: 'server-1', user_id: 'user-me', roles: ['role-1-admin', 'role-1-dev'] },
-  { server_id: 'server-1', user_id: 'user-2',  roles: ['role-1-admin'] },
-  { server_id: 'server-1', user_id: 'user-3',  roles: ['role-1-bot'] },
-  { server_id: 'server-1', user_id: 'user-4',  roles: ['role-1-mod'] },
-  { server_id: 'server-1', user_id: 'user-5',  roles: ['role-1-dev'] },
-  { server_id: 'server-2', user_id: 'user-2',  roles: ['role-2-admin'] },
-  { server_id: 'server-2', user_id: 'user-me', roles: ['role-2-vip'] },
-  { server_id: 'server-2', user_id: 'user-4',  roles: ['role-2-admin'] },
-  { server_id: 'server-3', user_id: 'user-me', roles: ['role-3-admin'] },
-  { server_id: 'server-3', user_id: 'user-5',  roles: ['role-3-admin'] }
+  { server_id: 'server-1', user_id: 'user-me', roles: ['role-1-admin', 'role-1-dev'], days: 400 },
+  { server_id: 'server-1', user_id: 'user-2',  roles: ['role-1-admin'], days: 365 },
+  { server_id: 'server-1', user_id: 'user-3',  roles: ['role-1-bot'], days: 300 },
+  { server_id: 'server-1', user_id: 'user-4',  roles: ['role-1-mod'], days: 120 },
+  { server_id: 'server-1', user_id: 'user-5',  roles: ['role-1-dev'], days: 1 },
+  { server_id: 'server-2', user_id: 'user-2',  roles: ['role-2-admin'], days: 380 },
+  { server_id: 'server-2', user_id: 'user-me', roles: ['role-2-vip'], days: 200 },
+  { server_id: 'server-2', user_id: 'user-4',  roles: ['role-2-admin'], days: 90 },
+  { server_id: 'server-3', user_id: 'user-me', roles: ['role-3-admin'], days: 350 },
+  { server_id: 'server-3', user_id: 'user-5',  roles: ['role-3-admin'], days: 30 }
 ];
+
+// Each account predates its earliest server join by a month.
+const accountCreatedAt = (userId) => daysAgo(30 + Math.max(0,
+  ...SEED_MEMBERS.filter((m) => m.user_id === userId).map((m) => m.days ?? 0)));
 
 const SEED_CHANNELS = [
   // Server 1
@@ -101,6 +121,17 @@ const SEED_FRIENDS = [
   { id: 'fr-3', user_id: 'user-me', friend_id: 'user-5', status: 'pending' }
 ];
 
+// Built-in collectibles worn by the demo accounts (see services/cosmetics.js).
+const SEED_COSMETICS = [
+  { user_id: 'user-me', decoration: 'builtin-deco-stars', nameplate: 'builtin-plate-aurora' },
+  {
+    user_id: 'user-2', decoration: 'builtin-deco-lotus', nameplate: 'builtin-plate-kranok',
+    effect: 'builtin-effect-lanterns', tag: 'server-1',
+    name_style: { font: 'kanit', effect: 'gradient', colors: ['#ff5f6d', '#ffc371'] }
+  },
+  { user_id: 'user-4', decoration: 'builtin-deco-cat-ears', nameplate: 'builtin-plate-petals' }
+];
+
 const SEED_EMOJIS = [
   { id: 'emoji-1', server_id: 'server-1', name: 'antigravity', url: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=64', creator_id: 'user-me' },
   { id: 'emoji-2', server_id: 'server-1', name: 'pogchamp',    url: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=64', creator_id: 'user-2' }
@@ -128,8 +159,8 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
                             created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         [u.id, u.username, String(1000 + SEED_USERS.indexOf(u)), u.display_name,
-         u.avatar_url, u.banner_url, u.bio, u.status, u.is_bot,
-         `${u.username.toLowerCase()}@example.dev`, devPasswordHash, now(), now()]
+         proxiedImageUrl(u.avatar_url), proxiedImageUrl(u.banner_url), u.bio, u.status, u.is_bot,
+         `${u.username.toLowerCase()}@example.dev`, devPasswordHash, accountCreatedAt(u.id), now()]
       );
     }
 
@@ -137,7 +168,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
       await runQuery(
         `INSERT INTO servers (id, name, description, icon_url, owner_id, system_channel_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-        [s.id, s.name, s.description, s.icon_url, s.owner_id, now(), now()]
+        [s.id, s.name, s.description, proxiedImageUrl(s.icon_url), s.owner_id, now(), now()]
       );
 
       // Every guild gets an @everyone role whose id equals the guild id, matching
@@ -150,10 +181,11 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
 
       for (const r of SEED_ROLES[s.id] ?? []) {
         await runQuery(
-          `INSERT INTO roles (id, server_id, name, color, position, permissions, hoist, mentionable, managed, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [r.id, s.id, r.name, r.color ?? null, r.position, r.permissions,
-           r.hoist ?? 0, r.mentionable ?? 0, r.managed ?? 0, now()]
+          `INSERT INTO roles (id, server_id, name, color, color_secondary, style, gradient_angle, unicode_emoji,
+                              position, permissions, hoist, mentionable, managed, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [r.id, s.id, r.name, r.color ?? null, r.color_secondary ?? null, r.style ?? 'solid', r.gradient_angle ?? 90,
+           r.unicode_emoji ?? null, r.position, r.permissions, r.hoist ?? 0, r.mentionable ?? 0, r.managed ?? 0, now()]
         );
       }
     }
@@ -161,7 +193,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
     for (const m of SEED_MEMBERS) {
       await runQuery(
         `INSERT INTO server_members (server_id, user_id, joined_at) VALUES (?, ?, ?)`,
-        [m.server_id, m.user_id, now()]
+        [m.server_id, m.user_id, daysAgo(m.days ?? 0)]
       );
       // @everyone is implicit (role id === server id) but stored explicitly so
       // permission joins need no special case.
@@ -218,10 +250,14 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
          VALUES (?, ?, ?, ?, ?, 'default', ?)`,
         [msg.id, msg.channel_id, msg.server_id, msg.user_id, msg.content, createdAt]
       );
-      await runQuery(
-        `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
-        [msg.content, msg.id, msg.channel_id]
-      );
+      // SQLite's search index is a separate FTS5 table; Postgres indexes
+      // messages.content itself (pg_trgm), so there is nothing to add there.
+      if (!isPostgres) {
+        await runQuery(
+          `INSERT INTO messages_fts (content, message_id, channel_id) VALUES (?, ?, ?)`,
+          [msg.content, msg.id, msg.channel_id]
+        );
+      }
       for (const [emoji, userIds] of Object.entries(msg.reactions ?? {})) {
         for (const userId of userIds) {
           await runQuery(
@@ -248,7 +284,7 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
     for (const e of SEED_EMOJIS) {
       await runQuery(
         `INSERT INTO emojis (id, server_id, name, url, creator_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [e.id, e.server_id, e.name, e.url, e.creator_id, now()]
+        [e.id, e.server_id, e.name, proxiedImageUrl(e.url), e.creator_id, now()]
       );
     }
 
@@ -272,6 +308,30 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
       [dmMsgId, dmId, now()]
     );
     await runQuery(`UPDATE channels SET last_message_id = ? WHERE id = ?`, [dmMsgId, dmId]);
+
+    // Profiles and role styles, so a fresh dev instance shows them off: the
+    // built-in collectibles (ids from services/cosmetics.js, created on first
+    // use), a name style, a server tag and badge, and styled roles.
+    for (const c of SEED_COSMETICS) {
+      await runQuery(
+        `UPDATE users SET avatar_decoration_id = ?, nameplate_id = ?, profile_effect_id = ?, name_style = ?,
+                primary_server_tag_id = ? WHERE id = ?`,
+        [c.decoration ?? null, c.nameplate ?? null, c.effect ?? null,
+         c.name_style ? JSON.stringify(c.name_style) : null, c.tag ?? null, c.user_id]
+      );
+    }
+    await runQuery(
+      `INSERT INTO server_tags (server_id, tag, icon, color, enabled, updated_by) VALUES ('server-1', 'AGHQ', 'rocket', '#8b5cf6', 1, 'user-me')`
+    );
+    await runQuery(
+      `INSERT INTO badges (id, kind, server_id, name, description, icon, color, position, created_by)
+       VALUES ('badge-seed-founder', 'server', 'server-1', 'Founding crew', 'Here from day one', 'rocket', '#f59e0b', 0, 'user-me')`
+    );
+    for (const uid of ['user-me', 'user-2']) {
+      await runQuery(
+        `INSERT INTO user_badges (user_id, badge_id, granted_by) VALUES (?, 'badge-seed-founder', 'user-me')`, [uid]
+      );
+    }
   });
 
   console.log('✅ Seed complete.');
@@ -279,3 +339,61 @@ export async function seedDatabase({ runQuery, getQuery, transaction }) {
 }
 
 export { ALL_PERMISSIONS };
+
+// --- `npm run seed` / `node db/seed.js` ---------------------------------------
+//
+// Creates (or migrates) the database named by DATABASE_URL / DB_PATH and fills
+// an empty one with the demo data above. It used to be a module with no entry
+// point, so the documented command opened the database file and did nothing.
+//
+// Refused where the server itself would refuse to seed (db.js shouldSeed):
+// NODE_ENV=production without SEED_DATABASE=1, or SEED_DATABASE=0 anywhere —
+// the demo accounts share a password published in this file.
+//
+// Deliberately not top-level await: db.js imports this module, and awaiting
+// the dynamic import of db.js during this module's own evaluation would wait
+// on itself.
+async function main() {
+  // .env was loaded by the first import (lib/dotenv.js), before db.js chose
+  // its engine. db.js is already evaluated here (lib/auth.js imports it).
+  const { shouldSeed, initDB, closeDB, getQuery: get, DB_PATH } = await import('../db.js');
+  if (!shouldSeed()) {
+    console.error(
+      process.env.NODE_ENV === 'production'
+        ? '❌ Refusing to seed: NODE_ENV=production. The demo accounts share the published password '
+          + `"${SEED_PASSWORD}" and would own the seeded servers. If this really is a throwaway `
+          + 'demo instance, run again with SEED_DATABASE=1.'
+        : '❌ Refusing to seed: SEED_DATABASE is set to a false value. Unset it or set SEED_DATABASE=1.'
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const target = isPostgres ? 'PostgreSQL (DATABASE_URL)' : DB_PATH;
+  const before = await (async () => {
+    await initDB({ seed: false });
+    return (await get(`SELECT count(*) AS count FROM users`)).count;
+  })();
+  if (Number(before) > 0) {
+    console.log(`ℹ️  ${target} already has ${before} user(s); nothing seeded (seeding only fills an empty database).`);
+  } else {
+    await initDB({ seed: true });
+    console.log(`   Target: ${target}`);
+    console.log(`   Sign in as any of ${SEED_USERS.map((u) => u.username).join(', ')} — password "${SEED_PASSWORD}".`);
+  }
+  await closeDB();
+}
+
+const invokedDirectly = (() => {
+  try {
+    return Boolean(process.argv[1])
+      && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('❌ Seeding failed:', err.message);
+    process.exitCode = 1;
+  });
+}

@@ -5,8 +5,12 @@
 //   node scripts/storage.js gc [--apply] [--grace-hours 24]
 //   node scripts/storage.js verify
 //   node scripts/storage.js reindex        # rebuild the message search index
+//   node scripts/storage.js reprocess [--all] [--limit 1000]
+//                                          # renditions/posters for older uploads
+//                                          # (--all also redoes ready ones)
+//   node scripts/storage.js jobs           # media job queue status
 
-import { initDB, closeDB, allQuery, getQuery, runQuery } from '../db.js';
+import { initDB, closeDB, allQuery, getQuery, runQuery, isPostgres } from '../db.js';
 import {
   initStorage, collectGarbage, verifyIntegrity, formatBytes, STORAGE_ROOT
 } from '../storageService.js';
@@ -19,7 +23,8 @@ const value = (name, fallback) => {
 };
 
 await initDB({ seed: false });
-await initStorage();
+// Background media workers only for `reprocess`, which waits for them.
+await initStorage({ workers: false });
 
 try {
   switch (command) {
@@ -27,8 +32,10 @@ try {
     case 'gc': await gc(); break;
     case 'verify': await verify(); break;
     case 'reindex': await reindex(); break;
+    case 'reprocess': await reprocess(); break;
+    case 'jobs': await jobs(); break;
     default:
-      console.error(`Unknown command '${command}'. Try: stats | gc | verify | reindex`);
+      console.error(`Unknown command '${command}'. Try: stats | gc | verify | reindex | reprocess | jobs`);
       process.exitCode = 1;
   }
 } finally {
@@ -41,7 +48,9 @@ async function stats() {
        FROM files WHERE deleted_at IS NULL`
   );
   const variants = await getQuery(
-    `SELECT count(*) AS files, COALESCE(sum(size), 0) AS bytes FROM file_variants`
+    `SELECT (SELECT count(*) FROM file_variants) + (SELECT count(*) FROM file_renditions) AS files,
+            (SELECT COALESCE(sum(size), 0) FROM file_variants)
+              + (SELECT COALESCE(sum(size), 0) FROM file_renditions) AS bytes`
   );
   const byCategory = await allQuery(
     `SELECT category, count(*) AS files, COALESCE(sum(size), 0) AS bytes
@@ -56,7 +65,7 @@ async function stats() {
        FROM files WHERE deleted_at IS NOT NULL`
   );
   const dedupe = await getQuery(
-    `SELECT count(*) AS unique_hashes FROM (SELECT DISTINCT hash FROM files WHERE deleted_at IS NULL)`
+    `SELECT count(*) AS unique_hashes FROM (SELECT DISTINCT hash FROM files WHERE deleted_at IS NULL) AS h`
   );
 
   console.log(`\nStorage root: ${STORAGE_ROOT}\n`);
@@ -108,6 +117,17 @@ async function verify() {
 }
 
 async function reindex() {
+  if (isPostgres) {
+    // Postgres searches messages.content through a pg_trgm GIN index that the
+    // database keeps current on every write — there is no shadow table to
+    // rebuild. Refresh planner statistics so the index keeps being chosen.
+    await runQuery(`ANALYZE messages`);
+    const { c } = await getQuery(
+      `SELECT count(*) AS c FROM messages WHERE deleted_at IS NULL AND content IS NOT NULL AND content <> ''`
+    );
+    console.log(`PostgreSQL: search uses the pg_trgm index on messages.content (${c} searchable messages); nothing to rebuild.`);
+    return;
+  }
   await runQuery(`DELETE FROM messages_fts`);
   await runQuery(
     `INSERT INTO messages_fts (content, message_id, channel_id)
@@ -116,4 +136,30 @@ async function reindex() {
   );
   const { c } = await getQuery(`SELECT count(*) AS c FROM messages_fts`);
   console.log(`Search index rebuilt: ${c} messages.`);
+}
+
+async function reprocess() {
+  const { reprocessFiles } = await import('../services/mediaPipeline.js');
+  const { startMediaWorkers, stopMediaWorkers, queueStats } = await import('../services/mediaJobs.js');
+  const queued = await reprocessFiles({ includeReady: flag('all'), limit: Number(value('limit', 1000)) });
+  console.log(`Queued ${queued} file(s) for processing.`);
+  await startMediaWorkers();
+  // Wait for this process to drain the queue (other instances may help).
+  for (;;) {
+    const s = await queueStats();
+    process.stdout.write(`\r  queued ${s.queued}  running ${s.running}  failed ${s.failed}   `);
+    if (!s.queued && !s.running) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  stopMediaWorkers();
+  console.log('\nDone.');
+}
+
+async function jobs() {
+  const { queueStats } = await import('../services/mediaJobs.js');
+  console.log(JSON.stringify(await queueStats(), null, 2));
+  const failed = await allQuery(
+    `SELECT file_id, kind, attempts, last_error FROM media_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 20`
+  );
+  for (const j of failed) console.log(`  ! ${j.file_id} ${j.kind} (x${j.attempts}): ${j.last_error}`);
 }

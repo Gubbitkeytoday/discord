@@ -9,11 +9,15 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check
+  Calendar, Clock, MapPin, Volume2, Users, Plus, X, Loader2, Pencil, Ban, Bell, Check, Repeat, ImagePlus, Trash2
 } from 'lucide-react';
-import { api, get } from '../api';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { api, get, upload } from '../api';
+import ImageCropDialog from './server/ImageCropDialog.jsx';
+import LiveEventBanner from './server/LiveEventBanner.jsx';
+import ConfirmModal from './ConfirmModal';
+import { useDialog } from './settings/primitives';
 import { t, localeTag } from '../i18n/index.jsx';
+import { proxiedImageUrl } from '../utils/media';
 
 const fmtDate = (iso) => new Date(iso).toLocaleString(localeTag(), {
   weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
@@ -36,7 +40,8 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
   const [events, setEvents] = useState(null);
   const [showPast, setShowPast] = useState(false);
   const [editing, setEditing] = useState(null);   // null | 'new' | event
-  const dialogRef = useFocusTrap(true, onClose);
+  const [confirmCancel, setConfirmCancel] = useState(null);
+  const dialogRef = useDialog(onClose);
 
   const load = () => {
     if (!server?.id) return;
@@ -87,13 +92,10 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
     }
   };
 
+  // Throws on failure so the confirm dialog stays open and shows the error.
   const cancel = async (event) => {
-    try {
-      const fresh = await api(`/api/events/${event.id}`, { method: 'DELETE' });
-      setEvents((current) => current.map((e) => (e.id === event.id ? fresh : e)));
-    } catch (err) {
-      onToast?.(err.message, { type: 'error' });
-    }
+    const fresh = await api(`/api/events/${event.id}`, { method: 'DELETE' });
+    setEvents((current) => current.map((e) => (e.id === event.id ? fresh : e)));
   };
 
   const sorted = useMemo(() => {
@@ -159,6 +161,16 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
             </div>
           )}
 
+          {sorted.filter((e) => e.status === 'active').slice(0, 1).map((event) => (
+            <LiveEventBanner
+              key={`live-${event.id}`}
+              compact
+              event={event}
+              onOpen={() => document.getElementById(`event-${event.id}`)?.scrollIntoView({ block: 'nearest' })}
+              onJoin={event.channel_id && onJoinVoice ? () => onJoinVoice(event.channel_id) : undefined}
+            />
+          ))}
+
           {sorted.map((event) => (
             <EventCard
               key={event.id}
@@ -166,8 +178,8 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
               canManage={canManage}
               onInterest={() => toggleInterest(event)}
               onEdit={() => setEditing(event)}
-              onCancel={() => cancel(event)}
-              onJoin={event.channel_id && onJoinVoice ? () => onJoinVoice(event.channel_id) : null}
+              onCancel={() => setConfirmCancel(event)}
+              onJoin={Boolean(event.channel_id) && onJoinVoice ? () => onJoinVoice(event.channel_id) : null}
             />
           ))}
         </div>
@@ -179,24 +191,41 @@ export default function EventsPanel({ server, channels = [], canManage, socket, 
             {t('events.showPast')}
           </label>
         </footer>
-      </div>
 
-      {editing && (
-        <EventForm
-          server={server}
-          event={editing === 'new' ? null : editing}
-          voiceChannels={voiceChannels}
-          onClose={() => setEditing(null)}
-          onSaved={(saved) => {
-            setEvents((current) => {
-              const exists = current?.some((e) => e.id === saved.id);
-              return exists ? current.map((e) => (e.id === saved.id ? saved : e)) : [...(current ?? []), saved];
-            });
-            setEditing(null);
-          }}
-          onToast={onToast}
-        />
-      )}
+        {/* Rendered inside the panel's dialog element on purpose: a second
+            focus trap outside it made the two fight over focus (each pulling
+            it back on every focusin) until the stack overflowed, so the form
+            could never be typed into. */}
+        {editing && (
+          <EventForm
+            server={server}
+            event={editing === 'new' ? null : editing}
+            voiceChannels={voiceChannels}
+            onClose={() => setEditing(null)}
+            onSaved={(saved) => {
+              setEvents((current) => {
+                const exists = current?.some((e) => e.id === saved.id);
+                return exists ? current.map((e) => (e.id === saved.id ? saved : e)) : [...(current ?? []), saved];
+              });
+              setEditing(null);
+            }}
+            onToast={onToast}
+          />
+        )}
+
+        {confirmCancel && (
+          <ConfirmModal
+            title={confirmCancel.status === 'active'
+              ? t('events.endTitle', { name: confirmCancel.name })
+              : t('events.cancelTitle', { name: confirmCancel.name })}
+            body={confirmCancel.status === 'active' ? t('events.endBody') : t('events.cancelBody')}
+            confirmLabel={confirmCancel.status === 'active' ? t('events.end') : t('events.cancel')}
+            cancelLabel={t('common.back')}
+            onConfirm={() => cancel(confirmCancel)}
+            onClose={() => setConfirmCancel(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -209,10 +238,15 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
 
   return (
     <article
-      className={`rounded-lg border bg-d-surface p-4 ${
+      id={`event-${event.id}`}
+      className={`rounded-lg border bg-d-surface overflow-hidden ${
         live ? 'border-d-online' : over ? 'border-d-divider opacity-60' : 'border-d-divider'
       }`}
     >
+      {Boolean(event.image_url) && (
+        <img src={proxiedImageUrl(event.image_url)} alt="" className="w-full aspect-[5/2] object-cover" />
+      )}
+      <div className="p-4">
       <div className="flex items-start gap-4">
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold">
@@ -223,16 +257,21 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
             ) : over ? (
               <span className="text-d-text3">{t(`events.status_${event.status}`)}</span>
             ) : (
-              <span className="flex items-center gap-1 text-d-brand">
-                <Clock className="h-3.5 w-3.5" /> {relative(event.starts_at)}
+              <span className="flex items-center gap-1 text-d-link">
+                <Clock className="h-3.5 w-3.5" aria-hidden="true" /> {relative(event.starts_at)}
               </span>
             )}
             <span className="text-d-text3">· {fmtDate(event.starts_at)}</span>
+            {Boolean(event.recurrence) && (
+              <span className="flex items-center gap-1 text-d-text2">
+                · <Repeat className="h-3.5 w-3.5" aria-hidden="true" /> {t(`adm.repeat.${event.recurrence}`)}
+              </span>
+            )}
           </div>
 
           <h3 className="text-base font-semibold leading-snug text-d-strong">{event.name}</h3>
 
-          {event.description && (
+          {Boolean(event.description) && (
             <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-d-text2">{event.description}</p>
           )}
 
@@ -245,15 +284,12 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
             <span className="flex items-center gap-1">
               <Users className="h-3.5 w-3.5" /> {t('events.interestedCount', { count: event.interested_count })}
             </span>
-            {event.creator && (
+            {Boolean(event.creator) && (
               <span>{t('events.by', { name: event.creator.display_name || event.creator.username })}</span>
             )}
           </div>
         </div>
 
-        {event.image_url && (
-          <img src={event.image_url} alt="" className="h-20 w-32 shrink-0 rounded-md object-cover" />
-        )}
       </div>
 
       {!over && (
@@ -297,6 +333,7 @@ function EventCard({ event, canManage, onInterest, onEdit, onCancel, onJoin }) {
           )}
         </div>
       )}
+      </div>
     </article>
   );
 }
@@ -315,18 +352,39 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
   const [form, setForm] = useState({
     name: event?.name ?? '',
     description: event?.description ?? '',
-    where: event?.channel_id ? 'channel' : 'external',
+    // A new event defaults to the first voice channel when there is one.
+    where: event ? (event.channel_id ? 'channel' : 'external') : (voiceChannels.length ? 'channel' : 'external'),
     channel_id: event?.channel_id ?? voiceChannels[0]?.id ?? '',
     location: event?.location ?? '',
     starts_at: toLocalInput(event?.starts_at) || toLocalInput(new Date(Date.now() + 3600_000).toISOString()),
-    ends_at: toLocalInput(event?.ends_at)
+    ends_at: toLocalInput(event?.ends_at),
+    recurrence: event?.recurrence ?? '',
+    recurrence_until: event?.recurrence_until ? toLocalInput(event.recurrence_until).slice(0, 10) : '',
+    stage_topic: '',
+    image_url: event?.image_url ?? ''
   });
   const [busy, setBusy] = useState(false);
-  const dialogRef = useFocusTrap(true, onClose);
+  const [coverFile, setCoverFile] = useState(null);
+  const [uploadingCover, setUploadingCover] = useState(false);
+  const coverInput = React.useRef(null);
+
+  const uploadCover = async (file) => {
+    setCoverFile(null);
+    setUploadingCover(true);
+    try {
+      const data = await upload('/api/upload/banner', 'banner', file);
+      if (data?.url) set({ image_url: data.url });
+    } catch (err) {
+      onToast?.(err.message ?? t('chat.uploadFailed'), { type: 'error' });
+    } finally { setUploadingCover(false); }
+  };
+  const dialogRef = useDialog(onClose);
   const set = (patch) => setForm((c) => ({ ...c, ...patch }));
 
+  const isStage = form.where === 'channel' && voiceChannels.find((c) => c.id === form.channel_id)?.type === 'stage';
   const valid = form.name.trim() && form.starts_at
-    && (form.where === 'channel' ? form.channel_id : form.location.trim());
+    && (form.where === 'channel' ? form.channel_id : form.location.trim())
+    && (!form.recurrence || !form.recurrence_until || form.recurrence_until >= form.starts_at.slice(0, 10));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -338,12 +396,21 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
       channel_id: form.where === 'channel' ? form.channel_id : null,
       location: form.where === 'external' ? form.location.trim() : null,
       starts_at: new Date(form.starts_at).toISOString(),
-      ends_at: form.ends_at ? new Date(form.ends_at).toISOString() : null
+      ends_at: form.ends_at ? new Date(form.ends_at).toISOString() : null,
+      recurrence: form.recurrence || null,
+      image_url: form.image_url || null,
+      // "Until" is a day: the series may run through the end of it.
+      recurrence_until: form.recurrence && form.recurrence_until
+        ? new Date(`${form.recurrence_until}T23:59:59`).toISOString() : null
     };
     try {
       const saved = event
         ? await api(`/api/events/${event.id}`, { method: 'PATCH', body: payload })
         : await api(`/api/servers/${server.id}/events`, { method: 'POST', body: payload });
+      // A stage event sets the stage's topic, so listeners see what is on.
+      if (isStage && form.stage_topic.trim()) {
+        await api(`/api/channels/${form.channel_id}`, { method: 'PATCH', body: { topic: form.stage_topic.trim() } }).catch(() => {});
+      }
       onSaved(saved);
     } catch (err) {
       onToast?.(err.message, { type: 'error' });
@@ -372,6 +439,43 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
         </header>
 
         <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4">
+          <div>
+            <span className={label}>{t('srv.eventCover')}</span>
+            <div className="relative w-full aspect-[5/2] rounded-lg overflow-hidden border border-dashed border-d-divider bg-d-sunken">
+              {form.image_url ? (
+                <img src={proxiedImageUrl(form.image_url)} alt={t('srv.eventCover')} className="w-full h-full object-cover" />
+              ) : (
+                <button type="button" onClick={() => coverInput.current?.click()}
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-sm text-d-text2 hover:text-d-strong">
+                  <ImagePlus className="h-6 w-6" aria-hidden="true" /> {t('srv.eventCoverAdd')}
+                </button>
+              )}
+              {uploadingCover && (
+                <span className="absolute inset-0 flex items-center justify-center bg-black/50">
+                  <Loader2 className="h-5 w-5 animate-spin text-white" aria-label={t('common.uploading')} />
+                </span>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+              {form.image_url && (
+                <>
+                  <button type="button" onClick={() => coverInput.current?.click()} className="text-d-link hover:underline">{t('srv.changeImage')}</button>
+                  <button type="button" onClick={() => set({ image_url: '' })} className="inline-flex items-center gap-1 text-d-dangertext hover:underline">
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" /> {t('common.remove')}
+                  </button>
+                </>
+              )}
+              <span className="text-[11px] text-d-text2">{t('srv.eventCoverHint')}</span>
+            </div>
+            <input ref={coverInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+              aria-label={t('srv.eventCover')}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) setCoverFile(f); }} />
+            {coverFile && (
+              <ImageCropDialog file={coverFile} aspect={5 / 2} outputWidth={1600} title={t('srv.eventCover')}
+                onCancel={() => setCoverFile(null)} onConfirm={uploadCover} />
+            )}
+          </div>
+
           <label className="block">
             <span className={label}>{t('events.name')}</span>
             <input autoFocus value={form.name} maxLength={100} onChange={(e) => set({ name: e.target.value })}
@@ -402,7 +506,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
               <span className={label}>{t('events.channel')}</span>
               <select value={form.channel_id} onChange={(e) => set({ channel_id: e.target.value })}
                 className={`${field} cursor-pointer`}>
-                {voiceChannels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {voiceChannels.map((c) => <option key={c.id} value={c.id}>{c.type === 'stage' ? '📢 ' : '🔊 '}{c.name}</option>)}
               </select>
             </label>
           ) : (
@@ -426,6 +530,38 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
             </label>
           </div>
 
+          {isStage && (
+            <label className="block">
+              <span className={label}>{t('adm.stageTopic')}</span>
+              <input value={form.stage_topic} maxLength={120} onChange={(e) => set({ stage_topic: e.target.value })}
+                placeholder={form.name || t('adm.stageTopicPlaceholder')} className={field} />
+              <span className="mt-1 block text-[11px] text-d-text2">{t('adm.stageTopicHint')}</span>
+            </label>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block">
+              <span className={label}>{t('adm.repeat')}</span>
+              <select value={form.recurrence} onChange={(e) => set({ recurrence: e.target.value })} className={`${field} cursor-pointer`}>
+                <option value="">{t('adm.repeat.none')}</option>
+                <option value="daily">{t('adm.repeat.daily')}</option>
+                <option value="weekly">{t('adm.repeat.weekly')}</option>
+                <option value="biweekly">{t('adm.repeat.biweekly')}</option>
+                <option value="monthly">{t('adm.repeat.monthly')}</option>
+              </select>
+            </label>
+            {Boolean(form.recurrence) && (
+              <label className="block">
+                <span className={label}>{t('adm.repeatUntil')} <span className="font-normal normal-case text-d-text3">({t('common.optional')})</span></span>
+                <input type="date" value={form.recurrence_until} min={form.starts_at.slice(0, 10)}
+                  onChange={(e) => set({ recurrence_until: e.target.value })} className={field} />
+              </label>
+            )}
+          </div>
+          {Boolean(form.recurrence) && (
+            <p className="-mt-2 text-[11px] text-d-text2">{t('adm.repeatHint')}</p>
+          )}
+
           <label className="block">
             <span className={label}>{t('events.description')}</span>
             <textarea value={form.description} rows={3} maxLength={1000}
@@ -437,7 +573,7 @@ function EventForm({ server, event, voiceChannels, onClose, onSaved, onToast }) 
           <button type="button" onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-medium text-d-text2 hover:underline">
             {t('common.cancel')}
           </button>
-          <button type="submit" disabled={!valid || busy}
+          <button type="submit" disabled={!valid || busy || uploadingCover}
             className="flex items-center gap-2 rounded-lg bg-d-brand px-5 py-2 text-sm font-medium text-white
               hover:bg-d-brandhover disabled:cursor-not-allowed disabled:opacity-50">
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}

@@ -31,6 +31,82 @@ export const EVENT_LIMITS = {
 const HOUR_MS = 3600 * 1000;
 const nowIso = () => new Date().toISOString();
 
+/**
+ * Repeat rules, as in Discord's event form. The next occurrence is created
+ * when the current one completes (or is cancelled/ended by a moderator), so a
+ * series is always exactly one upcoming row — no calendar to expand.
+ */
+export const RECURRENCES = ['daily', 'weekly', 'biweekly', 'monthly'];
+
+/** The start of the occurrence after `iso`, in UTC. Monthly keeps the day of month (clamped). */
+export function nextOccurrence(iso, recurrence) {
+  const d = new Date(iso);
+  switch (recurrence) {
+    case 'daily': return new Date(d.getTime() + 24 * HOUR_MS).toISOString();
+    case 'weekly': return new Date(d.getTime() + 7 * 24 * HOUR_MS).toISOString();
+    case 'biweekly': return new Date(d.getTime() + 14 * 24 * HOUR_MS).toISOString();
+    case 'monthly': {
+      const day = d.getUTCDate();
+      const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1,
+        d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
+      const lastDay = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
+      next.setUTCDate(Math.min(day, lastDay));
+      return next.toISOString();
+    }
+    default: return null;
+  }
+}
+
+const toIso = (v) => (v ? new Date(v).toISOString() : null);
+
+/**
+ * Create the next occurrence of a recurring event, once. Occurrences in the
+ * past (the server was down for weeks) are skipped, not back-filled. Returns
+ * the new row id, or null when the series is over.
+ */
+async function scheduleNext(event) {
+  if (!event.recurrence || !RECURRENCES.includes(event.recurrence)) return null;
+  const series = event.series_id || event.id;
+  const duration = event.ends_at ? new Date(event.ends_at) - new Date(event.starts_at) : null;
+  let start = nextOccurrence(toIso(event.starts_at), event.recurrence);
+  // Skip occurrences that are already over; cap the loop for safety.
+  for (let i = 0; i < 500 && start && new Date(start).getTime() + (duration ?? HOUR_MS) <= Date.now(); i += 1) {
+    start = nextOccurrence(start, event.recurrence);
+  }
+  if (!start) return null;
+  const until = toIso(event.recurrence_until);
+  if (until && start > until) return null;
+
+  // Idempotent: two readers settling the same event create one occurrence.
+  const already = await getQuery(
+    `SELECT id FROM scheduled_events WHERE series_id = ? AND starts_at >= ? AND status IN ('scheduled', 'active')`,
+    [series, start]
+  );
+  if (already) return already.id;
+
+  const id = generateId();
+  await runQuery(
+    `INSERT INTO scheduled_events
+       (id, server_id, channel_id, creator_id, name, description, location, image_url, starts_at, ends_at,
+        recurrence, recurrence_until, series_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, event.server_id, event.channel_id ?? null, event.creator_id ?? null, event.name, event.description ?? null,
+     event.location ?? null, event.image_url ?? null, start,
+     duration !== null ? new Date(new Date(start).getTime() + duration).toISOString() : null,
+     event.recurrence, until, series]
+  );
+  // Interest carries over: people who wanted the weekly class want next week's.
+  await runQuery(
+    `INSERT INTO event_interest (event_id, user_id)
+     SELECT ?, user_id FROM event_interest WHERE event_id = ? ON CONFLICT DO NOTHING`,
+    [id, event.id]
+  );
+  if (!event.series_id) {
+    await runQuery(`UPDATE scheduled_events SET series_id = ? WHERE id = ?`, [series, event.id]);
+  }
+  return id;
+}
+
 /* --- permissions -------------------------------------------------------------- */
 
 async function assertMember(serverId, userId) {
@@ -70,6 +146,7 @@ async function settle(event) {
       `UPDATE scheduled_events SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
       [next, nowIso(), event.id, event.status]
     );
+    if (next === 'completed') await scheduleNext(event);
     return { ...event, status: next };
   }
   return event;
@@ -104,6 +181,9 @@ async function shape(row, viewerId) {
     image_url: settled.image_url,
     starts_at: settled.starts_at,
     ends_at: settled.ends_at,
+    recurrence: settled.recurrence ?? null,
+    recurrence_until: settled.recurrence_until ?? null,
+    series_id: settled.series_id ?? null,
     status: settled.status,
     interested_count: count?.n ?? 0,
     interested: Boolean(mine),
@@ -125,9 +205,14 @@ export async function getEvent(eventId, viewerId = null) {
  */
 export async function listEvents(serverId, { viewerId = null, includePast = false } = {}) {
   await assertMember(serverId, viewerId);
-  const rows = await allQuery(
+  const query = () => allQuery(
     `SELECT * FROM scheduled_events WHERE server_id = ? ORDER BY starts_at ASC`, [serverId]
   );
+  let rows = await query();
+  // Settling can complete a recurring event and create its next occurrence;
+  // read again so that occurrence is in this answer, not the next one.
+  for (const row of rows) await settle(row);
+  rows = await query();
   const shaped = [];
   for (const row of rows) {
     const event = await shape(row, viewerId);
@@ -183,6 +268,24 @@ function validate(input, { partial = false } = {}) {
   }
 
   if (input.image_url !== undefined) out.image_url = input.image_url || null;
+
+  if (input.recurrence !== undefined) {
+    const recurrence = input.recurrence || null;
+    if (recurrence && !RECURRENCES.includes(recurrence)) {
+      throw new ApiError(`recurrence must be one of ${RECURRENCES.join(', ')}`, { code: 'EVENT_BAD_RECURRENCE' });
+    }
+    out.recurrence = recurrence;
+  }
+  if (input.recurrence_until !== undefined) {
+    if (!input.recurrence_until) out.recurrence_until = null;
+    else {
+      const until = new Date(input.recurrence_until);
+      if (Number.isNaN(until.getTime())) {
+        throw new ApiError('recurrence_until must be a valid date', { code: 'EVENT_BAD_RECURRENCE' });
+      }
+      out.recurrence_until = until.toISOString();
+    }
+  }
   if (input.channel_id !== undefined) out.channel_id = input.channel_id || null;
 
   if (!partial || input.starts_at !== undefined) {
@@ -242,17 +345,24 @@ export async function createEvent({ serverId, userId, input }) {
     throw new ApiError('The start time is in the past', { code: 'EVENT_IN_PAST' });
   }
 
+  if (clean.recurrence_until && clean.recurrence_until < clean.starts_at) {
+    throw new ApiError('The repeat must end after the first event', { code: 'EVENT_BAD_RECURRENCE' });
+  }
+
   const id = generateId();
   await runQuery(
     `INSERT INTO scheduled_events
-       (id, server_id, channel_id, creator_id, name, description, location, image_url, starts_at, ends_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, server_id, channel_id, creator_id, name, description, location, image_url, starts_at, ends_at,
+        recurrence, recurrence_until, series_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, serverId, clean.channel_id ?? null, userId, clean.name, clean.description ?? null,
-     clean.location ?? null, clean.image_url ?? null, clean.starts_at, clean.ends_at ?? null]
+     clean.location ?? null, clean.image_url ?? null, clean.starts_at, clean.ends_at ?? null,
+     clean.recurrence ?? null, clean.recurrence ? clean.recurrence_until ?? null : null,
+     clean.recurrence ? id : null]
   );
 
   // The creator is interested by definition.
-  await runQuery(`INSERT OR IGNORE INTO event_interest (event_id, user_id) VALUES (?, ?)`, [id, userId]);
+  await runQuery(`INSERT INTO event_interest (event_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [id, userId]);
   return getEvent(id, userId);
 }
 
@@ -275,6 +385,8 @@ export async function updateEvent({ eventId, userId, patch }) {
     throw new ApiError('Choose a voice channel or give a location', { code: 'EVENT_NO_PLACE' });
   }
 
+  // Turning a one-off event into a series makes it the series' first row.
+  if (clean.recurrence && !row.series_id) clean.series_id = row.id;
   const sets = Object.keys(clean).map((key) => `${key} = ?`);
   if (sets.length) {
     await runQuery(
@@ -286,7 +398,7 @@ export async function updateEvent({ eventId, userId, patch }) {
 }
 
 /** Cancel, or for an already-live event, end it. Both are terminal. */
-export async function cancelEvent({ eventId, userId }) {
+export async function cancelEvent({ eventId, userId, stopSeries = false }) {
   const row = await getQuery(`SELECT * FROM scheduled_events WHERE id = ?`, [eventId]);
   if (!row) throw ApiError.notFound('Event');
   await assertCanManage(row.server_id, userId);
@@ -297,6 +409,9 @@ export async function cancelEvent({ eventId, userId }) {
     `UPDATE scheduled_events SET status = ?, updated_at = ? WHERE id = ?`,
     [target, nowIso(), eventId]
   );
+  // Ending or cancelling one occurrence of a series skips just that one;
+  // `series: true` (or clearing the repeat first) stops the whole series.
+  if (!stopSeries && settled.status !== 'completed' && settled.status !== 'cancelled') await scheduleNext(settled);
   return getEvent(eventId, userId);
 }
 
@@ -312,7 +427,7 @@ export async function setInterest({ eventId, userId, interested }) {
   }
 
   if (interested) {
-    await runQuery(`INSERT OR IGNORE INTO event_interest (event_id, user_id) VALUES (?, ?)`, [eventId, userId]);
+    await runQuery(`INSERT INTO event_interest (event_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`, [eventId, userId]);
   } else {
     await runQuery(`DELETE FROM event_interest WHERE event_id = ? AND user_id = ?`, [eventId, userId]);
   }

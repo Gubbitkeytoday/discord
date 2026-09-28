@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 480" width="300" height="480" preserveAspectRatio="xMidYMid slice">
+<defs><linearGradient id="ln-b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fdba74"/><stop offset="1" stop-color="#ea580c"/></linearGradient><radialGradient id="ln-glow"><stop offset="0" stop-color="#fde68a" stop-opacity=".55"/><stop offset="1" stop-color="#fde68a" stop-opacity="0"/></radialGradient></defs>
+<style>.ln{animation:ln-rise 3s cubic-bezier(.25,.8,.35,1) 1 both}@keyframes ln-rise{0%{opacity:0;transform:translateY(420px)}15%{opacity:1}100%{opacity:.9;transform:translateY(0)}}@media (prefers-reduced-motion: reduce){*{animation:none!important}}</style>
+<g transform="translate(40 70) scale(0.9)"><g class="ln" style="animation-delay:0.00s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(95 40) scale(0.7)"><g class="ln" style="animation-delay:0.12s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(150 95) scale(1)"><g class="ln" style="animation-delay:0.24s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(205 55) scale(0.8)"><g class="ln" style="animation-delay:0.36s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(260 85) scale(0.95)"><g class="ln" style="animation-delay:0.48s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(70 150) scale(0.6)"><g class="ln" style="animation-delay:0.60s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g><g transform="translate(230 140) scale(0.65)"><g class="ln" style="animation-delay:0.72s">
+<circle r="16" fill="url(#ln-glow)"/>
+<path d="M-8-11H8L11 9H-11Z" fill="url(#ln-b)"/><path d="M-11 9H11" stroke="#fde68a" stroke-width="1.4"/>
+<ellipse cy="9.5" rx="5" ry="1.8" fill="#fef9c3"/></g></g>
+</svg>
